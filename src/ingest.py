@@ -227,6 +227,27 @@ def ingest_pdf(
             children.extend(_split_child_chunks(parent))
 
     if not parents:
+        try:
+            from pdfminer.high_level import extract_text
+        except Exception as exc:  # pragma: no cover - dependency runtime
+            raise RuntimeError(
+                "pdfminer.six is required for fallback PDF extraction."
+            ) from exc
+
+        fallback_text = (extract_text(str(path)) or "").strip()
+        if not fallback_text:
+            raise ValueError("No parent chunks produced from PDF content.")
+
+        section = _Section(header_path="Document", text=fallback_text)
+        for parent in _split_parent_chunks(
+            section,
+            source_id=source_id.strip(),
+            page_number=None,
+        ):
+            parents.append(parent)
+            children.extend(_split_child_chunks(parent))
+
+    if not parents:
         raise ValueError("No parent chunks produced from PDF content.")
     if not children:
         raise ValueError("No child chunks produced from PDF content.")
