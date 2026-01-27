@@ -65,6 +65,10 @@ _INTENT_PATTERNS: dict[Intent, list[re.Pattern]] = {
     ],
     # ANALYZE: Critique, controversy, evaluation
     Intent.ANALYZE: [
+        re.compile(r"\bhow\s+does\b", re.IGNORECASE),
+        re.compile(r"\bin\s+what\s+way\b", re.IGNORECASE),
+        re.compile(r"\bcompare\b", re.IGNORECASE),
+        re.compile(r"\bcritique\b", re.IGNORECASE),
         re.compile(r"\bwhy\b.*\b(controversial|debate|disagree|critic)", re.IGNORECASE),
         re.compile(r"\bcontrovers", re.IGNORECASE),
         re.compile(r"\bcritici[sz]", re.IGNORECASE),
@@ -95,6 +99,29 @@ _HEURISTIC_CONFIDENCE = {
     "weak_match": 0.50,    # Ambiguous match
 }
 
+_TECHNICAL_TERM_HINTS = {
+    "stimulus",
+    "reinforcement",
+    "skinner",
+}
+
+
+def _has_technical_terms(query: str) -> bool:
+    """Heuristic for technical nouns or quoted terms in a query."""
+    if re.search(r"['\"`].+?['\"`]", query):
+        return True
+    if re.search(r"\b[A-Z][a-z]{2,}\b", query):
+        return True
+    lowered = query.lower()
+    return any(term in lowered for term in _TECHNICAL_TERM_HINTS)
+
+
+def _is_technical_how_why(query: str) -> bool:
+    """Detect technical 'How/Why' questions to bias ANALYZE intent."""
+    if not re.match(r"^\s*(how|why)\b", query, re.IGNORECASE):
+        return False
+    return _has_technical_terms(query)
+
 
 def _classify_heuristic(query: str) -> IntentResult:
     """
@@ -109,6 +136,10 @@ def _classify_heuristic(query: str) -> IntentResult:
         for pattern in patterns:
             if pattern.search(query):
                 scores[intent] += 1
+
+    analyze_bias = _is_technical_how_why(query)
+    if analyze_bias:
+        scores[Intent.ANALYZE] += 2
     
     # Find best match
     best_intent = max(scores, key=lambda k: scores[k])
@@ -127,24 +158,33 @@ def _classify_heuristic(query: str) -> IntentResult:
     
     if len(matching_intents) > 1 and scores[best_intent] == 1:
         # Ambiguous - single match but multiple intents detected
+        confidence = _HEURISTIC_CONFIDENCE["weak_match"]
+        if best_intent == Intent.ANALYZE and analyze_bias:
+            confidence = min(0.95, confidence + 0.15)
         return IntentResult(
             intent=best_intent,
-            confidence=_HEURISTIC_CONFIDENCE["weak_match"],
+            confidence=confidence,
             method="heuristic",
         )
     
     if best_score >= 2:
         # Strong match - multiple patterns matched
+        confidence = _HEURISTIC_CONFIDENCE["strong_match"]
+        if best_intent == Intent.ANALYZE and analyze_bias:
+            confidence = min(0.95, confidence + 0.10)
         return IntentResult(
             intent=best_intent,
-            confidence=_HEURISTIC_CONFIDENCE["strong_match"],
+            confidence=confidence,
             method="heuristic",
         )
     
     # Single clear match
+    confidence = _HEURISTIC_CONFIDENCE["single_match"]
+    if best_intent == Intent.ANALYZE and analyze_bias:
+        confidence = min(0.95, confidence + 0.15)
     return IntentResult(
         intent=best_intent,
-        confidence=_HEURISTIC_CONFIDENCE["single_match"],
+        confidence=confidence,
         method="heuristic",
     )
 

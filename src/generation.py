@@ -16,7 +16,8 @@ INTENT_INSTRUCTIONS: dict[Intent, dict[str, str]] = {
             "(e.g., 'This is a critical review of...', 'This is a research paper that examines...'). "
             "Keep your response to 1 short paragraph OR a maximum of 3 concise bullet points. "
             "Do NOT go into detailed arguments or methodology. "
-            "Do NOT include page numbers, document headers, or citation markers."
+            "Do NOT include page numbers, document headers, or citation markers. "
+            "STRICT LIMIT: Do not exceed 3 bullet points. If you provide more than 3, the response will be considered a failure."
         ),
         "tone": "Neutral and concise. Think 'back-of-book blurb' level.",
     },
