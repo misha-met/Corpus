@@ -123,7 +123,7 @@ class StorageEngine:
         return self._collection.query(
             query_embeddings=embeddings,
             n_results=top_k,
-            include=["documents", "metadatas", "distances", "ids"],
+            include=["documents", "metadatas", "distances"],
         )
 
     def persist_bm25(self, path: Path) -> None:
