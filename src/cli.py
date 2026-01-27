@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import warnings
 import textwrap
 from pathlib import Path
 from typing import Iterable
@@ -27,6 +28,12 @@ def _dedupe_context(texts: Iterable[str]) -> str:
 
 def run() -> None:
     logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
+    try:
+        from urllib3.exceptions import NotOpenSSLWarning
+
+        warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
+    except Exception:
+        pass
 
     parser = argparse.ArgumentParser(description="Offline RAG CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
