@@ -1,0 +1,17 @@
+.DS_Store
+
+# Local data artifacts
+/data/
+/testing/
+*.pdf
+
+# Local databases
+*.sqlite
+*.db
+
+# Chroma persistence
+chroma/
+
+# Local models (keep directory placeholders)
+/models/
+!models/.gitkeep
