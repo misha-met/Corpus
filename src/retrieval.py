@@ -3,6 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
+_BOILERPLATE_PATTERNS = (
+    "as an ai",
+    "as a language model",
+    "i do not have moral beliefs",
+    "i cannot be considered",
+)
+
 from .storage import StorageEngine
 
 
@@ -135,7 +142,9 @@ class RetrievalEngine:
 
         reranked = []
         for item, score in zip(items, scores):
-            reranked.append({**item, "rerank_score": float(score)})
+            text = (item.get("rerank_text") or item.get("text") or "").lower()
+            penalty = 0.5 if any(pat in text for pat in _BOILERPLATE_PATTERNS) else 0.0
+            reranked.append({**item, "rerank_score": float(score) - penalty})
         reranked.sort(key=lambda item: item["rerank_score"], reverse=True)
         return reranked
 
@@ -188,7 +197,24 @@ class RetrievalEngine:
                     item["rerank_text"] = parent_cache[parent_id]
 
         reranked = self._rerank(query, fused)
-        final = reranked[:top_k_final]
+        final: list[dict[str, Any]] = []
+        seen_parents: set[str] = set()
+        seen_children: set[str] = set()
+        for item in reranked:
+            child_id = item.get("id")
+            if isinstance(child_id, str):
+                if child_id in seen_children:
+                    continue
+                seen_children.add(child_id)
+            metadata = item.get("metadata") or {}
+            parent_id = metadata.get("parent_id")
+            if isinstance(parent_id, str):
+                if parent_id in seen_parents:
+                    continue
+                seen_parents.add(parent_id)
+            final.append(item)
+            if len(final) >= top_k_final:
+                break
 
         results: list[RetrievalResult] = []
         for item in final:
