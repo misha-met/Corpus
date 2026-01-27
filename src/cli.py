@@ -6,7 +6,7 @@ from typing import Iterable
 
 from .config import select_model_config
 from .generator import MlxGenerator
-from .ingest import ingest_markdown_to_storage
+from .ingest import ingest_file_to_storage
 from .retrieval import RetrievalEngine
 from .storage import StorageConfig, StorageEngine
 
@@ -73,7 +73,7 @@ def run() -> None:
     bm25_path = Path(args.bm25)
 
     if args.command == "ingest":
-        parents_count, children_count = ingest_markdown_to_storage(
+        parents_count, children_count = ingest_file_to_storage(
             args.file,
             source_id=args.source_id,
             page_number=args.page_number,

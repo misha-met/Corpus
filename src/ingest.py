@@ -188,6 +188,52 @@ def ingest_markdown(
     return parents, children
 
 
+def ingest_pdf(
+    file_path: str | Path,
+    *,
+    source_id: str,
+) -> tuple[list[ParentChunk], list[ChildChunk]]:
+    path = Path(file_path)
+    if not source_id or not source_id.strip():
+        raise ValueError("source_id must be a non-empty string.")
+    if not path.exists():
+        raise FileNotFoundError(f"PDF file not found: {path}")
+    if not path.is_file():
+        raise ValueError(f"Path is not a file: {path}")
+
+    try:
+        from pypdf import PdfReader
+    except Exception as exc:  # pragma: no cover - dependency runtime
+        raise RuntimeError("pypdf is required to ingest PDF files.") from exc
+
+    reader = PdfReader(str(path))
+    if not reader.pages:
+        raise ValueError("PDF file has no pages.")
+
+    parents: list[ParentChunk] = []
+    children: list[ChildChunk] = []
+
+    for index, page in enumerate(reader.pages, start=1):
+        page_text = (page.extract_text() or "").strip()
+        if not page_text:
+            continue
+        section = _Section(header_path="Document", text=page_text)
+        for parent in _split_parent_chunks(
+            section,
+            source_id=source_id.strip(),
+            page_number=index,
+        ):
+            parents.append(parent)
+            children.extend(_split_child_chunks(parent))
+
+    if not parents:
+        raise ValueError("No parent chunks produced from PDF content.")
+    if not children:
+        raise ValueError("No child chunks produced from PDF content.")
+
+    return parents, children
+
+
 def _coerce_embeddings(raw_embeddings: object) -> list[list[float]]:
     if hasattr(raw_embeddings, "tolist"):
         return raw_embeddings.tolist()
@@ -210,6 +256,43 @@ def ingest_markdown_to_storage(
         source_id=source_id,
         page_number=page_number,
     )
+
+    texts = [child.text for child in children]
+    try:
+        embeddings = embedding_model.encode(texts, normalize_embeddings=True)
+    except Exception as exc:  # pragma: no cover - dependency runtime
+        raise RuntimeError("Embedding model encode failed.") from exc
+
+    storage.add_parents(parents)
+    storage.add_children(children, embeddings=_coerce_embeddings(embeddings))
+
+    if bm25_path is not None:
+        storage.persist_bm25(bm25_path)
+
+    return len(parents), len(children)
+
+
+def ingest_file_to_storage(
+    file_path: str | Path,
+    *,
+    source_id: str,
+    page_number: Optional[int],
+    storage: StorageEngine,
+    embedding_model: object,
+    bm25_path: Optional[Path] = None,
+) -> tuple[int, int]:
+    path = Path(file_path)
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        parents, children = ingest_pdf(path, source_id=source_id)
+    elif suffix in {".md", ".markdown"}:
+        parents, children = ingest_markdown(
+            path,
+            source_id=source_id,
+            page_number=page_number,
+        )
+    else:
+        raise ValueError(f"Unsupported file type: {path.suffix}")
 
     texts = [child.text for child in children]
     try:

@@ -4,3 +4,4 @@ pydantic
 sentence-transformers
 FlagEmbedding
 mlx-lm
+pypdf
