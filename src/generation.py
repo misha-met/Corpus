@@ -9,7 +9,8 @@ def build_prompt(context: str, question: str) -> str:
         "1. Start directly with bullet points. Do NOT write an introduction paragraph.\n"
         "2. Provide exactly 3-5 distinct bullet points.\n"
         "3. Stop writing immediately after the last bullet point.\n"
-        "4. Do not repeat the same point in different words."
+        "4. Do not repeat the same point in different words.\n"
+        "Terminate response immediately after the last point."
     )
 
     return (
