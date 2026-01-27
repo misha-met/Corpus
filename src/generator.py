@@ -87,10 +87,10 @@ class MlxGenerator:
 
         if model_size is not None:
             if model_size < 30:
-                max_tokens = max_tokens or 220
-                repetition_penalty = repetition_penalty or 1.2
-                temperature = temperature or 0.1
-                top_p = top_p or 0.8
+                max_tokens = max_tokens or 140
+                repetition_penalty = repetition_penalty or 1.25
+                temperature = temperature or 0.05
+                top_p = top_p or 0.7
             elif model_size >= 70:
                 repetition_penalty = repetition_penalty or 1.05
                 temperature = temperature or 0.2
