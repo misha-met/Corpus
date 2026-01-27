@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import textwrap
 from pathlib import Path
 from typing import Iterable
 
@@ -45,6 +46,11 @@ def run() -> None:
     query_parser.add_argument("--collection", default="child_chunks", help="Chroma collection name")
     query_parser.add_argument("--tier", default=None, help="Override hardware tier")
     query_parser.add_argument("--model", default="models/llm", help="Path to mlx-lm model")
+    query_parser.add_argument(
+        "--no-generate",
+        action="store_true",
+        help="Only show retrieved context without LLM generation",
+    )
 
     args = parser.parse_args()
 
@@ -98,6 +104,17 @@ def run() -> None:
     context = _dedupe_context(
         [result.parent_text for result in results if result.parent_text]
     )
+
+    if args.no_generate:
+        print("Top retrieved context:\n")
+        for idx, result in enumerate(results, start=1):
+            header_path = result.metadata.get("header_path", "")
+            snippet = (result.parent_text or result.text or "").strip()
+            snippet = textwrap.shorten(snippet, width=600, placeholder="...")
+            print(f"[{idx}] score={result.score:.4f} header={header_path}")
+            print(snippet)
+            print("-" * 80)
+        return
 
     prompt = f"Context:\n{context}\n\nQuestion: {args.query}\nAnswer:"
 
