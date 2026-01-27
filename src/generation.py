@@ -5,7 +5,7 @@ from typing import Optional
 from .intent import Intent
 
 
-# Intent-specific instructions (v1.1 - with overview for high-level queries)
+# Intent-specific instructions (v1.2 - with meta-commentary suppression)
 # NOTE: Bullet points are NOT enforced by default. Format is flexible and intent-driven.
 INTENT_INSTRUCTIONS: dict[Intent, dict[str, str]] = {
     # OVERVIEW: Bird's-eye view - concise, purpose-driven
@@ -16,7 +16,7 @@ INTENT_INSTRUCTIONS: dict[Intent, dict[str, str]] = {
             "(e.g., 'This is a critical review of...', 'This is a research paper that examines...'). "
             "Keep your response to 1 short paragraph OR a maximum of 3 concise bullet points. "
             "Do NOT go into detailed arguments or methodology. "
-            "Do NOT include page numbers, document headers, or citation markers in the text."
+            "Do NOT include page numbers, document headers, or citation markers."
         ),
         "tone": "Neutral and concise. Think 'back-of-book blurb' level.",
     },
@@ -31,28 +31,41 @@ INTENT_INSTRUCTIONS: dict[Intent, dict[str, str]] = {
         ),
         "tone": "Academic but accessible.",
     },
-    # EXPLAIN: Simple language for non-experts
+    # EXPLAIN: Simple language for non-experts (analogy-focused)
     Intent.EXPLAIN: {
         "task": "Explain the content in simple, non-technical language.",
-        "format": "Use short paragraphs. Avoid jargon. Use analogies if helpful. Do NOT include page numbers.",
+        "format": (
+            "Use short paragraphs. Avoid jargon. Use at least one analogy to clarify the main concept. "
+            "The analogy should be the core of your explanation. "
+            "Stop immediately after your final clarifying sentence. Do NOT include page numbers."
+        ),
         "tone": "Conversational, as if explaining to a curious friend.",
     },
-    # ANALYZE: Critique, controversy, evaluation
+    # ANALYZE: Critique, controversy, evaluation (synthesis-focused)
     Intent.ANALYZE: {
-        "task": "Analyze the specific aspect the user is asking about.",
-        "format": "Present evidence and reasoning. Acknowledge multiple perspectives if relevant.",
+        "task": "Analyze and synthesize the specific aspect the user is asking about.",
+        "format": (
+            "Present a synthesized analysis with evidence and reasoning - do NOT use bullet points. "
+            "Write in flowing paragraphs that connect ideas. "
+            "Acknowledge multiple perspectives if relevant."
+        ),
         "tone": "Thoughtful and balanced.",
     },
 }
 
-# System message with grounding rules - placed BEFORE context to prevent continuation
+# System message with grounding rules and meta-commentary suppression
 _SYSTEM_MESSAGE = """You are a helpful research assistant. Follow these rules strictly:
 
 1. Base your answer ONLY on the provided context below.
 2. Answer the user's SPECIFIC question - do not default to a generic summary.
 3. If the context doesn't contain relevant information, say so.
-4. Stop generating after completing your answer. Do not continue with follow-up text.
-5. Never repeat instructions or add meta-commentary about your response."""
+4. Stop generating after completing your answer.
+
+CRITICAL: Provide the response directly. Do NOT include:
+- Meta-commentary about your response
+- Self-evaluations or descriptions of how you addressed the prompt
+- Phrases like "Answer ends here", "This response reflects...", "Note:", "Overall,"
+- Any text explaining what you did or why"""
 
 
 def build_prompt(

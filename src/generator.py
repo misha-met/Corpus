@@ -14,16 +14,30 @@ class GenerationConfig:
     stop_tokens: Optional[list[str]] = None
 
 
-# Default stop tokens to prevent runaway generation
+# Default stop tokens to prevent runaway generation and meta-commentary
 DEFAULT_STOP_TOKENS = [
+    # Model-specific end tokens
     "<|endoftext|>",
     "<|im_end|>",
     "<|eot_id|>",
+    # Conversation markers
     "Human:",
     "Assistant:",
     "user@Mac",
+    # Prompt continuation markers
     "\n\nQuestion:",
     "\n\nContext:",
+    # Meta-commentary phrases (model explaining its own response)
+    "Answer ends here",
+    "This answer acknowledges",
+    "This answer was generated",
+    "This response reflects",
+    "This response was",
+    "Note:",
+    "Overall,",
+    "In summary,",  # When used as meta-tag after actual content
+    "To summarize,",
+    "In conclusion,",
 ]
 
 

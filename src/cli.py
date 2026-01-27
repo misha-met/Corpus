@@ -60,14 +60,53 @@ _REPETITION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Common "chatter" phrases that slip past stop tokens (case-insensitive)
+_CHATTER_PHRASES = [
+    "answer ends here",
+    "this answer acknowledges",
+    "this answer was generated",
+    "this response reflects",
+    "this response was",
+    "this explanation covers",
+    "this summary covers",
+    "this analysis covers",
+    "i hope this helps",
+    "let me know if",
+    "feel free to ask",
+    "is there anything else",
+]
+
+
+def _strip_chatter(text: str) -> str:
+    """
+    Remove common trailing chatter phrases that may slip past stop tokens.
+    Case-insensitive matching.
+    """
+    if not text:
+        return text
+    
+    result = text
+    text_lower = result.lower()
+    
+    for phrase in _CHATTER_PHRASES:
+        idx = text_lower.rfind(phrase)
+        if idx != -1:
+            # Only strip if it's near the end (last 20% of text)
+            if idx > len(result) * 0.8:
+                result = result[:idx].rstrip()
+                text_lower = result.lower()
+    
+    return result
+
 
 def _sanitize_output(text: str) -> str:
     """
     Post-process LLM output to remove noise and artifacts.
     
     - Strips trailing instruction-like phrases
+    - Removes meta-commentary and chatter
     - Truncates repeating headers/page citations
-    - Removes trailing whitespace
+    - Cleans up incomplete sentences
     """
     if not text:
         return text
@@ -77,6 +116,9 @@ def _sanitize_output(text: str) -> str:
     # Remove instruction leakage from the end
     for pattern in _INSTRUCTION_PATTERNS:
         result = pattern.sub("", result)
+    
+    # Remove chatter phrases
+    result = _strip_chatter(result)
     
     # Remove repeating headers/page numbers
     result = _REPETITION_PATTERN.sub(r"\1", result)
