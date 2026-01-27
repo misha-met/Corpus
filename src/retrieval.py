@@ -201,6 +201,13 @@ class RetrievalEngine:
         seen_parents: set[str] = set()
         seen_children: set[str] = set()
         for item in reranked:
+            text_for_filter = (
+                item.get("rerank_text")
+                or item.get("text")
+                or ""
+            ).lower()
+            if any(pat in text_for_filter for pat in _BOILERPLATE_PATTERNS):
+                continue
             child_id = item.get("id")
             if isinstance(child_id, str):
                 if child_id in seen_children:
