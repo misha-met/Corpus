@@ -235,20 +235,43 @@ def ingest_pdf(
             ) from exc
 
         fallback_text = (extract_text(str(path)) or "").strip()
-        if not fallback_text:
-            raise ValueError("No parent chunks produced from PDF content.")
-
-        section = _Section(header_path="Document", text=fallback_text)
-        for parent in _split_parent_chunks(
-            section,
-            source_id=source_id.strip(),
-            page_number=None,
-        ):
-            parents.append(parent)
-            children.extend(_split_child_chunks(parent))
+        if fallback_text:
+            section = _Section(header_path="Document", text=fallback_text)
+            for parent in _split_parent_chunks(
+                section,
+                source_id=source_id.strip(),
+                page_number=None,
+            ):
+                parents.append(parent)
+                children.extend(_split_child_chunks(parent))
 
     if not parents:
-        raise ValueError("No parent chunks produced from PDF content.")
+        try:
+            import fitz  # PyMuPDF
+        except Exception as exc:  # pragma: no cover - dependency runtime
+            raise RuntimeError(
+                "PyMuPDF is required for additional PDF extraction fallback."
+            ) from exc
+
+        doc = fitz.open(str(path))
+        for index in range(doc.page_count):
+            page = doc.load_page(index)
+            page_text = (page.get_text("text") or "").strip()
+            if not page_text:
+                continue
+            section = _Section(header_path="Document", text=page_text)
+            for parent in _split_parent_chunks(
+                section,
+                source_id=source_id.strip(),
+                page_number=index + 1,
+            ):
+                parents.append(parent)
+                children.extend(_split_child_chunks(parent))
+
+    if not parents:
+        raise ValueError(
+            "No extractable text found in PDF. This file may require OCR."
+        )
     if not children:
         raise ValueError("No child chunks produced from PDF content.")
 

@@ -6,3 +6,4 @@ FlagEmbedding
 mlx-lm
 pypdf
 pdfminer.six
+PyMuPDF
