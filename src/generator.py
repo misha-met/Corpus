@@ -54,15 +54,23 @@ class MlxGenerator:
                 return logits
 
             logits_np = mx.array(logits)
-            for token_id in set(int(t) for t in token_ids):
-                token_logit = logits_np[..., token_id]
-                adjusted = mx.where(
-                    token_logit > 0,
-                    token_logit / penalty,
-                    token_logit * penalty,
-                )
-                logits_np = logits_np.at[..., token_id].set(adjusted)
-            return logits_np
+            token_ids = sorted(set(int(t) for t in token_ids))
+            cols = mx.take(logits_np, mx.array(token_ids), axis=-1)
+            adjusted = mx.where(
+                cols > 0,
+                cols / penalty,
+                cols * penalty,
+            )
+            try:
+                import numpy as np
+
+                logits_np_np = logits_np.astype("float32").tolist()
+                adjusted_np = adjusted.astype("float32").tolist()
+                for col_idx, token_id in enumerate(token_ids):
+                    logits_np_np[0][token_id] = adjusted_np[0][col_idx]
+                return mx.array(logits_np_np)
+            except Exception:
+                return logits_np
 
         return _processor
 
