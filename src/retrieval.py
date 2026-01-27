@@ -121,7 +121,7 @@ class RetrievalEngine:
         if self._reranker is None or not items:
             return items
 
-        pairs = [(query, item.get("text", "")) for item in items]
+        pairs = [(query, item.get("rerank_text", item.get("text", ""))) for item in items]
 
         try:
             if hasattr(self._reranker, "compute_score"):
@@ -153,6 +153,18 @@ class RetrievalEngine:
 
         fused = self._rrf_fuse(dense, sparse)[:top_k_fused]
 
+        missing_ids = [
+            item["id"]
+            for item in fused
+            if "text" not in item or "metadata" not in item
+        ]
+        if missing_ids:
+            fetched = self._storage.get_children_by_ids(missing_ids)
+            for item in fused:
+                if item["id"] in fetched:
+                    item.setdefault("text", fetched[item["id"]].get("text"))
+                    item.setdefault("metadata", fetched[item["id"]].get("metadata"))
+
         for item in fused:
             if "text" not in item or "metadata" not in item:
                 lookup = next(
@@ -162,6 +174,18 @@ class RetrievalEngine:
                 if lookup:
                     item.setdefault("text", lookup.get("text"))
                     item.setdefault("metadata", lookup.get("metadata"))
+
+        parent_cache: dict[str, str] = {}
+        for item in fused:
+            metadata = item.get("metadata") or {}
+            parent_id = metadata.get("parent_id")
+            if isinstance(parent_id, str):
+                if parent_id not in parent_cache:
+                    parent_text = self._storage.get_parent_text(parent_id)
+                    if parent_text:
+                        parent_cache[parent_id] = parent_text
+                if parent_id in parent_cache:
+                    item["rerank_text"] = parent_cache[parent_id]
 
         reranked = self._rerank(query, fused)
         final = reranked[:top_k_final]

@@ -119,6 +119,24 @@ class StorageEngine:
         row = cursor.fetchone()
         return row[0] if row else None
 
+    def get_children_by_ids(self, ids: list[str]) -> dict[str, dict[str, object]]:
+        if not ids:
+            return {}
+        response = self._collection.get(
+            ids=ids,
+            include=["documents", "metadatas"],
+        )
+        response_ids = response.get("ids", [])
+        documents = response.get("documents", [])
+        metadatas = response.get("metadatas", [])
+        return {
+            child_id: {
+                "text": doc,
+                "metadata": meta or {},
+            }
+            for child_id, doc, meta in zip(response_ids, documents, metadatas)
+        }
+
     def query_children(self, *, embeddings: list[list[float]], top_k: int) -> dict[str, list]:
         return self._collection.query(
             query_embeddings=embeddings,
