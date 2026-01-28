@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from .models import ChildChunk, Metadata, ParentChunk
+from .intent import Intent
+from .generation import build_prompt
+from .generator import MlxGenerator
 from .storage import StorageEngine
 
 HEADER_RE = re.compile(r"^(#{1,6})\s+(.*)$")
@@ -358,6 +361,8 @@ def ingest_file_to_storage(
     storage: StorageEngine,
     embedding_model: object,
     bm25_path: Optional[Path] = None,
+    summarize: bool = False,
+    summary_generator: Optional[MlxGenerator] = None,
 ) -> tuple[int, int]:
     path = Path(file_path)
     suffix = path.suffix.lower()
@@ -383,5 +388,20 @@ def ingest_file_to_storage(
 
     if bm25_path is not None:
         storage.persist_bm25(bm25_path)
+
+    if summarize:
+        generator = summary_generator
+        if generator is None:
+            raise ValueError("summary_generator is required when summarize=True")
+        context = "\n\n".join(parent.text for parent in parents)
+        if len(context) > 12000:
+            context = context[:12000]
+        prompt = build_prompt(
+            context=context,
+            question="Summarize this document.",
+            intent=Intent.SUMMARIZE,
+        )
+        summary = generator.generate(prompt)
+        storage.upsert_source_summary(source_id=source_id, summary=summary)
 
     return len(parents), len(children)
