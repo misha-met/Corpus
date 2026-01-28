@@ -104,8 +104,11 @@ class RetrievalEngine:
 
         source_ids = self._storage.bm25_source_ids
         source_filter = bool(source_id)
-        if source_filter and len(source_ids) != len(self._storage.bm25_ids):
-            return []
+        if source_filter and (not source_ids or len(source_ids) != len(self._storage.bm25_ids)):
+            raise RuntimeError(
+                "BM25 index source_ids are missing or misaligned; "
+                "rebuild the BM25 index to use source_id filtering."
+            )
 
         results: list[dict[str, Any]] = []
         rank = 1
