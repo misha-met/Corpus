@@ -38,6 +38,14 @@ class StorageEngine:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS source_summaries (
+                source_id TEXT PRIMARY KEY,
+                summary TEXT NOT NULL
+            )
+            """
+        )
         self._conn.commit()
 
         settings = Settings(anonymized_telemetry=False, is_persistent=True)
@@ -47,6 +55,7 @@ class StorageEngine:
         self._bm25: Optional[BM25Okapi] = None
         self._bm25_corpus: list[list[str]] = []
         self._bm25_ids: list[str] = []
+        self._bm25_source_ids: list[str] = []
 
     def close(self) -> None:
         self._conn.close()
@@ -109,6 +118,9 @@ class StorageEngine:
         tokenized = [doc.split() for doc in documents]
         self._bm25_corpus.extend(tokenized)
         self._bm25_ids.extend(ids)
+        self._bm25_source_ids.extend(
+            [child.metadata.source_id for child in child_list]
+        )
         self._bm25 = BM25Okapi(self._bm25_corpus)
 
     def get_parent_text(self, parent_id: str) -> Optional[str]:
@@ -137,17 +149,25 @@ class StorageEngine:
             for child_id, doc, meta in zip(response_ids, documents, metadatas)
         }
 
-    def query_children(self, *, embeddings: list[list[float]], top_k: int) -> dict[str, list]:
+    def query_children(
+        self,
+        *,
+        embeddings: list[list[float]],
+        top_k: int,
+        where: Optional[dict[str, object]] = None,
+    ) -> dict[str, list]:
         return self._collection.query(
             query_embeddings=embeddings,
             n_results=top_k,
             include=["documents", "metadatas", "distances"],
+            where=where,
         )
 
     def persist_bm25(self, path: Path) -> None:
         payload = {
             "ids": self._bm25_ids,
             "corpus": self._bm25_corpus,
+            "source_ids": self._bm25_source_ids,
         }
         path.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -155,10 +175,62 @@ class StorageEngine:
         if not path.exists():
             raise FileNotFoundError(f"BM25 index file not found: {path}")
         payload = json.loads(path.read_text(encoding="utf-8"))
-        self._bm25_ids = list(payload.get("ids", []))
-        self._bm25_corpus = list(payload.get("corpus", []))
+        ids = list(payload.get("ids", []))
+        corpus = list(payload.get("corpus", []))
+        source_ids = list(payload.get("source_ids", []))
+        if not (len(ids) == len(corpus) == len(source_ids)):
+            raise ValueError(
+                "Inconsistent BM25 index data in "
+                f"{path}: 'ids', 'corpus', and 'source_ids' must have the same "
+                "length. Delete this file and rebuild the BM25 index."
+            )
+        self._bm25_ids = ids
+        self._bm25_corpus = corpus
+        self._bm25_source_ids = source_ids
         if self._bm25_corpus:
             self._bm25 = BM25Okapi(self._bm25_corpus)
+        else:
+            self._bm25 = None
+
+    def list_source_ids(self) -> list[str]:
+        cursor = self._conn.execute(
+            "SELECT DISTINCT source_id FROM parent_chunks ORDER BY source_id"
+        )
+        rows = cursor.fetchall()
+        return [row[0] for row in rows if row and row[0]]
+
+    def upsert_source_summary(self, *, source_id: str, summary: str) -> None:
+        if not source_id.strip():
+            raise ValueError("source_id must be non-empty.")
+        if not summary.strip():
+            raise ValueError("summary must be non-empty.")
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO source_summaries (source_id, summary)
+                VALUES (?, ?)
+                """,
+                (source_id.strip(), summary.strip()),
+            )
+
+    def get_source_summaries(self) -> dict[str, str]:
+        cursor = self._conn.execute(
+            "SELECT source_id, summary FROM source_summaries ORDER BY source_id"
+        )
+        rows = cursor.fetchall()
+        return {
+            source_id: summary
+            for source_id, summary in rows
+            if source_id and summary
+        }
+
+    def get_parent_texts_by_source(self, *, source_id: str) -> list[str]:
+        cursor = self._conn.execute(
+            "SELECT text FROM parent_chunks WHERE source_id = ? ORDER BY page_number",
+            (source_id,),
+        )
+        rows = cursor.fetchall()
+        return [row[0] for row in rows if row and row[0]]
 
     @property
     def bm25(self) -> Optional[BM25Okapi]:
@@ -167,3 +239,7 @@ class StorageEngine:
     @property
     def bm25_ids(self) -> list[str]:
         return list(self._bm25_ids)
+
+    @property
+    def bm25_source_ids(self) -> list[str]:
+        return list(self._bm25_source_ids)

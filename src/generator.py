@@ -23,7 +23,6 @@ DEFAULT_STOP_TOKENS = [
     # Conversation markers
     "Human:",
     "Assistant:",
-    "user@Mac",
     # Prompt continuation markers
     "\n\nQuestion:",
     "\n\nContext:",

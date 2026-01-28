@@ -34,7 +34,13 @@ class RetrievalEngine:
         self._embedding_model = embedding_model
         self._reranker = reranker
 
-    def _dense_search(self, query: str, top_k: int) -> list[dict[str, Any]]:
+    def _dense_search(
+        self,
+        query: str,
+        top_k: int,
+        *,
+        source_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
         if not query.strip():
             raise ValueError("query must be a non-empty string.")
         try:
@@ -45,7 +51,12 @@ class RetrievalEngine:
         except Exception as exc:  # pragma: no cover - dependency runtime
             raise RuntimeError("Embedding model encode failed.") from exc
 
-        response = self._storage.query_children(embeddings=embeddings, top_k=top_k)
+        where = {"source_id": source_id} if source_id else None
+        response = self._storage.query_children(
+            embeddings=embeddings,
+            top_k=top_k,
+            where=where,
+        )
 
         results: list[dict[str, Any]] = []
         ids = response.get("ids", [[]])[0]
@@ -69,7 +80,13 @@ class RetrievalEngine:
 
         return results
 
-    def _sparse_search(self, query: str, top_k: int) -> list[dict[str, Any]]:
+    def _sparse_search(
+        self,
+        query: str,
+        top_k: int,
+        *,
+        source_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
         bm25 = self._storage.bm25
         if bm25 is None:
             raise RuntimeError("BM25 index is not initialized.")
@@ -83,11 +100,23 @@ class RetrievalEngine:
             enumerate(scores),
             key=lambda item: item[1],
             reverse=True,
-        )[:top_k]
+        )
+
+        source_ids = self._storage.bm25_source_ids
+        source_filter = bool(source_id)
+        if source_filter and (not source_ids or len(source_ids) != len(self._storage.bm25_ids)):
+            raise RuntimeError(
+                "BM25 index source_ids are missing or misaligned; "
+                "rebuild the BM25 index to use source_id filtering."
+            )
 
         results: list[dict[str, Any]] = []
-        for rank, (idx, score) in enumerate(ranked, start=1):
+        rank = 1
+        for idx, score in ranked:
             child_id = self._storage.bm25_ids[idx]
+            if source_filter:
+                if source_ids[idx] != source_id:
+                    continue
             results.append(
                 {
                     "id": child_id,
@@ -95,6 +124,9 @@ class RetrievalEngine:
                     "rank": rank,
                 }
             )
+            rank += 1
+            if len(results) >= top_k:
+                break
         return results
 
     @staticmethod
@@ -156,9 +188,10 @@ class RetrievalEngine:
         top_k_sparse: int = 30,
         top_k_fused: int = 20,
         top_k_final: int = 5,
+        source_id: Optional[str] = None,
     ) -> list[RetrievalResult]:
-        dense = self._dense_search(query, top_k_dense)
-        sparse = self._sparse_search(query, top_k_sparse)
+        dense = self._dense_search(query, top_k_dense, source_id=source_id)
+        sparse = self._sparse_search(query, top_k_sparse, source_id=source_id)
 
         fused = self._rrf_fuse(dense, sparse)[:top_k_fused]
 

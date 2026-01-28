@@ -45,13 +45,13 @@ def _dedupe_context(texts: Iterable[str]) -> str:
 # ----- Output Sanitization -----
 # Patterns that indicate instruction leakage or repetition artifacts
 _INSTRUCTION_PATTERNS = [
-    re.compile(r"\s*Important:.*$", re.IGNORECASE | re.DOTALL),
-    re.compile(r"\s*Grounding rule:.*$", re.IGNORECASE | re.DOTALL),
-    re.compile(r"\s*Base your answer.*$", re.IGNORECASE | re.DOTALL),
-    re.compile(r"\s*Do not substitute.*$", re.IGNORECASE | re.DOTALL),
-    re.compile(r"\s*Task:.*$", re.IGNORECASE | re.DOTALL),
-    re.compile(r"\s*Format:.*$", re.IGNORECASE | re.DOTALL),
-    re.compile(r"\s*Tone:.*$", re.IGNORECASE | re.DOTALL),
+    re.compile(r"^\s*Important:.*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*Grounding rule:.*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*Base your answer.*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*Do not substitute.*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*Task:.*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*Format:.*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*Tone:.*$", re.IGNORECASE | re.MULTILINE),
 ]
 
 # Pattern to detect repeating headers/page numbers (e.g., "4. A Review of..." repeated)
@@ -205,6 +205,16 @@ def run() -> None:
     ingest_parser.add_argument("--bm25", default="data/bm25.json", help="BM25 JSON path")
     ingest_parser.add_argument("--collection", default="child_chunks", help="Chroma collection name")
     ingest_parser.add_argument("--tier", default=None, help="Override hardware tier")
+    ingest_parser.add_argument(
+        "--model",
+        default=None,
+        help="Path or Hugging Face ID for mlx-lm model (used for summaries)",
+    )
+    ingest_parser.add_argument(
+        "--summarize",
+        action="store_true",
+        help="Generate and store a per-source summary during ingest",
+    )
 
     query_parser = subparsers.add_parser("query", help="Query the RAG system")
     query_parser.add_argument("query", help="User query")
@@ -213,6 +223,16 @@ def run() -> None:
     query_parser.add_argument("--bm25", default="data/bm25.json", help="BM25 JSON path")
     query_parser.add_argument("--collection", default="child_chunks", help="Chroma collection name")
     query_parser.add_argument("--tier", default=None, help="Override hardware tier")
+    query_parser.add_argument(
+        "--source-id",
+        default=None,
+        help="Restrict retrieval to a specific source document",
+    )
+    query_parser.add_argument(
+        "--list-sources",
+        action="store_true",
+        help="List available source documents and exit",
+    )
     query_parser.add_argument(
         "--model",
         default=None,
@@ -275,6 +295,10 @@ def run() -> None:
     bm25_path = Path(args.bm25)
 
     if args.command == "ingest":
+        generator: Optional[MlxGenerator] = None
+        if args.summarize:
+            model_id = args.model or config.llm_model
+            generator = MlxGenerator(model_id)
         parents_count, children_count = ingest_file_to_storage(
             args.file,
             source_id=args.source_id,
@@ -282,8 +306,22 @@ def run() -> None:
             storage=storage,
             embedding_model=embedding_model,
             bm25_path=bm25_path,
+            summarize=args.summarize,
+            summary_generator=generator,
         )
         print(f"Ingested {parents_count} parents and {children_count} children.")
+        if args.summarize:
+            print(f"Stored summary for source: {args.source_id}")
+        return
+
+    if args.command == "query" and args.list_sources:
+        sources = storage.list_source_ids()
+        if not sources:
+            print("No sources found in the database.")
+        else:
+            print("Available sources:")
+            for source in sources:
+                print(f"- {source}")
         return
 
     if not bm25_path.exists():
@@ -350,14 +388,84 @@ def run() -> None:
     )
 
     # --- Retrieval ---
-    results = retrieval.search(search_query)
-    context = _dedupe_context(
-        [result.parent_text for result in results if result.parent_text]
-    )
+    extra_instructions: Optional[str] = None
+
+    if intent_result.intent == Intent.SUMMARIZE and not args.source_id:
+        sources = storage.list_source_ids()
+        if len(sources) > 1:
+            summaries = storage.get_source_summaries()
+            missing = [source for source in sources if source not in summaries]
+            if missing:
+                if args.no_generate:
+                    print(
+                        "Multiple documents are available, but some sources are missing summaries. "
+                        "Re-run without --no-generate or specify --source-id."
+                    )
+                    for source in missing:
+                        print(f"- {source}")
+                    return
+
+                if generator is None:
+                    generator = MlxGenerator(model_id)
+
+                for source in missing:
+                    parent_texts = storage.get_parent_texts_by_source(source_id=source)
+                    context_text = "\n\n".join(parent_texts)
+                    if len(context_text) > 12000:
+                        context_text = context_text[:12000]
+                    summary_prompt = build_prompt(
+                        context=context_text,
+                        question="Summarize this document.",
+                        intent=Intent.SUMMARIZE,
+                    )
+                    summary_text = generator.generate(summary_prompt)
+                    storage.upsert_source_summary(
+                        source_id=source,
+                        summary=summary_text,
+                    )
+                summaries = storage.get_source_summaries()
+            summary_blocks = [
+                f"Source: {source}\nSummary: {summaries[source]}"
+                for source in sources
+                if source in summaries
+            ]
+            context = "\n\n".join(summary_blocks)
+            results = []
+            source_ids = sources
+            extra_instructions = (
+                "Provide a single consolidated answer addressing the user's question. "
+                "Do not output per-source summaries or repeat points."
+            )
+        else:
+            results = retrieval.search(search_query, source_id=args.source_id)
+            source_ids = sorted(
+                {
+                    result.metadata.get("source_id")
+                    for result in results
+                    if result.metadata.get("source_id")
+                }
+            )
+            context = _dedupe_context(
+                [result.parent_text for result in results if result.parent_text]
+            )
+    else:
+        results = retrieval.search(search_query, source_id=args.source_id)
+        source_ids = sorted(
+            {
+                result.metadata.get("source_id")
+                for result in results
+                if result.metadata.get("source_id")
+            }
+        )
+        context = _dedupe_context(
+            [result.parent_text for result in results if result.parent_text]
+        )
 
     if args.no_generate:
         print("Top retrieved context:\n")
         print(f"[Intent: {intent_result.intent.value} (confidence: {intent_result.confidence:.2f})]\n")
+        if source_ids:
+            print(f"[Sources: {', '.join(source_ids)}]\n")
         for idx, result in enumerate(results, start=1):
             header_path = result.metadata.get("header_path", "")
             snippet = (result.parent_text or result.text or "").strip()
@@ -368,7 +476,12 @@ def run() -> None:
         return
 
     # --- Generation ---
-    prompt = build_prompt(context, args.query, intent=intent_result.intent)
+    prompt = build_prompt(
+        context,
+        args.query,
+        intent=intent_result.intent,
+        extra_instructions=extra_instructions,
+    )
 
     if generator is None:
         generator = MlxGenerator(model_id)
@@ -379,7 +492,11 @@ def run() -> None:
     answer = _sanitize_output(answer)
     
     # Print intent info and answer
-    print(f"\n[Intent: {intent_result.intent.value} | Confidence: {intent_result.confidence:.2f} | Method: {intent_result.method}]\n")
+    print(f"\n[Intent: {intent_result.intent.value} | Confidence: {intent_result.confidence:.2f} | Method: {intent_result.method}]")
+    if source_ids:
+        print(f"[Sources: {', '.join(source_ids)}]\n")
+    else:
+        print()
     print(answer)
 
 

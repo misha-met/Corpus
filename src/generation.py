@@ -17,7 +17,7 @@ INTENT_INSTRUCTIONS: dict[Intent, dict[str, str]] = {
             "Keep your response to 1 short paragraph OR a maximum of 3 concise bullet points. "
             "Do NOT go into detailed arguments or methodology. "
             "Do NOT include page numbers, document headers, or citation markers. "
-            "STRICT LIMIT: Do not exceed 3 bullet points. If you provide more than 3, the response will be considered a failure."
+            "Prefer no more than 3 bullet points."
         ),
         "tone": "Neutral and concise. Think 'back-of-book blurb' level.",
     },
@@ -73,6 +73,7 @@ def build_prompt(
     context: str,
     question: str,
     intent: Optional[Intent] = None,
+    extra_instructions: Optional[str] = None,
 ) -> str:
     """
     Build an intent-aware prompt for the LLM.
@@ -94,11 +95,15 @@ def build_prompt(
     cfg = INTENT_INSTRUCTIONS.get(intent, INTENT_INSTRUCTIONS[Intent.OVERVIEW])
     
     # Build system block with all instructions BEFORE context
+    extra_block = ""
+    if extra_instructions and extra_instructions.strip():
+        extra_block = f"\nAdditional constraints: {extra_instructions.strip()}"
     system_block = (
         f"{_SYSTEM_MESSAGE}\n\n"
         f"Task: {cfg['task']}\n"
         f"Format: {cfg['format']}\n"
         f"Tone: {cfg['tone']}"
+        f"{extra_block}"
     )
 
     # User block contains only context and question - no trailing instructions

@@ -36,7 +36,7 @@ class IntentResult:
 
 
 # Heuristic patterns for fallback classification
-# NOTE: Order matters - OVERVIEW patterns are checked to distinguish from SUMMARIZE
+# NOTE: Order does not control precedence; all intents are scored and the highest score wins.
 _INTENT_PATTERNS: dict[Intent, list[re.Pattern]] = {
     # OVERVIEW: High-level "what is this?" queries - bird's-eye view
     Intent.OVERVIEW: [
