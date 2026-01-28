@@ -45,13 +45,13 @@ def _dedupe_context(texts: Iterable[str]) -> str:
 # ----- Output Sanitization -----
 # Patterns that indicate instruction leakage or repetition artifacts
 _INSTRUCTION_PATTERNS = [
-    re.compile(r"\s*Important:.*$", re.IGNORECASE | re.DOTALL),
-    re.compile(r"\s*Grounding rule:.*$", re.IGNORECASE | re.DOTALL),
-    re.compile(r"\s*Base your answer.*$", re.IGNORECASE | re.DOTALL),
-    re.compile(r"\s*Do not substitute.*$", re.IGNORECASE | re.DOTALL),
-    re.compile(r"\s*Task:.*$", re.IGNORECASE | re.DOTALL),
-    re.compile(r"\s*Format:.*$", re.IGNORECASE | re.DOTALL),
-    re.compile(r"\s*Tone:.*$", re.IGNORECASE | re.DOTALL),
+    re.compile(r"^\s*Important:.*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*Grounding rule:.*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*Base your answer.*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*Do not substitute.*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*Task:.*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*Format:.*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*Tone:.*$", re.IGNORECASE | re.MULTILINE),
 ]
 
 # Pattern to detect repeating headers/page numbers (e.g., "4. A Review of..." repeated)
