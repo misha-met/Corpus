@@ -1,7 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+import time
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
+
+from .config import ModelConfig
+from .metrics import (
+    RetrievalMetrics,
+    BudgetMetrics,
+    TimingMetrics,
+    RerankerMetrics,
+    DeduplicationMetrics,
+    compute_reranker_stats,
+)
+from .storage import StorageEngine
+
+logger = logging.getLogger(__name__)
 
 _BOILERPLATE_PATTERNS = (
     "as an ai",
@@ -10,29 +25,61 @@ _BOILERPLATE_PATTERNS = (
     "i cannot be considered",
 )
 
-from .storage import StorageEngine
-
 
 @dataclass(frozen=True)
 class RetrievalResult:
+    """Result from retrieval pipeline.
+    
+    Attributes:
+        child_id: Unique identifier of the child chunk
+        text: Text content of the child chunk
+        metadata: Chunk metadata (source_id, parent_id, etc.)
+        score: Final score (rerank score if available, else RRF score)
+        parent_text: Full text of the parent chunk (for context expansion)
+        metrics: Optional retrieval metrics (attached to first result only)
+    """
     child_id: str
     text: str
     metadata: dict[str, Any]
     score: float
     parent_text: Optional[str]
+    metrics: Optional[RetrievalMetrics] = None
 
 
 class RetrievalEngine:
+    """Hybrid retrieval engine with dense, sparse, and reranking stages.
+    
+    Implements the full retrieval pipeline:
+    1. Parallel dense (embedding) and sparse (BM25) search
+    2. RRF fusion of results
+    3. Early parent-level deduplication
+    4. Reranking with score distribution tracking
+    5. Context expansion to parent chunks
+    
+    Attributes:
+        config: ModelConfig with retrieval parameters (optional, uses defaults)
+    """
+    
     def __init__(
         self,
         *,
         storage: StorageEngine,
         embedding_model: Any,
         reranker: Optional[Any] = None,
+        config: Optional[ModelConfig] = None,
     ) -> None:
+        """Initialize the retrieval engine.
+        
+        Args:
+            storage: StorageEngine for vector/BM25/SQLite access
+            embedding_model: SentenceTransformer model for embeddings
+            reranker: Optional FlagReranker for reranking
+            config: Optional ModelConfig for retrieval parameters
+        """
         self._storage = storage
         self._embedding_model = embedding_model
         self._reranker = reranker
+        self._config = config
 
     def _dense_search(
         self,
@@ -156,9 +203,77 @@ class RetrievalEngine:
         fused.sort(key=lambda item: item["score"], reverse=True)
         return fused
 
-    def _rerank(self, query: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    @staticmethod
+    def _deduplicate_by_parent(
+        items: list[dict[str, Any]],
+        top_k: int,
+    ) -> tuple[list[dict[str, Any]], DeduplicationMetrics]:
+        """Early deduplication: keep highest-scored child per unique parent_id.
+        
+        This runs BEFORE reranking to reduce redundant rerank computations.
+        For each parent_id, only the child with the highest RRF score is kept.
+        
+        Args:
+            items: List of fused results with metadata
+            top_k: Maximum number of results to return
+            
+        Returns:
+            Tuple of (deduplicated items, deduplication metrics)
+        """
+        before_count = len(items)
+        seen_parents: dict[str, dict[str, Any]] = {}
+        no_parent_items: list[dict[str, Any]] = []
+        
+        for item in items:
+            metadata = item.get("metadata") or {}
+            parent_id = metadata.get("parent_id")
+            
+            if not isinstance(parent_id, str):
+                # Items without parent_id are kept separately
+                no_parent_items.append(item)
+                continue
+            
+            # Keep highest-scored item per parent
+            if parent_id not in seen_parents:
+                seen_parents[parent_id] = item
+            elif item.get("score", 0) > seen_parents[parent_id].get("score", 0):
+                seen_parents[parent_id] = item
+        
+        # Combine and sort by score
+        deduplicated = list(seen_parents.values()) + no_parent_items
+        deduplicated.sort(key=lambda x: x.get("score", 0), reverse=True)
+        deduplicated = deduplicated[:top_k]
+        
+        after_count = len(deduplicated)
+        parents_removed = before_count - after_count - len(no_parent_items) + len([
+            i for i in deduplicated if not (i.get("metadata") or {}).get("parent_id")
+        ])
+        
+        metrics = DeduplicationMetrics(
+            children_before_dedup=before_count,
+            children_after_dedup=after_count,
+            reduction_pct=100 * (1 - after_count / before_count) if before_count > 0 else 0,
+            parents_deduplicated=max(0, before_count - after_count),
+        )
+        
+        return deduplicated, metrics
+
+    def _rerank(
+        self,
+        query: str,
+        items: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[float]]:
+        """Rerank items and return both reranked items and raw scores.
+        
+        Args:
+            query: The search query
+            items: Items to rerank (should have 'rerank_text' or 'text')
+            
+        Returns:
+            Tuple of (reranked items, raw scores before penalty)
+        """
         if self._reranker is None or not items:
-            return items
+            return items, []
 
         pairs = [(query, item.get("rerank_text", item.get("text", ""))) for item in items]
 
@@ -172,29 +287,75 @@ class RetrievalEngine:
         except Exception as exc:  # pragma: no cover - dependency runtime
             raise RuntimeError("Reranker failed to score pairs.") from exc
 
+        # Ensure scores is a list
+        if not isinstance(scores, list):
+            scores = list(scores)
+        
+        raw_scores = [float(s) for s in scores]
+        
         reranked = []
         for item, score in zip(items, scores):
             text = (item.get("rerank_text") or item.get("text") or "").lower()
             penalty = 0.5 if any(pat in text for pat in _BOILERPLATE_PATTERNS) else 0.0
             reranked.append({**item, "rerank_score": float(score) - penalty})
         reranked.sort(key=lambda item: item["rerank_score"], reverse=True)
-        return reranked
+        return reranked, raw_scores
 
     def search(
         self,
         query: str,
         *,
-        top_k_dense: int = 30,
-        top_k_sparse: int = 30,
-        top_k_fused: int = 20,
-        top_k_final: int = 5,
+        top_k_dense: Optional[int] = None,
+        top_k_sparse: Optional[int] = None,
+        top_k_fused: Optional[int] = None,
+        top_k_rerank: Optional[int] = None,
+        top_k_final: Optional[int] = None,
         source_id: Optional[str] = None,
+        collect_metrics: bool = True,
     ) -> list[RetrievalResult]:
-        dense = self._dense_search(query, top_k_dense, source_id=source_id)
-        sparse = self._sparse_search(query, top_k_sparse, source_id=source_id)
-
-        fused = self._rrf_fuse(dense, sparse)[:top_k_fused]
-
+        """Execute hybrid search with timing and metrics collection.
+        
+        Args:
+            query: Search query string
+            top_k_dense: Dense search results (default from config or 100)
+            top_k_sparse: Sparse search results (default from config or 100)
+            top_k_fused: Results after RRF fusion (default from config or 50)
+            top_k_rerank: Results to pass to reranker (default from config or 20)
+            top_k_final: Final results to return (default from config or 5)
+            source_id: Optional source filter
+            collect_metrics: Whether to collect and attach metrics
+            
+        Returns:
+            List of RetrievalResult with metrics attached to first result
+        """
+        # Resolve parameters from config or defaults
+        cfg = self._config
+        k_dense = top_k_dense or (cfg.top_k_dense if cfg else 100)
+        k_sparse = top_k_sparse or (cfg.top_k_sparse if cfg else 100)
+        k_fused = top_k_fused or (cfg.top_k_fused if cfg else 50)
+        k_rerank = top_k_rerank or (cfg.top_k_rerank if cfg else 20)
+        k_final = top_k_final or (cfg.top_k_final if cfg else 5)
+        
+        # Initialize timing
+        timing = TimingMetrics()
+        total_start = time.perf_counter()
+        
+        # Stage 1: Dense search
+        t0 = time.perf_counter()
+        dense = self._dense_search(query, k_dense, source_id=source_id)
+        timing.dense_search_ms = (time.perf_counter() - t0) * 1000
+        
+        # Stage 2: Sparse search
+        t0 = time.perf_counter()
+        sparse = self._sparse_search(query, k_sparse, source_id=source_id)
+        timing.sparse_search_ms = (time.perf_counter() - t0) * 1000
+        
+        # Stage 3: RRF fusion
+        t0 = time.perf_counter()
+        fused = self._rrf_fuse(dense, sparse)
+        timing.rrf_fusion_ms = (time.perf_counter() - t0) * 1000
+        
+        # Fetch missing text/metadata
         missing_ids = [
             item["id"]
             for item in fused
@@ -217,8 +378,19 @@ class RetrievalEngine:
                     item.setdefault("text", lookup.get("text"))
                     item.setdefault("metadata", lookup.get("metadata"))
 
+        # Stage 4: Early deduplication (before rerank)
+        t0 = time.perf_counter()
+        deduped, dedup_metrics = self._deduplicate_by_parent(fused, k_fused)
+        timing.dedup_ms = (time.perf_counter() - t0) * 1000
+        
+        logger.debug(
+            f"Early dedup: {dedup_metrics.children_before_dedup} -> "
+            f"{dedup_metrics.children_after_dedup} ({dedup_metrics.reduction_pct:.1f}% reduction)"
+        )
+        
+        # Prepare rerank text (parent context)
         parent_cache: dict[str, str] = {}
-        for item in fused:
+        for item in deduped:
             metadata = item.get("metadata") or {}
             parent_id = metadata.get("parent_id")
             if isinstance(parent_id, str):
@@ -229,7 +401,16 @@ class RetrievalEngine:
                 if parent_id in parent_cache:
                     item["rerank_text"] = parent_cache[parent_id]
 
-        reranked = self._rerank(query, fused)
+        # Stage 5: Reranking
+        t0 = time.perf_counter()
+        to_rerank = deduped[:k_rerank]
+        reranked, raw_scores = self._rerank(query, to_rerank)
+        timing.rerank_ms = (time.perf_counter() - t0) * 1000
+        
+        # Compute reranker score statistics
+        reranker_metrics = compute_reranker_stats(raw_scores)
+        
+        # Stage 6: Final selection with boilerplate filtering
         final: list[dict[str, Any]] = []
         seen_parents: set[str] = set()
         seen_children: set[str] = set()
@@ -253,9 +434,10 @@ class RetrievalEngine:
                     continue
                 seen_parents.add(parent_id)
             final.append(item)
-            if len(final) >= top_k_final:
+            if len(final) >= k_final:
                 break
 
+        # Build results
         results: list[RetrievalResult] = []
         for item in final:
             metadata = item.get("metadata") or {}
@@ -275,4 +457,26 @@ class RetrievalEngine:
                 )
             )
 
+        # Finalize timing
+        timing.total_ms = (time.perf_counter() - total_start) * 1000
+        
+        # Build metrics
+        if collect_metrics and results:
+            metrics = RetrievalMetrics(
+                timing=timing,
+                reranker=reranker_metrics,
+                deduplication=dedup_metrics,
+                query=query,
+                mode=cfg.mode if cfg else "unknown",
+            )
+            # Attach metrics to first result
+            results[0] = RetrievalResult(
+                child_id=results[0].child_id,
+                text=results[0].text,
+                metadata=results[0].metadata,
+                score=results[0].score,
+                parent_text=results[0].parent_text,
+                metrics=metrics,
+            )
+        
         return results
