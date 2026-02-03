@@ -20,6 +20,7 @@ from .generation import build_prompt
 from .generator import MlxGenerator
 from .ingest import ingest_file_to_storage
 from .intent import Intent, IntentClassifier, IntentResult
+from .metrics import log_metrics, format_metrics_summary, RetrievalMetrics
 from .retrieval import RetrievalEngine
 from .storage import StorageConfig, StorageEngine
 
@@ -350,7 +351,12 @@ def run() -> None:
     storage.load_bm25(bm25_path)
     reranker = FlagReranker(config.reranker_model, use_fp16=True)
 
-    retrieval = RetrievalEngine(storage=storage, embedding_model=embedding_model, reranker=reranker)
+    retrieval = RetrievalEngine(
+        storage=storage,
+        embedding_model=embedding_model,
+        reranker=reranker,
+        config=config,
+    )
 
     # --- Intent Classification ---
     model_id = args.model or config.llm_model
@@ -478,6 +484,15 @@ def run() -> None:
         context = _dedupe_context(
             [result.parent_text for result in results if result.parent_text]
         )
+
+    # --- Extract and Log Metrics ---
+    retrieval_metrics: Optional[RetrievalMetrics] = None
+    if results and results[0].metrics:
+        retrieval_metrics = results[0].metrics
+        # Log detailed metrics to logger
+        log_metrics(retrieval_metrics, config.mode, logger)
+        # Print summary to user
+        print(f"[Retrieval: {format_metrics_summary(retrieval_metrics)}]")
 
     if args.no_generate:
         print("Top retrieved context:\n")
