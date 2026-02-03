@@ -9,3 +9,7 @@ pdfminer.six
 PyMuPDF
 pytesseract
 pdf2image
+
+# Optional: RAM detection (recommended for auto mode selection)
+# Install with: pip install psutil
+# psutil
