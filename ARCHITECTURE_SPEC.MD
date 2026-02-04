@@ -14,7 +14,7 @@ The system supports three operating modes, each optimized for different use case
 | Mode | LLM Model | Quantization | Context Window | Retrieval Budget | RAM Requirement |
 |------|-----------|--------------|----------------|------------------|-----------------|
 | `regular` | Qwen3-30B-A3B-Instruct-4bit | 4-bit | 128K | 100K | 32GB |
-| `power-fast` | Qwen3-30B-A3B-Instruct-8bit | 8-bit | 128K | 100K | 48GB |
+| `power-fast` | Qwen3-30B-A3B-Instruct-2507-8bit | 8-bit | 128K | 100K | 48GB |
 | `power-deep-research` | Qwen3-Next-80B-A3B-Instruct-4bit | 4-bit | 32K | 20K | 96GB |
 
 #### Mode Selection Precedence

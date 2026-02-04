@@ -69,7 +69,7 @@ REGULAR_CONFIG = ModelConfig(
 # Deeper retrieval for comprehensive answers with faster model
 POWER_FAST_CONFIG = ModelConfig(
     mode="power-fast",
-    llm_model="mlx-community/Qwen3-30B-A3B-Instruct-8bit",
+    llm_model="mlx-community/Qwen3-30B-A3B-Instruct-2507-8bit",
     embedding_model="BAAI/bge-m3",
     reranker_model="BAAI/bge-reranker-v2-m3",
     embedding_device="cpu",
