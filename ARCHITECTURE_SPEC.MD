@@ -1,7 +1,4 @@
 ## Project: Offline Advanced RAG (Apple Silicon Optimized)
-**Role:** Senior AI Engineer / Systems Architect
-**Objective:** Build a high-performance, offline-first RAG (Retrieval-Augmented Generation) system optimized for Apple Silicon (M-series chips).
-**Constraints:** strict offline functionality, highly optimized VRAM usage, Python-based.
 
 ---
 
@@ -11,11 +8,11 @@
 
 The system supports three operating modes, each optimized for different use cases and hardware configurations:
 
-| Mode | LLM Model | Quantization | Context Window | Retrieval Budget | RAM Requirement | Best Use Case |
-|------|-----------|--------------|----------------|------------------|-----------------|---------------|
-| `regular` | Qwen3-30B-A3B-Instruct-4bit | 4-bit | 64K | 32K | 32GB | Daily Driver. Fast, reliable, and won't crash a 32GB machine. |
-| `power-fast` | Qwen3-30B-A3B-Instruct-2507-8bit | 8-bit | 96K | 50K | 64GB | Academic Deep Dive. High-speed analysis of multiple long papers. |
-| `power-deep-research` | Qwen3-Next-80B-A3B-Instruct-4bit | 4-bit | 32K | 20K | 64GB | Complex Reasoning. Uses the massive 80B model where intelligence > context size. |
+| Mode | LLM Model | Quantization | Context Window | Retrieval Budget | RAM Requirement |
+|------|-----------|--------------|----------------|------------------|-----------------||
+| `regular` | Qwen3-30B-A3B-Instruct-4bit | 4-bit | 64K | 32K | 32GB |
+| `power-fast` | Qwen3-30B-A3B-Instruct-2507-8bit | 8-bit | 96K | 50K | 64GB |
+| `power-deep-research` | Qwen3-Next-80B-A3B-Instruct-4bit | 4-bit | 32K | 20K | 64GB |
 
 #### Mode Selection Precedence
 
@@ -35,15 +32,15 @@ The system supports three operating modes, each optimized for different use case
 
 #### Reranker Threshold Filtering
 
-The system implements **quality-based filtering** after reranking to prevent low-quality documents from diluting context:
+Documents are filtered after reranking based on score thresholds:
 
-| Mode | Threshold Score | Safety Net (Min Docs) | Rationale |
-|------|----------------|----------------------|-----------|
-| `regular` | -6.0 (Aggressive) | 3 | Hardware Protection: On 32GB RAM, every token counts. Only high-confidence text. |
-| `power-fast` | -8.0 (Balanced) | 5 | Speed Optimization: Cuts garbage but keeps context rich. |
-| `power-deep-research` | -10.0 (Permissive) | 10 | Max Recall: Weak documents might contain subtle connections the 80B model needs. |
+| Mode | Threshold Score | Minimum Documents |
+|------|----------------|-------------------|
+| `regular` | -6.0 | 3 |
+| `power-fast` | -8.0 | 5 |
+| `power-deep-research` | -10.0 | 10 |
 
-**Algorithm**: After reranking, filter documents with `rerank_score >= threshold`. If filtered count < min_docs, use top min_docs instead (safety net).
+After reranking, documents with `rerank_score >= threshold` are kept. If filtered count < min_docs, top min_docs results are used instead.
 
 ---
 
@@ -125,62 +122,39 @@ To reduce redundant reranking computations, deduplication runs **before** rerank
 
 ### 2. Core Architecture Modules
 
-#### Module A: Data Layer (The Parent-Child Splitter)
-Do not use simple character splitting. Implement a hierarchical class structure:
-*   **`ParentChunk`**: 1000–1500 tokens. Contains the full "meat" of the text. Stored in SQLite.
-*   **`ChildChunk`**: 200–300 tokens. Overlapping slides derived from the Parent. Stored in Vector Index.
-*   **`Metadata`**: Every chunk must track: `source_id`, `page_number`, `header_path` (e.g., "Intro > Methodology"), and `parent_id`.
-*   **Markdown Awareness**: Use a markdown header splitter to ensure `ChildChunks` inherit the semantic header path of their parent section.
+#### Module A: Data Layer
 
-#### Module B: The Storage Engine
-*   **Vector Index**: Stores embeddings of `ChildChunks`. Use `int8` quantization if possible for the index.
-*   **Lexical Index**: Maintain a BM25 index of the raw text tokens from `ChildChunks` for keyword matching.
-*   **Context Store (SQLite)**: A persistent DB mapping `parent_id` -> `full_text_content`.
+Hierarchical chunk structure:
 
-#### Module C: The Hybrid Retrieval Pipeline (Two-Stage)
-Implement a class `RetrievalEngine` with this exact flow:
+*   **ParentChunk**: 1000–1500 tokens. Full text content stored in SQLite.
+*   **ChildChunk**: 200–300 tokens. Overlapping chunks derived from parent. Stored in vector index.
+*   **Metadata**: Tracks `source_id`, `page_number`, `header_path`, `parent_id`.
+
+#### Module B: Storage Engine
+
+*   **Vector Index**: Embeddings of child chunks with int8 quantization.
+*   **Lexical Index**: BM25 index of child chunk text for keyword search.
+*   **Context Store**: SQLite database mapping parent_id to full text content.
+
+#### Module C: Retrieval Pipeline
+
 1.  **Parallel Search**:
-    *   *Dense*: Cosine similarity on Vector Index (configurable top_k).
-    *   *Sparse*: BM25 score on Lexical Index (configurable top_k).
-2.  **Fusion (RRF)**: Combine results using Reciprocal Rank Fusion:
-    $$Score = \sum (1 / (60 + rank))$$
-3.  **Early Deduplication**: Keep highest-RRF-scored child per unique parent_id.
-4.  **Re-Ranking (The Filter)**:
-    *   Take top N fused results (configurable).
-    *   Pass query + text pairs through `BGE-Reranker-v2-m3`.
-    *   Apply threshold filtering to remove low-quality documents.
-    *   Collect score distribution metrics.
-    *   Select Top K absolute best matches (configurable).
-5.  **Context Expansion**:
-    *   Map the final results to their `ParentChunks`.
-    *   Apply token budget packing with greedy algorithm.
-    *   Return the *Parent* text to the LLM to ensure full context.
+    *   Dense: Cosine similarity on vector index (configurable top_k).
+    *   Sparse: BM25 search on lexical index (configurable top_k).
+2.  **RRF Fusion**: Combine results using Reciprocal Rank Fusion ($$Score = \sum (1 / (60 + rank))$$).
+3.  **Early Deduplication**: Keep highest-scored child per unique parent_id.
+4.  **Reranking**: Score document pairs with BGE-Reranker-v2-m3.
+5.  **Threshold Filtering**: Remove documents below score threshold.
+6.  **Context Expansion**: Map to parent chunks and apply token budget packing.
 
-#### Module D: Hardware Configuration & Model Loader
-Implement a configuration manager `config.py` that:
-1. Detects system RAM (using psutil if available, with platform fallbacks)
+#### Module D: Configuration
+
+System configuration via `config.py`:
+
+1. Detects system RAM (psutil if available, fallback to platform detection)
 2. Supports CLI override (`--mode`) and environment variable (`RAG_MODE`)
-3. Validates RAM requirements and warns if insufficient
-4. Maintains backward compatibility with legacy tier names
-
-**Mode Configurations (v2):**
-
-| Mode | Use Case | Model | Notes |
-|------|----------|-------|-------|
-| `regular` | Daily queries | Qwen3-30B-4bit | Balanced speed/quality |
-| `power-fast` | Deep retrieval | Qwen3-30B-8bit | Higher precision |
-| `power-deep-research` | Complex research | Qwen3-Next-80B-4bit | Best reasoning |
-
-*Note: All embedding and BM25 operations must be forced to CPU (`device='cpu'`) to reserve Metal/GPU VRAM strictly for the LLM.*
-
-### 3. Implementation Steps for the Agent
-
-1.  **Setup**: Create a clean Python project structure (`/src`, `/data`, `/models`).
-2.  **Data Structures**: Define the Pydantic models for `ParentChunk` and `ChildChunk`.
-3.  **Ingestion**: Write the Markdown/PDF ingestion script that populates the Vector Store and SQLite.
-4.  **Retrieval Logic**: Implement the Hybrid Search + RRF + Early Dedup + Reranker pipeline with metrics.
-5.  **Generation**: Implement the `mlx-lm` generator class with tokenizer exposure and budget packing.
-6.  **CLI/Interface**: A simple script to query the system with mode selection and metrics reporting.
+3. Auto-selects mode based on available RAM
+4. Embedding and BM25 operations forced to CPU to preserve LLM VRAM
 
 ---
 
