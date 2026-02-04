@@ -199,7 +199,7 @@ def log_metrics(
     
     # Budget metrics
     b = metrics.budget
-    logger.info("📊 TOKEN BUDGET:")
+    logger.info("TOKEN BUDGET:")
     logger.info(f"   Budget: {b.budget_tokens:,} tokens")
     logger.info(f"   Used:   {b.used_tokens:,} tokens ({b.utilization_pct:.1f}%)")
     logger.info(f"   Docs packed: {b.docs_packed} | Skipped: {b.docs_skipped} | Truncated: {b.docs_truncated}")
@@ -208,20 +208,20 @@ def log_metrics(
     
     # Timing metrics
     t = metrics.timing
-    logger.info("⏱️  TIMING:")
+    logger.info("TIMING:")
     logger.info(f"   Dense search:   {t.dense_search_ms:>8.1f} ms")
     logger.info(f"   Sparse search:  {t.sparse_search_ms:>8.1f} ms")
     logger.info(f"   RRF fusion:     {t.rrf_fusion_ms:>8.1f} ms")
     logger.info(f"   Reranking:      {t.rerank_ms:>8.1f} ms")
     logger.info(f"   Deduplication:  {t.dedup_ms:>8.1f} ms")
     logger.info(f"   Budget packing: {t.budget_packing_ms:>8.1f} ms")
-    logger.info(f"   ─────────────────────────────")
+    logger.info(f"   -----------------------------")
     logger.info(f"   TOTAL:          {t.total_ms:>8.1f} ms")
     
     # Reranker metrics
     r = metrics.reranker
     if r.items_reranked > 0:
-        logger.info("📈 RERANKER SCORES:")
+        logger.info("RERANKER SCORES:")
         logger.info(f"   Items reranked: {r.items_reranked}")
         logger.info(f"   Min: {r.score_min:.4f} | Max: {r.score_max:.4f}")
         logger.info(f"   Mean: {r.score_mean:.4f} | Std: {r.score_std:.4f}")
@@ -229,7 +229,7 @@ def log_metrics(
     # Deduplication metrics
     d = metrics.deduplication
     if d.children_before_dedup > 0:
-        logger.info("🔄 DEDUPLICATION:")
+        logger.info("DEDUPLICATION:")
         logger.info(f"   Before: {d.children_before_dedup} children")
         logger.info(f"   After:  {d.children_after_dedup} children")
         logger.info(f"   Reduction: {d.reduction_pct:.1f}% ({d.parents_deduplicated} parents removed)")
@@ -237,12 +237,12 @@ def log_metrics(
     # Threshold filtering metrics
     th = metrics.threshold
     if th.items_before_threshold > 0:
-        logger.info("🎯 THRESHOLD FILTER:")
+        logger.info("THRESHOLD FILTER:")
         logger.info(f"   Threshold: {th.threshold_value:.1f}")
         logger.info(f"   Before: {th.items_before_threshold} docs")
         logger.info(f"   After: {th.items_after_threshold} docs")
         if th.safety_net_triggered:
-            logger.info(f"   ⚠️  Safety net triggered (min: {th.min_docs})")
+            logger.info(f"   WARNING: Safety net triggered (min: {th.min_docs})")
         else:
             reduction = ((th.items_before_threshold - th.items_after_threshold) / th.items_before_threshold) * 100
             logger.info(f"   Filtered: {reduction:.1f}% reduction")
