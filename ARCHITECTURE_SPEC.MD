@@ -33,6 +33,18 @@ The system supports three operating modes, each optimized for different use case
 | `top_k_rerank` | 20 | 80 |
 | `top_k_final` | 5 | 15 |
 
+#### Reranker Threshold Filtering
+
+The system implements **quality-based filtering** after reranking to prevent low-quality documents from diluting context:
+
+| Mode | Threshold Score | Safety Net (Min Docs) | Rationale |
+|------|----------------|----------------------|-----------|
+| `regular` | -6.0 (Aggressive) | 3 | Hardware Protection: On 32GB RAM, every token counts. Only high-confidence text. |
+| `power-fast` | -8.0 (Balanced) | 5 | Speed Optimization: Cuts garbage but keeps context rich. |
+| `power-deep-research` | -10.0 (Permissive) | 10 | Max Recall: Weak documents might contain subtle connections the 80B model needs. |
+
+**Algorithm**: After reranking, filter documents with `rerank_score >= threshold`. If filtered count < min_docs, use top min_docs instead (safety net).
+
 ---
 
 ### Token Budget Packing
@@ -81,6 +93,11 @@ The retrieval pipeline collects comprehensive metrics:
 
 #### Reranker Metrics
 - Score distribution: min, max, mean, std
+
+#### Threshold Filtering Metrics
+- `threshold_value`: Score threshold applied
+- `items_before/after_threshold`: Document counts
+- `safety_net_triggered`: Whether minimum docs override was used
 
 #### Deduplication Metrics
 - Before/after counts, reduction percentage
@@ -131,6 +148,7 @@ Implement a class `RetrievalEngine` with this exact flow:
 4.  **Re-Ranking (The Filter)**:
     *   Take top N fused results (configurable).
     *   Pass query + text pairs through `BGE-Reranker-v2-m3`.
+    *   Apply threshold filtering to remove low-quality documents.
     *   Collect score distribution metrics.
     *   Select Top K absolute best matches (configurable).
 5.  **Context Expansion**:

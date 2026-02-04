@@ -20,7 +20,7 @@ from .generation import build_prompt
 from .generator import MlxGenerator, count_tokens, enforce_token_budget
 from .ingest import ingest_file_to_storage
 from .intent import Intent, IntentClassifier, IntentResult
-from .metrics import log_metrics, format_metrics_summary, RetrievalMetrics, BudgetMetrics
+from .metrics import log_metrics, format_metrics_summary, RetrievalMetrics, BudgetMetrics, ThresholdMetrics
 from .retrieval import RetrievalEngine
 from .storage import StorageConfig, StorageEngine
 
@@ -542,6 +542,7 @@ def run() -> None:
                 timing=updated_timing,
                 reranker=retrieval_metrics.reranker,
                 deduplication=retrieval_metrics.deduplication,
+                threshold=retrieval_metrics.threshold,
                 query=retrieval_metrics.query,
                 mode=retrieval_metrics.mode,
             )
@@ -564,6 +565,7 @@ def run() -> None:
                 timing=retrieval_metrics.timing,
                 reranker=retrieval_metrics.reranker,
                 deduplication=retrieval_metrics.deduplication,
+                threshold=retrieval_metrics.threshold,
                 query=retrieval_metrics.query,
                 mode=retrieval_metrics.mode,
             )

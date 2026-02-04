@@ -30,6 +30,8 @@ class ModelConfig:
         top_k_fused: Number of results after RRF fusion
         top_k_rerank: Number of results to pass to reranker
         top_k_final: Number of final results to return
+        reranker_threshold: Minimum reranker score to keep document
+        reranker_min_docs: Safety net minimum documents (ignores threshold)
         system_ram_gb: Detected system RAM (for logging)
     """
     mode: str
@@ -45,6 +47,8 @@ class ModelConfig:
     top_k_fused: int = 50
     top_k_rerank: int = 20
     top_k_final: int = 5
+    reranker_threshold: float = -6.0
+    reranker_min_docs: int = 3
     system_ram_gb: float = 0.0
 
 
@@ -86,6 +90,8 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
                 top_k_fused=50,
                 top_k_rerank=20,
                 top_k_final=5,
+                reranker_threshold=-6.0,  # Aggressive filtering for RAM protection
+                reranker_min_docs=3,
                 system_ram_gb=ram_gb,
             )
         else:
@@ -104,6 +110,8 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
                 top_k_fused=50,
                 top_k_rerank=20,
                 top_k_final=5,
+                reranker_threshold=-6.0,  # Aggressive filtering for RAM protection
+                reranker_min_docs=3,
                 system_ram_gb=ram_gb,
             )
     
@@ -128,6 +136,8 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
             top_k_fused=150,
             top_k_rerank=80,
             top_k_final=15,
+            reranker_threshold=-8.0,  # Balanced filtering for speed optimization
+            reranker_min_docs=5,
             system_ram_gb=ram_gb,
         )
     
@@ -152,6 +162,8 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
             top_k_fused=150,
             top_k_rerank=80,
             top_k_final=15,
+            reranker_threshold=-10.0,  # Permissive filtering for max recall
+            reranker_min_docs=10,
             system_ram_gb=ram_gb,
         )
     

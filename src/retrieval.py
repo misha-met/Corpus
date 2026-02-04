@@ -12,6 +12,7 @@ from .metrics import (
     TimingMetrics,
     RerankerMetrics,
     DeduplicationMetrics,
+    ThresholdMetrics,
     compute_reranker_stats,
 )
 from .storage import StorageEngine
@@ -407,6 +408,47 @@ class RetrievalEngine:
         reranked, raw_scores = self._rerank(query, to_rerank)
         timing.rerank_ms = (time.perf_counter() - t0) * 1000
         
+        # Apply threshold filtering with safety net
+        threshold_metrics = ThresholdMetrics()
+        if cfg and reranked:
+            threshold = cfg.reranker_threshold
+            min_docs = cfg.reranker_min_docs
+            items_before = len(reranked)
+            
+            # Filter by threshold
+            threshold_filtered = [
+                item for item in reranked 
+                if item.get("rerank_score", float("-inf")) >= threshold
+            ]
+            
+            # Apply safety net: ensure minimum documents
+            if len(threshold_filtered) < min_docs:
+                logger.debug(
+                    f"Threshold filter produced {len(threshold_filtered)} docs "
+                    f"(< min {min_docs}), using top {min_docs} reranked results"
+                )
+                reranked = reranked[:min_docs]
+                threshold_metrics = ThresholdMetrics(
+                    threshold_value=threshold,
+                    items_before_threshold=items_before,
+                    items_after_threshold=min_docs,
+                    safety_net_triggered=True,
+                    min_docs=min_docs,
+                )
+            else:
+                logger.debug(
+                    f"Threshold filter: {len(reranked)} -> {len(threshold_filtered)} docs "
+                    f"(threshold: {threshold:.1f})"
+                )
+                reranked = threshold_filtered
+                threshold_metrics = ThresholdMetrics(
+                    threshold_value=threshold,
+                    items_before_threshold=items_before,
+                    items_after_threshold=len(threshold_filtered),
+                    safety_net_triggered=False,
+                    min_docs=min_docs,
+                )
+        
         # Compute reranker score statistics
         reranker_metrics = compute_reranker_stats(raw_scores)
         
@@ -466,6 +508,7 @@ class RetrievalEngine:
                 timing=timing,
                 reranker=reranker_metrics,
                 deduplication=dedup_metrics,
+                threshold=threshold_metrics,
                 query=query,
                 mode=cfg.mode if cfg else "unknown",
             )

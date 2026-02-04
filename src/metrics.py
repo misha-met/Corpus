@@ -99,10 +99,28 @@ class DeduplicationMetrics:
 
 
 @dataclass
+class ThresholdMetrics:
+    """Reranker threshold filtering metrics.
+    
+    Attributes:
+        threshold_value: The reranker score threshold used
+        items_before_threshold: Number of items before threshold filtering
+        items_after_threshold: Number of items after threshold filtering
+        safety_net_triggered: Whether minimum document safety net was used
+        min_docs: Minimum documents setting
+    """
+    threshold_value: float = 0.0
+    items_before_threshold: int = 0
+    items_after_threshold: int = 0
+    safety_net_triggered: bool = False
+    min_docs: int = 0
+
+
+@dataclass
 class RetrievalMetrics:
     """Comprehensive metrics for a single retrieval operation.
     
-    Aggregates budget, timing, reranker, and deduplication metrics
+    Aggregates budget, timing, reranker, deduplication, and threshold metrics
     for analysis and logging.
     
     Attributes:
@@ -110,6 +128,7 @@ class RetrievalMetrics:
         timing: Stage-level timing metrics
         reranker: Reranker score distribution metrics
         deduplication: Deduplication impact metrics
+        threshold: Reranker threshold filtering metrics
         query: The original query (for correlation)
         mode: The RAG mode used (regular, power-fast, power-deep-research)
     """
@@ -117,6 +136,7 @@ class RetrievalMetrics:
     timing: TimingMetrics = field(default_factory=TimingMetrics)
     reranker: RerankerMetrics = field(default_factory=RerankerMetrics)
     deduplication: DeduplicationMetrics = field(default_factory=DeduplicationMetrics)
+    threshold: ThresholdMetrics = field(default_factory=ThresholdMetrics)
     query: str = ""
     mode: str = ""
 
@@ -213,6 +233,19 @@ def log_metrics(
         logger.info(f"   Before: {d.children_before_dedup} children")
         logger.info(f"   After:  {d.children_after_dedup} children")
         logger.info(f"   Reduction: {d.reduction_pct:.1f}% ({d.parents_deduplicated} parents removed)")
+    
+    # Threshold filtering metrics
+    th = metrics.threshold
+    if th.items_before_threshold > 0:
+        logger.info("🎯 THRESHOLD FILTER:")
+        logger.info(f"   Threshold: {th.threshold_value:.1f}")
+        logger.info(f"   Before: {th.items_before_threshold} docs")
+        logger.info(f"   After: {th.items_after_threshold} docs")
+        if th.safety_net_triggered:
+            logger.info(f"   ⚠️  Safety net triggered (min: {th.min_docs})")
+        else:
+            reduction = ((th.items_before_threshold - th.items_after_threshold) / th.items_before_threshold) * 100
+            logger.info(f"   Filtered: {reduction:.1f}% reduction")
     
     logger.info("=" * 60)
 
