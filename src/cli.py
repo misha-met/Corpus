@@ -285,9 +285,9 @@ def run() -> None:
     # Select mode configuration with CLI/env var/auto precedence
     config = select_mode_config(manual_mode=getattr(args, 'mode', None))
     
-    # Print resolved mode info at startup
+    # Print resolved mode info at startup with hardware details
     mode_source = "CLI" if getattr(args, 'mode', None) else "env" if os.getenv("RAG_MODE") else "auto"
-    print(f"\n[Mode: {config.mode} | Source: {mode_source}]")
+    print(f"\n[Hardware: {config.system_ram_gb:.0f}GB | Mode: {config.mode} ({mode_source})]")
     print(f"[LLM: {config.llm_model} | Quant: {config.quantization}]")
     print(f"[Context: {config.context_window:,} | Budget: {config.retrieval_budget:,}]\n")
 
