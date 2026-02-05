@@ -657,7 +657,10 @@ def run() -> None:
     if generator is None:
         generator = MlxGenerator(model_id)
     
-    answer = generator.generate(prompt)
+    # Use higher token limit for academic mode (citations add overhead)
+    from .generator import GenerationConfig
+    gen_config = GenerationConfig(max_tokens=600 if citations_enabled else None)
+    answer = generator.generate(prompt, config=gen_config)
     
     # --- Output Sanitization ---
     answer = _sanitize_output(answer)

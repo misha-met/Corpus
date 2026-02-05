@@ -168,12 +168,13 @@ class MlxGenerator:
                 if processor is not None:
                     logits_processors.append(processor)
 
-            capped_max_tokens = min(max_tokens or 512, 300)
+            # Use explicit max_tokens if provided, otherwise default cap at 300
+            final_max_tokens = max_tokens if max_tokens is not None else 300
             output = generate(
                 self._model,
                 self._tokenizer,
                 prompt,
-                max_tokens=capped_max_tokens,
+                max_tokens=final_max_tokens,
                 sampler=sampler,
                 logits_processors=logits_processors or None,
             )
