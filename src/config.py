@@ -8,6 +8,16 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# =============================================================================
+# Global Feature Defaults
+# =============================================================================
+# These can be overridden via CLI flags or environment variables
+
+# Citations toggle: When enabled, formats context with source/page headers
+# and instructs the LLM to include [SourceID, p. X] citations in responses.
+# Default is False for casual output; enable for "Academic Mode".
+CITATIONS_ENABLED_DEFAULT: bool = False
+
 # Global cache for detected RAM (avoid repeated detection)
 _detected_ram_gb: Optional[float] = None
 

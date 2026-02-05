@@ -15,7 +15,7 @@ warnings.filterwarnings(
     message=r"urllib3 v2 only supports OpenSSL.*",
 )
 
-from .config import select_mode_config, ModelConfig
+from .config import select_mode_config, ModelConfig, CITATIONS_ENABLED_DEFAULT
 from .generation import build_prompt
 from .generator import MlxGenerator, count_tokens, enforce_token_budget
 from .ingest import ingest_file_to_storage
@@ -279,6 +279,19 @@ def run() -> None:
         action="store_true",
         help="Enable intent-based query expansion for retrieval (experimental)",
     )
+    # Citation options (Academic Mode)
+    query_parser.add_argument(
+        "--cite",
+        action="store_true",
+        default=None,
+        help="Enable inline citations in output (Academic Mode). Formats context with source/page markers and requires [SourceID, p. X] citations.",
+    )
+    query_parser.add_argument(
+        "--no-cite",
+        action="store_true",
+        default=None,
+        help="Disable inline citations (overrides CITATIONS_ENABLED default).",
+    )
 
     args = parser.parse_args()
 
@@ -361,6 +374,20 @@ def run() -> None:
     # --- Intent Classification ---
     model_id = args.model or config.llm_model
     generator: Optional[MlxGenerator] = None
+    
+    # --- Resolve citations mode ---
+    # Precedence: --cite/--no-cite CLI flags > CITATIONS_ENABLED_DEFAULT
+    if args.cite:
+        citations_enabled = True
+    elif args.no_cite:
+        citations_enabled = False
+    else:
+        citations_enabled = CITATIONS_ENABLED_DEFAULT
+    
+    if citations_enabled:
+        logger.info("Citations mode: ENABLED (Academic Mode)")
+    else:
+        logger.info("Citations mode: DISABLED (Casual Mode)")
     
     # Determine intent (manual override or automatic classification)
     intent_result: Optional[IntentResult] = None
