@@ -1,6 +1,71 @@
 ## Project: Offline Advanced RAG (Apple Silicon Optimized)
 
-## Three-Mode RAG Configuration
+---
+
+## 1. Core Architecture Overview
+
+The system implements a **hybrid retrieval-augmented generation (RAG) pipeline** optimized for Apple Silicon, combining:
+
+- **Dense retrieval** (embedding-based semantic search)
+- **Sparse retrieval** (BM25 keyword search)
+- **Reciprocal Rank Fusion** (RRF) for combining results
+- **Reranking** (BGE-Reranker-v2-m3 for relevance scoring)
+- **Token budget packing** (greedy document packing with truncation fallback)
+- **Intent-based generation** (task-specific prompt engineering)
+- **Toggleable citations** (optional academic-style source attribution)
+
+---
+
+## 2. Technology Stack
+
+*   **LLM Inference:** `mlx-lm` (Apple Machine Learning/Metal optimized).
+*   **Embeddings:** `sentence-transformers` (Run on CPU to save VRAM).
+*   **Re-ranking:** `FlagEmbedding` (BGE-Reranker-v2-m3).
+*   **Sparse Search:** `rank_bm25`.
+*   **Vector Store:** `chromadb` (Local) or `faiss-cpu`.
+*   **Key-Value Store:** `sqlite3` (for Parent Chunks).
+
+---
+
+## 3. Core Architecture Modules
+
+### Module A: Data Layer
+
+Hierarchical chunk structure for efficient retrieval and context expansion:
+
+*   **ParentChunk**: 1000–1500 tokens. Full text content stored in SQLite.
+*   **ChildChunk**: 200–300 tokens. Overlapping chunks derived from parent. Stored in vector index for efficient retrieval.
+*   **Metadata**: Tracks `source_id`, `page_number`, `page_label`, `header_path`, `parent_id`.
+
+### Module B: Storage Engine
+
+*   **Vector Index**: Embeddings of child chunks with int8 quantization (Chroma/FAISS).
+*   **Lexical Index**: BM25 index of child chunk text for keyword-based search.
+*   **Context Store**: SQLite database mapping `parent_id` to full parent text for context expansion.
+
+### Module C: Retrieval Pipeline
+
+1.  **Parallel Search**:
+    *   **Dense**: Cosine similarity on vector index (configurable `top_k`).
+    *   **Sparse**: BM25 search on lexical index (configurable `top_k`).
+2.  **RRF Fusion**: Combine dense and sparse results using Reciprocal Rank Fusion ($$Score = \sum (1 / (60 + rank))$$).
+3.  **Early Deduplication**: Keep highest-scored child per unique `parent_id` to reduce redundancy before expensive reranking.
+4.  **Reranking**: Score document pairs with BGE-Reranker-v2-m3 for relevance assessment.
+5.  **Threshold Filtering**: Remove documents below score threshold based on operating mode.
+6.  **Context Expansion**: Map child chunks to parent chunks and apply token budget packing.
+
+### Module D: Configuration
+
+System configuration via `config.py`:
+
+1. Detects system RAM (psutil if available, fallback to platform detection)
+2. Supports CLI override (`--mode`) and environment variable (`RAG_MODE`)
+3. Auto-selects mode based on available RAM
+4. Embedding and BM25 operations forced to CPU to preserve LLM VRAM
+
+---
+
+## 4. Three-Mode RAG Configuration
 
 ### Operating Modes
 
@@ -42,62 +107,7 @@ After reranking, documents with `rerank_score >= threshold` are kept. If filtere
 
 ---
 
-### Token Budget Packing
-
-The system implements **greedy token budget packing** to maximize context utilization:
-
-1. **Greedy Selection**: Documents are packed in priority order (by rerank score)
-2. **Consecutive Fail Guard**: Stops after 3 consecutive documents that don't fit
-3. **Truncation Fallback**: Large documents are truncated at sentence boundaries
-4. **Accurate Counting**: Uses MLX native tokenizer for precise token counts
-
-```
-Algorithm: enforce_token_budget(docs, max_tokens, tokenizer)
-  packed = []
-  consecutive_fails = 0
-  for doc in docs (priority order):
-    if doc fits:
-      pack it, reset fails
-    elif truncation possible:
-      truncate and pack
-    else:
-      skip, increment fails
-      if fails >= 3: STOP
-  return packed
-```
-
----
-
-### Metrics Collection
-
-The retrieval pipeline collects comprehensive metrics:
-
-#### Budget Metrics
-- `budget_tokens`: Maximum allowed tokens
-- `used_tokens`: Actual tokens used
-- `utilization_pct`: Budget utilization percentage
-- `docs_packed/skipped/truncated`: Document counts
-
-#### Timing Metrics (per stage)
-- `dense_search_ms`: Embedding search time
-- `sparse_search_ms`: BM25 search time
-- `rrf_fusion_ms`: RRF fusion time
-- `rerank_ms`: Reranking time
-- `dedup_ms`: Deduplication time
-- `total_ms`: Total pipeline time
-
-#### Reranker Metrics
-- Score distribution: min, max, mean, std
-
-#### Threshold Filtering Metrics
-- `threshold_value`: Score threshold applied
-- `items_before/after_threshold`: Document counts
-- `safety_net_triggered`: Whether minimum docs override was used
-
-#### Deduplication Metrics
-- Before/after counts, reduction percentage
-
----
+## 5. Retrieval Pipeline Details
 
 ### Early Parent-Level Deduplication
 
@@ -110,53 +120,120 @@ To reduce redundant reranking computations, deduplication runs **before** rerank
 
 ---
 
-### 1. Technology Stack
-*   **LLM Inference:** `mlx-lm` (Apple Machine Learning/Metal optimized).
-*   **Embeddings:** `sentence-transformers` (Run on CPU to save VRAM).
-*   **Re-ranking:** `FlagEmbedding` (BGE-Reranker).
-*   **Sparse Search:** `rank_bm25`.
-*   **Vector Store:** `chromadb` (Local) or `faiss-cpu`.
-*   **Key-Value Store:** `sqlite3` (for Parent Chunks).
+## 6. Token Budget Packing
 
-### 2. Core Architecture Modules
+The system implements **greedy token budget packing** to maximize context utilization while staying within token limits:
 
-#### Module A: Data Layer
+1. **Greedy Selection**: Documents are packed in priority order (by rerank score)
+2. **Consecutive Fail Guard**: Stops after 3 consecutive documents that don't fit
+3. **Truncation Fallback**: Large documents are truncated at sentence boundaries
+4. **Accurate Counting**: Uses MLX native tokenizer for precise token counts
+5. **Metadata Preservation**: Tracks original document indices to maintain metadata alignment even when documents are truncated
 
-Hierarchical chunk structure:
-
-*   **ParentChunk**: 1000–1500 tokens. Full text content stored in SQLite.
-*   **ChildChunk**: 200–300 tokens. Overlapping chunks derived from parent. Stored in vector index.
-*   **Metadata**: Tracks `source_id`, `page_number`, `header_path`, `parent_id`.
-
-#### Module B: Storage Engine
-
-*   **Vector Index**: Embeddings of child chunks with int8 quantization.
-*   **Lexical Index**: BM25 index of child chunk text for keyword search.
-*   **Context Store**: SQLite database mapping parent_id to full text content.
-
-#### Module C: Retrieval Pipeline
-
-1.  **Parallel Search**:
-    *   Dense: Cosine similarity on vector index (configurable top_k).
-    *   Sparse: BM25 search on lexical index (configurable top_k).
-2.  **RRF Fusion**: Combine results using Reciprocal Rank Fusion ($$Score = \sum (1 / (60 + rank))$$).
-3.  **Early Deduplication**: Keep highest-scored child per unique parent_id.
-4.  **Reranking**: Score document pairs with BGE-Reranker-v2-m3.
-5.  **Threshold Filtering**: Remove documents below score threshold.
-6.  **Context Expansion**: Map to parent chunks and apply token budget packing.
-
-#### Module D: Configuration
-
-System configuration via `config.py`:
-
-1. Detects system RAM (psutil if available, fallback to platform detection)
-2. Supports CLI override (`--mode`) and environment variable (`RAG_MODE`)
-3. Auto-selects mode based on available RAM
-4. Embedding and BM25 operations forced to CPU to preserve LLM VRAM
+```
+Algorithm: enforce_token_budget(docs, max_tokens, tokenizer)
+  packed = []
+  packed_indices = []
+  consecutive_fails = 0
+  for i, doc in enumerate(docs) (priority order):
+    if doc fits:
+      pack it, record index i, reset fails
+    elif truncation possible:
+      truncate and pack, record index i
+    else:
+      skip, increment fails
+      if fails >= 3: STOP
+  return packed, packed_indices
+```
 
 ---
 
+## 7. Toggleable Inline Citations (Academic Mode)
+
+### Feature Overview
+
+The system supports **toggleable inline citations** that enable academic-style source attribution in generated responses. This is useful for research contexts where source transparency is critical.
+
+| Mode | Flag | Description |
+|------|------|-------------|
+| **Academic Mode** | `--cite` | Enables inline citations with `[SourceID, p. X]` format |
+| **Casual Mode** | `--no-cite` | Disables citations for cleaner, conversational output |
+
+### Citation Format
+
+When Academic Mode is enabled, chunks are formatted with citation markers:
+
+```
+[CHUNK START | SOURCE: document_id | PAGE: 42]
+... chunk content ...
+[CHUNK END]
+```
+
+The LLM is instructed to cite sources using the format `[SourceID, p. X]` for every factual claim.
+
+### Implementation Details
+
+1. **Context Formatting**: `format_context_with_citations()` wraps chunks with source/page markers
+2. **Source Legend**: Non-trivial source mappings (where source_id ≠ document name) are appended for disambiguation
+3. **Prompt Engineering**: Citation rules are conditionally injected into the system message only when enabled
+4. **Metadata Preservation**: Token budget packing tracks original indices to preserve metadata alignment even for truncated documents
+
 ### CLI Usage
+
+```bash
+# Enable Academic Mode (inline citations)
+python -m src.cli query "What does Chomsky argue?" --cite
+
+# Disable citations (Casual Mode)
+python -m src.cli query "Explain the main idea" --no-cite
+
+# Default behavior controlled by CITATIONS_ENABLED_DEFAULT in config.py
+python -m src.cli query "Summarize this document"
+```
+
+### Configuration
+
+The default citation behavior is controlled by `CITATIONS_ENABLED_DEFAULT` in `src/config.py`. CLI flags take precedence:
+
+1. `--cite` → Citations enabled
+2. `--no-cite` → Citations disabled
+3. Neither → Uses `CITATIONS_ENABLED_DEFAULT`
+
+---
+
+## 8. Metrics Collection
+
+The retrieval and packing pipeline collects comprehensive metrics for analysis and optimization:
+
+### Budget Metrics
+- `budget_tokens`: Maximum allowed tokens
+- `used_tokens`: Actual tokens used
+- `utilization_pct`: Budget utilization percentage
+- `docs_packed/skipped/truncated`: Document counts
+
+### Timing Metrics (per stage)
+- `dense_search_ms`: Embedding search time
+- `sparse_search_ms`: BM25 search time
+- `rrf_fusion_ms`: RRF fusion time
+- `rerank_ms`: Reranking time
+- `dedup_ms`: Deduplication time
+- `budget_packing_ms`: Token budget packing time
+- `total_ms`: Total pipeline time
+
+### Reranker Metrics
+- Score distribution: min, max, mean, std
+
+### Threshold Filtering Metrics
+- `threshold_value`: Score threshold applied
+- `items_before/after_threshold`: Document counts
+- `safety_net_triggered`: Whether minimum docs override was used
+
+### Deduplication Metrics
+- Before/after counts, reduction percentage
+
+---
+
+## 9. CLI Usage Examples
 
 ```bash
 # Auto-detect mode based on RAM
@@ -171,20 +248,40 @@ python -m src.cli query "Compare the two approaches"
 
 # Ingest with specific mode
 python -m src.cli ingest document.md --source-id doc1 --mode regular
+
+# Enable citations with custom intent
+python -m src.cli query "Explain the concept" --cite --intent explain
+
+# Only show retrieved context without generation
+python -m src.cli query "Search for key terms" --no-generate
 ```
 
 ---
 
-### Dependencies
+## 10. Dependencies
 
-**Required:**
-- chromadb, rank-bm25, pydantic, sentence-transformers
-- FlagEmbedding, mlx-lm, pypdf, pdfminer.six, PyMuPDF
-- pytesseract, pdf2image
+### Required
+- `chromadb` - Vector database
+- `rank-bm25` - Sparse search indexing
+- `pydantic` - Configuration validation
+- `sentence-transformers` - Embedding model inference
+- `FlagEmbedding` - Reranker model
+- `mlx-lm` - LLM inference on Apple Silicon
+- `pypdf` - PDF text extraction
+- `pdfminer.six` - Fallback PDF extraction
+- `PyMuPDF` - Additional PDF processing with page labels
+- `pytesseract` - OCR fallback for scanned PDFs
+- `pdf2image` - Image extraction for OCR
 
-**Optional:**
-- psutil (for cross-platform RAM detection)
+### Optional
+- `psutil` - Cross-platform RAM detection for auto mode selection
 
-***
+---
 
->
+## 11. Known Limitations & Future Improvements
+
+- **Metadata Alignment**: Now correctly preserved across truncation (tracked via indices)
+- **PDF Page Labels**: Uses per-page API for consistent label extraction across PyMuPDF and pypdf
+- **Source Legend**: Filters out redundant mappings to reduce noise
+- **Citation Rules**: Conditionally applied only in Academic Mode to avoid prompt bloat
+

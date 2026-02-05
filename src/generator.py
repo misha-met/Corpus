@@ -240,12 +240,14 @@ class BudgetPackResult:
     
     Attributes:
         packed_docs: List of documents that fit within budget
+        packed_indices: Original indices of the packed documents (preserves metadata alignment)
         used_tokens: Total tokens used
         skipped_count: Number of documents skipped
         truncated_count: Number of documents truncated
         consecutive_fails: Number of consecutive documents that didn't fit
     """
     packed_docs: list[str]
+    packed_indices: list[int]
     used_tokens: int
     skipped_count: int
     truncated_count: int
@@ -284,6 +286,7 @@ def enforce_token_budget(
         log = logger
     
     packed: list[str] = []
+    packed_indices: list[int] = []  # Track original indices for metadata alignment
     used_tokens = 0
     skipped = 0
     truncated = 0
@@ -299,6 +302,7 @@ def enforce_token_budget(
         # Document fits entirely
         if doc_tokens <= remaining:
             packed.append(doc)
+            packed_indices.append(i)
             used_tokens += doc_tokens
             consecutive_fails = 0
             log.debug(f"Doc {i}: packed ({doc_tokens} tokens, total: {used_tokens})")
@@ -315,6 +319,7 @@ def enforce_token_budget(
                 truncated_tokens = count_tokens(truncated_doc, tokenizer)
                 if truncated_tokens <= remaining:
                     packed.append(truncated_doc)
+                    packed_indices.append(i)
                     used_tokens += truncated_tokens
                     truncated += 1
                     consecutive_fails = 0
@@ -349,6 +354,7 @@ def enforce_token_budget(
     
     return BudgetPackResult(
         packed_docs=packed,
+        packed_indices=packed_indices,
         used_tokens=used_tokens,
         skipped_count=skipped,
         truncated_count=truncated,

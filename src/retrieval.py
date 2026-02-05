@@ -67,8 +67,17 @@ def format_context_with_citations(
     Returns:
         Tuple of:
         - Formatted context string with all chunks
-        - Source ID to document name mapping (for citation legend)
+        - Source ID to document name mapping (for citation legend, only non-trivial mappings)
+    
+    Raises:
+        ValueError: If texts and metadatas have mismatched lengths
     """
+    # Validate input lengths
+    if len(texts) != len(metadatas):
+        raise ValueError(
+            f"texts and metadatas must have same length, got {len(texts)} vs {len(metadatas)}"
+        )
+    
     formatted_chunks: list[str] = []
     source_mapping: dict[str, str] = {}
     
@@ -76,9 +85,11 @@ def format_context_with_citations(
         source_id = meta.get("source_id", "Unknown")
         display_page = meta.get("display_page")
         
-        # Build source mapping (source_id -> source_id for now, can be extended)
-        if source_id not in source_mapping:
-            source_mapping[source_id] = source_id
+        # Build source mapping only when doc_name differs from source_id
+        # This avoids redundant mappings like "Source 1 → Source 1"
+        doc_name = meta.get("doc_name") or meta.get("filename")
+        if doc_name and doc_name != source_id and source_id not in source_mapping:
+            source_mapping[source_id] = doc_name
         
         formatted_chunk = format_chunk_for_citation(
             text=text,
@@ -95,22 +106,30 @@ def format_context_with_citations(
 def build_source_legend(source_mapping: dict[str, str]) -> str:
     """Build a source legend for citation reference.
     
-    Creates a mapping list that helps readers identify sources:
+    Creates a mapping list that helps readers identify sources.
+    Only includes entries where source_id differs from document name,
+    to avoid redundant mappings that provide no utility.
+    
     SOURCE LEGEND:
     - SourceID1 → Document Name 1
     - SourceID2 → Document Name 2
     
     Args:
-        source_mapping: Dict of source_id -> document name
+        source_mapping: Dict of source_id -> document name (non-trivial mappings only)
     
     Returns:
-        Formatted source legend string
+        Formatted source legend string, or empty string if no useful mappings exist
     """
-    if not source_mapping:
+    # Filter out any remaining trivial mappings (source_id == doc_name)
+    useful_mappings = {
+        sid: name for sid, name in source_mapping.items() if sid != name
+    }
+    
+    if not useful_mappings:
         return ""
     
     lines = ["SOURCE LEGEND:"]
-    for source_id, doc_name in sorted(source_mapping.items()):
+    for source_id, doc_name in sorted(useful_mappings.items()):
         lines.append(f"- {source_id} → {doc_name}")
     
     return "\n".join(lines)

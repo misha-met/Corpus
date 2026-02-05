@@ -550,13 +550,13 @@ def run() -> None:
         pack_time_ms = (time.perf_counter() - pack_start) * 1000
         
         # Build context from packed docs
-        # Track which docs made it through packing for citation metadata
-        packed_indices = []
-        for i, doc in enumerate(parent_texts):
-            if doc in pack_result.packed_docs:
-                packed_indices.append(i)
-        
-        packed_metadatas = [result_metadatas[i] for i in packed_indices if i < len(result_metadatas)]
+        # Use packed_indices from the pack_result to preserve metadata alignment
+        # even when documents are truncated (string matching would fail)
+        packed_metadatas = [
+            result_metadatas[i]
+            for i in pack_result.packed_indices
+            if i < len(result_metadatas)
+        ]
         
         # Format context with citations if enabled
         if citations_enabled and packed_metadatas:

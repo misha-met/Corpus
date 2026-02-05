@@ -242,14 +242,12 @@ def ingest_pdf(
             continue
         
         # Extract logical page label (e.g., 'iii', 'xii', '1', '2')
-        # pypdf provides page labels through page.get_label() or reader.page_labels
+        # pypdf provides page labels through page.get_label() for the current page
         page_label: Optional[str] = None
         try:
-            # Try to get the label from the reader's page_labels dictionary
-            if hasattr(reader, 'page_labels') and reader.page_labels:
-                page_label = reader.page_labels.get(index - 1)  # 0-indexed
-            # Fallback: try page.get_label() if available (some pypdf versions)
-            if page_label is None and hasattr(page, 'get_label'):
+            # Use per-page API for direct label string retrieval
+            # This avoids off-by-one issues with reader.page_labels dict indexing
+            if hasattr(page, 'get_label'):
                 page_label = page.get_label()
         except Exception:
             pass  # Page label extraction is best-effort
@@ -308,11 +306,10 @@ def ingest_pdf(
             # PyMuPDF: extract page label if available
             page_label: Optional[str] = None
             try:
-                # fitz stores page labels in doc.get_page_labels() or page.get_label()
-                if hasattr(doc, 'get_page_labels'):
-                    labels = doc.get_page_labels()
-                    if labels and index < len(labels):
-                        page_label = labels[index]
+                # Use per-page API page.get_label() which returns the formatted string directly
+                # Note: doc.get_page_labels() returns a list of dicts, not strings
+                if hasattr(page, 'get_label'):
+                    page_label = page.get_label()
             except Exception:
                 pass  # Page label extraction is best-effort
             

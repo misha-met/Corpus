@@ -136,14 +136,25 @@ def build_prompt(
         format_instructions += " Include inline citations [SourceID, p. X] for factual claims."
         cfg = {**cfg, 'format': format_instructions}
     
-    system_block = (
-        f"{_SYSTEM_MESSAGE}"
-        f"{citation_block}\n\n"
-        f"Task: {cfg['task']}\n"
-        f"Format: {cfg['format']}\n"
-        f"Tone: {cfg['tone']}"
-        f"{extra_block}"
-    )
+    # Build system block - only add citation_block if citations are enabled
+    # to avoid unnecessary newlines when in casual mode
+    if citation_block:
+        system_block = (
+            f"{_SYSTEM_MESSAGE}"
+            f"{citation_block}\n\n"
+            f"Task: {cfg['task']}\n"
+            f"Format: {cfg['format']}\n"
+            f"Tone: {cfg['tone']}"
+            f"{extra_block}"
+        )
+    else:
+        system_block = (
+            f"{_SYSTEM_MESSAGE}\n\n"
+            f"Task: {cfg['task']}\n"
+            f"Format: {cfg['format']}\n"
+            f"Tone: {cfg['tone']}"
+            f"{extra_block}"
+        )
 
     # Add source legend if provided and citations enabled
     legend_block = ""
