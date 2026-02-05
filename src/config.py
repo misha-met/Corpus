@@ -98,7 +98,7 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
             # 64GB+ system: Full budgets
             return ModelConfig(
                 mode="regular",
-                llm_model="mlx-community/Qwen3-30B-A3B-MLX-4bit,
+                llm_model="mlx-community/Qwen3-30B-A3B-MLX-4bit",
                 embedding_model="BAAI/bge-m3",
                 reranker_model="BAAI/bge-reranker-v2-m3",
                 embedding_device="cpu",
