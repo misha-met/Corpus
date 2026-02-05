@@ -106,6 +106,8 @@ def _split_parent_chunks(
     *,
     source_id: str,
     page_number: Optional[int],
+    page_label: Optional[str] = None,
+    display_page: Optional[str] = None,
 ) -> list[ParentChunk]:
     tokens = _tokenize(section.text)
     if not tokens:
@@ -125,6 +127,8 @@ def _split_parent_chunks(
         metadata = Metadata(
             source_id=source_id,
             page_number=page_number,
+            page_label=page_label,
+            display_page=display_page,
             header_path=section.header_path,
             parent_id=None,
         )
@@ -150,6 +154,8 @@ def _split_child_chunks(parent: ParentChunk) -> list[ChildChunk]:
         metadata = Metadata(
             source_id=parent.metadata.source_id,
             page_number=parent.metadata.page_number,
+            page_label=parent.metadata.page_label,
+            display_page=parent.metadata.display_page,
             header_path=parent.metadata.header_path,
             parent_id=parent.id,
         )
@@ -180,6 +186,9 @@ def ingest_markdown(
     if not sections:
         raise ValueError("No parsable content found in markdown file.")
 
+    # For markdown, display_page is simply str(page_number) if provided
+    display_page = str(page_number) if page_number is not None else None
+
     parents: list[ParentChunk] = []
     children: list[ChildChunk] = []
 
@@ -188,6 +197,8 @@ def ingest_markdown(
             section,
             source_id=source_id.strip(),
             page_number=page_number,
+            page_label=None,  # No page labels in markdown
+            display_page=display_page,
         ):
             parents.append(parent)
             children.extend(_split_child_chunks(parent))
@@ -229,11 +240,30 @@ def ingest_pdf(
         page_text = clean_ocr_artifacts((page.extract_text() or "").strip())
         if not page_text:
             continue
+        
+        # Extract logical page label (e.g., 'iii', 'xii', '1', '2')
+        # pypdf provides page labels through page.get_label() or reader.page_labels
+        page_label: Optional[str] = None
+        try:
+            # Try to get the label from the reader's page_labels dictionary
+            if hasattr(reader, 'page_labels') and reader.page_labels:
+                page_label = reader.page_labels.get(index - 1)  # 0-indexed
+            # Fallback: try page.get_label() if available (some pypdf versions)
+            if page_label is None and hasattr(page, 'get_label'):
+                page_label = page.get_label()
+        except Exception:
+            pass  # Page label extraction is best-effort
+        
+        # display_page: prefer page_label, fallback to str(page_number)
+        display_page = page_label if page_label else str(index)
+        
         section = _Section(header_path="Document", text=page_text)
         for parent in _split_parent_chunks(
             section,
             source_id=source_id.strip(),
             page_number=index,
+            page_label=page_label,
+            display_page=display_page,
         ):
             parents.append(parent)
             children.extend(_split_child_chunks(parent))
@@ -248,11 +278,14 @@ def ingest_pdf(
 
         fallback_text = clean_ocr_artifacts((extract_text(str(path)) or "").strip())
         if fallback_text:
+            # pdfminer fallback: no page-level info available
             section = _Section(header_path="Document", text=fallback_text)
             for parent in _split_parent_chunks(
                 section,
                 source_id=source_id.strip(),
                 page_number=None,
+                page_label=None,
+                display_page=None,
             ):
                 parents.append(parent)
                 children.extend(_split_child_chunks(parent))
@@ -271,11 +304,28 @@ def ingest_pdf(
             page_text = clean_ocr_artifacts((page.get_text("text") or "").strip())
             if not page_text:
                 continue
+            
+            # PyMuPDF: extract page label if available
+            page_label: Optional[str] = None
+            try:
+                # fitz stores page labels in doc.get_page_labels() or page.get_label()
+                if hasattr(doc, 'get_page_labels'):
+                    labels = doc.get_page_labels()
+                    if labels and index < len(labels):
+                        page_label = labels[index]
+            except Exception:
+                pass  # Page label extraction is best-effort
+            
+            page_number = index + 1
+            display_page = page_label if page_label else str(page_number)
+            
             section = _Section(header_path="Document", text=page_text)
             for parent in _split_parent_chunks(
                 section,
                 source_id=source_id.strip(),
-                page_number=index + 1,
+                page_number=page_number,
+                page_label=page_label,
+                display_page=display_page,
             ):
                 parents.append(parent)
                 children.extend(_split_child_chunks(parent))
@@ -296,11 +346,14 @@ def ingest_pdf(
             )
             if not page_text:
                 continue
+            # OCR fallback: no page labels available from image-based extraction
             section = _Section(header_path="Document", text=page_text)
             for parent in _split_parent_chunks(
                 section,
                 source_id=source_id.strip(),
                 page_number=index,
+                page_label=None,
+                display_page=str(index),
             ):
                 parents.append(parent)
                 children.extend(_split_child_chunks(parent))
