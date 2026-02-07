@@ -170,6 +170,77 @@ def build_prompt(
     )
 
 
+def build_messages(
+    context: str,
+    question: str,
+    intent: Optional[Intent] = None,
+    extra_instructions: Optional[str] = None,
+    citations_enabled: bool = False,
+    source_legend: Optional[str] = None,
+) -> list[dict[str, str]]:
+    """
+    Build intent-aware chat messages for the LLM.
+
+    Returns a list of role/content dicts suitable for chat templates.
+    """
+    if intent is None:
+        intent = Intent.OVERVIEW
+
+    cfg = INTENT_INSTRUCTIONS.get(intent, INTENT_INSTRUCTIONS[Intent.OVERVIEW])
+
+    extra_block = ""
+    if extra_instructions and extra_instructions.strip():
+        extra_block = f"\nAdditional constraints: {extra_instructions.strip()}"
+
+    citation_block = ""
+    if citations_enabled:
+        citation_block = f"\n{_CITATION_RULES}"
+        format_instructions = cfg["format"]
+        if "Do NOT include page numbers" in format_instructions:
+            format_instructions = format_instructions.replace(
+                "Do NOT include page numbers, document headers, or citation markers. ", ""
+            ).replace(
+                "Do NOT include page numbers or citation markers.", ""
+            ).replace(
+                "Do NOT include page numbers.", ""
+            )
+        format_instructions += " Include inline citations [SourceID, p. X] for factual claims."
+        cfg = {**cfg, "format": format_instructions}
+
+    if citation_block:
+        system_block = (
+            f"{_SYSTEM_MESSAGE}"
+            f"{citation_block}\n\n"
+            f"Task: {cfg['task']}\n"
+            f"Format: {cfg['format']}\n"
+            f"Tone: {cfg['tone']}"
+            f"{extra_block}"
+        )
+    else:
+        system_block = (
+            f"{_SYSTEM_MESSAGE}\n\n"
+            f"Task: {cfg['task']}\n"
+            f"Format: {cfg['format']}\n"
+            f"Tone: {cfg['tone']}"
+            f"{extra_block}"
+        )
+
+    legend_block = ""
+    if citations_enabled and source_legend:
+        legend_block = f"\n\n{source_legend}"
+
+    user_block = (
+        f"Context:\n{context}{legend_block}\n\n"
+        f"Question: {question}\n\n"
+        f"Answer:"
+    )
+
+    return [
+        {"role": "system", "content": system_block},
+        {"role": "user", "content": user_block},
+    ]
+
+
 # Legacy function for backward compatibility
 def build_prompt_legacy(context: str, question: str) -> str:
     """Original prompt builder (deprecated, kept for reference)."""

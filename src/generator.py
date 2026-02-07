@@ -35,11 +35,6 @@ DEFAULT_STOP_TOKENS = [
     "This answer was generated",
     "This response reflects",
     "This response was",
-    "Note:",
-    "Overall,",
-    "In summary,",  # When used as meta-tag after actual content
-    "To summarize,",
-    "In conclusion,",
 ]
 
 
@@ -145,7 +140,7 @@ class MlxGenerator:
                 top_p = top_p or 0.9
             else:
                 max_tokens = max_tokens or 400
-                repetition_penalty = repetition_penalty or 1.1
+                repetition_penalty = repetition_penalty or 1.15
                 temperature = temperature or 0.15
                 top_p = top_p or 0.9
         else:
@@ -184,6 +179,58 @@ class MlxGenerator:
             return output
         except Exception as exc:  # pragma: no cover - dependency runtime
             raise RuntimeError("mlx-lm generation failed.") from exc
+
+    def generate_chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        config: Optional[GenerationConfig] = None,
+    ) -> str:
+        if not messages:
+            raise ValueError("messages must be a non-empty list of role/content dicts.")
+
+        prompt = self._apply_chat_template(messages)
+        output = self.generate(prompt, config=config)
+        return self._strip_thinking_blocks(output)
+
+    def _apply_chat_template(self, messages: list[dict[str, str]]) -> str:
+        if hasattr(self._tokenizer, "apply_chat_template"):
+            try:
+                return self._tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                )
+            except TypeError:
+                return self._tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            except Exception:
+                pass
+
+        parts = []
+        for message in messages:
+            role = message.get("role", "user").strip().lower()
+            content = message.get("content", "").strip()
+            if not content:
+                continue
+            if role == "system":
+                parts.append(f"System: {content}")
+            elif role == "assistant":
+                parts.append(f"Assistant: {content}")
+            else:
+                parts.append(f"User: {content}")
+        parts.append("Assistant:")
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _strip_thinking_blocks(text: str) -> str:
+        if not text:
+            return text
+        return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
     @staticmethod
     def _apply_stop_tokens(text: str, stop_tokens: list[str]) -> str:

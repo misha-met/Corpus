@@ -7,7 +7,7 @@ from typing import Iterable, Optional
 
 from .models import ChildChunk, Metadata, ParentChunk
 from .intent import Intent
-from .generation import build_prompt
+from .generation import build_messages
 from .generator import MlxGenerator
 from .storage import StorageEngine
 
@@ -446,12 +446,12 @@ def ingest_file_to_storage(
         context = "\n\n".join(parent.text for parent in parents)
         if len(context) > 12000:
             context = context[:12000]
-        prompt = build_prompt(
+        messages = build_messages(
             context=context,
             question="Summarize this document.",
             intent=Intent.SUMMARIZE,
         )
-        summary = generator.generate(prompt)
+        summary = generator.generate_chat(messages)
         storage.upsert_source_summary(source_id=source_id, summary=summary)
 
     return len(parents), len(children)

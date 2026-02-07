@@ -16,7 +16,7 @@ warnings.filterwarnings(
 )
 
 from .config import select_mode_config, ModelConfig, CITATIONS_ENABLED_DEFAULT
-from .generation import build_prompt
+from .generation import build_messages
 from .generator import MlxGenerator, count_tokens, enforce_token_budget
 from .ingest import ingest_file_to_storage
 from .intent import Intent, IntentClassifier, IntentResult
@@ -101,6 +101,31 @@ def _strip_chatter(text: str) -> str:
     return result
 
 
+def _dedupe_repeated_blocks(text: str) -> str:
+    if not text:
+        return text
+
+    normalized = re.sub(r"\s+", " ", text).strip().lower()
+    if len(normalized) < 200:
+        return text
+
+    mid = len(text) // 2
+    first = text[:mid].strip()
+    second = text[mid:].strip()
+    if not first or not second:
+        return text
+
+    import difflib
+
+    first_norm = re.sub(r"\s+", " ", first).strip().lower()
+    second_norm = re.sub(r"\s+", " ", second).strip().lower()
+    ratio = difflib.SequenceMatcher(None, first_norm, second_norm).ratio()
+    if ratio >= 0.85:
+        return first
+
+    return text
+
+
 def _sanitize_output(text: str) -> str:
     """
     Post-process LLM output to remove noise and artifacts.
@@ -121,6 +146,9 @@ def _sanitize_output(text: str) -> str:
     
     # Remove chatter phrases
     result = _strip_chatter(result)
+
+    # Remove repeated blocks (common double-response artifact)
+    result = _dedupe_repeated_blocks(result)
     
     # Remove repeating headers/page numbers
     result = _REPETITION_PATTERN.sub(r"\1", result)
@@ -464,12 +492,12 @@ def run() -> None:
                     context_text = "\n\n".join(parent_texts)
                     if len(context_text) > 12000:
                         context_text = context_text[:12000]
-                    summary_prompt = build_prompt(
+                    summary_messages = build_messages(
                         context=context_text,
                         question="Summarize this document.",
                         intent=Intent.SUMMARIZE,
                     )
-                    summary_text = generator.generate(summary_prompt)
+                    summary_text = generator.generate_chat(summary_messages)
                     storage.upsert_source_summary(
                         source_id=source,
                         summary=summary_text,
@@ -645,7 +673,7 @@ def run() -> None:
         return
 
     # --- Generation ---
-    prompt = build_prompt(
+    messages = build_messages(
         context,
         args.query,
         intent=intent_result.intent,
@@ -660,7 +688,7 @@ def run() -> None:
     # Use higher token limit for academic mode (citations add overhead)
     from .generator import GenerationConfig
     gen_config = GenerationConfig(max_tokens=600 if citations_enabled else None)
-    answer = generator.generate(prompt, config=gen_config)
+    answer = generator.generate_chat(messages, config=gen_config)
     
     # --- Output Sanitization ---
     answer = _sanitize_output(answer)
