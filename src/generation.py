@@ -91,9 +91,19 @@ def _prepare_config(intent: Optional[Intent], citations_enabled: bool, extra_ins
     citation_block = ""
     if citations_enabled:
         citation_block = f"\n{_CITATION_RULES}"
-        for pattern in ["Do NOT include page numbers, document headers, or citation markers. ", "Do NOT include page numbers or citation markers.", "Do NOT include page numbers."]:
-            cfg['format'] = cfg['format'].replace(pattern, "")
-        cfg['format'] += " Include inline citations [SourceID, p. X] for factual claims."
+        removal_patterns = [
+            "Do NOT include page numbers, document headers, or citation markers.",
+            "Do NOT include page numbers or citation markers.",
+            "Do NOT include page numbers.",
+        ]
+        normalized_format = " ".join(cfg["format"].split())
+        for pattern in removal_patterns:
+            normalized_format = normalized_format.replace(" ".join(pattern.split()), "")
+        normalized_format = " ".join(normalized_format.split()).strip()
+        if normalized_format and not normalized_format.endswith((".", "!", "?")):
+            normalized_format += "."
+        cfg["format"] = normalized_format
+        cfg["format"] += " Include inline citations [SourceID, p. X] for factual claims."
     return cfg, citation_block, extra_block
 
 

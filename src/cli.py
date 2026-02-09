@@ -231,6 +231,9 @@ def run() -> None:
 
     args = parser.parse_args()
 
+    if args.cite and args.no_cite:
+        parser.error("Conflicting flags: use only one of --cite or --no-cite.")
+
     config = select_mode_config(manual_mode=getattr(args, 'mode', None))
     mode_source = "CLI" if getattr(args, 'mode', None) else "env" if os.getenv("RAG_MODE") else "auto"
     print(f"\n[Hardware: {config.system_ram_gb:.0f}GB | Mode: {config.mode} ({mode_source})]")
@@ -307,7 +310,12 @@ def run() -> None:
     model_id = args.model or config.llm_model
     generator: Optional[MlxGenerator] = None
     
-    citations_enabled = args.cite if args.cite else (not args.no_cite and CITATIONS_ENABLED_DEFAULT)
+    if args.cite is True:
+        citations_enabled = True
+    elif args.no_cite is True:
+        citations_enabled = False
+    else:
+        citations_enabled = CITATIONS_ENABLED_DEFAULT
     logger.info(f"Citations mode: {'ENABLED (Academic Mode)' if citations_enabled else 'DISABLED (Casual Mode)'}")
     
     intent_result: Optional[IntentResult] = None
@@ -434,6 +442,9 @@ def run() -> None:
             )
             source_legend = build_source_legend(source_mapping)
             logger.info(f"Citations enabled: formatted {len(pack_result.packed_docs)} chunks with source markers")
+        elif citations_enabled:
+            logger.info("Auto-disabling citations: packed context is missing metadata for chunk markers")
+            citations_enabled = False
         else:
             context = "\n\n".join(pack_result.packed_docs)
 
@@ -470,6 +481,9 @@ def run() -> None:
                 metadatas=result_metadatas,
             )
             source_legend = build_source_legend(source_mapping)
+        elif citations_enabled:
+            logger.info("Auto-disabling citations: retrieved context is missing metadata for chunk markers")
+            citations_enabled = False
         else:
             context = _dedupe_context(parent_texts)
 
