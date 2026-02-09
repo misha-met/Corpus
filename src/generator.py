@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import re
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -137,6 +138,8 @@ class MlxGenerator:
             # IMPORTANT: Always pass explicit max_tokens to override mlx-lm's hidden 256 default
             # Use 1200 tokens (~900 words) for long-form academic answers when not specified
             final_max_tokens = max_tokens if max_tokens is not None else 1200
+            prompt_tokens = count_tokens(prompt, self._tokenizer)
+            start_time = time.perf_counter()
             output = generate(
                 self._model,
                 self._tokenizer,
@@ -145,9 +148,24 @@ class MlxGenerator:
                 sampler=sampler,
                 logits_processors=logits_processors or None,
             )
+            elapsed_s = time.perf_counter() - start_time
             
             # Apply stop token truncation (mlx-lm may not support all stop tokens natively)
             output = self._apply_stop_tokens(output, stop_tokens)
+            output_tokens = count_tokens(output, self._tokenizer)
+            total_tokens = prompt_tokens + output_tokens
+            elapsed_safe = max(elapsed_s, 1e-6)
+            tokens_per_sec = output_tokens / elapsed_safe
+            logger.info(
+                "LLM generation | model=%s prompt_tokens=%d output_tokens=%d total_tokens=%d "
+                "time_s=%.2f tokens_per_s=%.2f",
+                self._model_id,
+                prompt_tokens,
+                output_tokens,
+                total_tokens,
+                elapsed_s,
+                tokens_per_sec,
+            )
             return output
         except Exception as exc:  # pragma: no cover - dependency runtime
             raise RuntimeError("mlx-lm generation failed.") from exc
