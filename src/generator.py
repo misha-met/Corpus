@@ -240,8 +240,6 @@ class BudgetPackResult:
     skipped_count: int
     truncated_count: int
     consecutive_fails: int
-    truncated_count: int
-    consecutive_fails: int
 
 
 def enforce_token_budget(
