@@ -33,13 +33,20 @@ INTENT_INSTRUCTIONS: dict[Intent, dict[str, str]] = {
         "tone": "Conversational.",
     },
     Intent.ANALYZE: {
-        "task": "Analyze and synthesize the specific aspect the user is asking about.",
+        "task": (
+            "Analyze and synthesize the theoretical conflicts within the context. "
+            "Identify not just surface similarities, but underlying principles. "
+            "Look for 'invariant flaws' (errors the author believes are repeated across different eras) "
+            "and 'explanatory gaps' (what the author claims both models fail to explain)."
+        ),
         "format": (
             "Present a synthesized analysis with evidence - do NOT use bullet points. "
-            "Write in flowing paragraphs that connect ideas."
+            "Write in flowing paragraphs that connect ideas, moving from surface comparison "
+            "to deeper structural or philosophical implications."
         ),
-        "tone": "Thoughtful and balanced.",
+        "tone": "Thoughtful, academic, and balanced.",
     },
+
 }
 
 _SYSTEM_MESSAGE = """You are a helpful research assistant. Follow these rules strictly:
