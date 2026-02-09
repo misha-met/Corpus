@@ -85,7 +85,7 @@ def _prepare_config(intent: Optional[Intent], citations_enabled: bool, extra_ins
         if normalized_format and not normalized_format.endswith((".", "!", "?")):
             normalized_format += "."
         cfg["format"] = normalized_format
-        cfg["format"] += " Include inline citations [SourceID, p. X] for factual claims."
+        cfg["format"] += " Include inline citations [SourceID, p. X] or [SourceID] for factual claims."
     return cfg, citation_block, extra_block
 
 

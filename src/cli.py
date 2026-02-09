@@ -1,40 +1,10 @@
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
-# Check if required models are cached locally before enabling offline mode
-def _check_models_cached() -> bool:
-    """Check if all required models exist in Hugging Face cache."""
-    required_models = [
-        "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
-        "BAAI/bge-m3",
-        "BAAI/bge-reranker-v2-m3",
-    ]
-    cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
-    
-    if not cache_dir.exists():
-        return False
-    
-    for model_id in required_models:
-        # Convert model ID to cache folder format: models--org--model
-        cache_folder = f"models--{model_id.replace('/', '--')}"
-        model_cache_path = cache_dir / cache_folder
-        if not model_cache_path.exists():
-            return False
-    
-    return True
-
-
-# Set offline mode BEFORE importing any model-loading libraries (only if models are cached)
-if _check_models_cached():
-    os.environ['HF_HUB_OFFLINE'] = '1'
-    os.environ['TRANSFORMERS_OFFLINE'] = '1'
-
 import argparse
 import gc
 import json
 import logging
+import os
 import re
 import textwrap
 import warnings
@@ -42,10 +12,6 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 warnings.filterwarnings("ignore", message=r"urllib3 v2 only supports OpenSSL.*")
-
-# Apply compatibility patches BEFORE importing other modules
-from .compat_patch import patch_transformers_compatibility
-patch_transformers_compatibility()
 
 from .config import CITATIONS_ENABLED_DEFAULT, ModelConfig, select_mode_config
 from .generation import build_messages
@@ -172,6 +138,39 @@ def _log_query(original: str, expanded: Optional[str], intent: IntentResult, exp
     logger.info(f"Query log: {json.dumps({'original_query': original, 'expanded_query': expanded, 'intent': intent.intent.value, 'intent_confidence': intent.confidence, 'intent_method': intent.method, 'expansion_enabled': expansion_enabled})}")
 
 
+def _enable_offline_if_cached(config: ModelConfig) -> None:
+    """Enable HF offline mode if all models for the active config are cached.
+
+    Must be called **after** mode selection so the model list is accurate.
+    Uses ``huggingface_hub.constants.HF_HUB_CACHE`` to honour custom cache paths.
+    """
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+        cache_dir = Path(HF_HUB_CACHE)
+    except ImportError:
+        cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+
+    if not cache_dir.exists():
+        logger.debug("HF cache dir %s does not exist; staying online", cache_dir)
+        return
+
+    required_models = [
+        config.llm_model,
+        config.embedding_model,
+        config.reranker_model,
+    ]
+
+    for model_id in required_models:
+        cache_folder = f"models--{model_id.replace('/', '--')}"
+        if not (cache_dir / cache_folder).exists():
+            logger.debug("Model %s not cached; staying online", model_id)
+            return
+
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    logger.info("All models cached — enabled offline mode")
+
+
 def run() -> None:
     logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 
@@ -283,6 +282,7 @@ def run() -> None:
             logging.getLogger(noisy).setLevel(logging.WARNING)
 
     config = select_mode_config(manual_mode=getattr(args, 'mode', None))
+    _enable_offline_if_cached(config)
     mode_source = "CLI" if getattr(args, 'mode', None) else "env" if os.getenv("RAG_MODE") else "auto"
     print(f"\n[Hardware: {config.system_ram_gb:.0f}GB | Mode: {config.mode} ({mode_source})]")
     print(f"[LLM: {config.llm_model} | Quant: {config.quantization}]")
@@ -293,10 +293,7 @@ def run() -> None:
     except Exception as exc:  # pragma: no cover - dependency runtime
         raise RuntimeError("sentence-transformers is required for embeddings.") from exc
 
-    try:
-        from FlagEmbedding import FlagReranker
-    except Exception as exc:  # pragma: no cover - dependency runtime
-        raise RuntimeError("FlagEmbedding is required for reranking.") from exc
+    from .reranker import JinaRerankerMLX
 
     embedding_model = SentenceTransformer(config.embedding_model, device=config.embedding_device)
 
@@ -346,7 +343,7 @@ def run() -> None:
         )
 
     storage.load_bm25(bm25_path)
-    reranker = FlagReranker(config.reranker_model, use_fp16=True, device="cpu")
+    reranker = JinaRerankerMLX(model_id=config.reranker_model)
 
     retrieval = RetrievalEngine(
         storage=storage,
@@ -459,7 +456,7 @@ def run() -> None:
     retrieval_metrics: Optional[RetrievalMetrics] = results[0].metrics if results and results[0].metrics else None
 
     # Release retrieval-only models to free memory before LLM generation.
-    # On 32GB Apple Silicon, the reranker (~1.1GB) and embedding model (~2GB)
+    # On 32GB Apple Silicon, the reranker (~1.2GB) and embedding model (~2GB)
     # competing with the MLX LLM for unified memory can cause swap thrashing.
     del reranker, embedding_model, retrieval
     gc.collect()
@@ -555,7 +552,7 @@ def run() -> None:
             )
         if verbose:
             log_metrics(retrieval_metrics, config.mode, logger)
-            print(f"[Retrieval: {format_metrics_summary(retrieval_metrics)}]")
+        print(f"[Retrieval: {format_metrics_summary(retrieval_metrics)}]")
 
     if args.no_generate:
         print("Top retrieved context:\n")
@@ -585,7 +582,10 @@ def run() -> None:
 
     # Academic mode (citations): 600 tokens for concise, cited answers
     # Casual mode: 1200 tokens for comprehensive, long-form responses
-    gen_config = GenerationConfig(max_tokens=600 if citations_enabled else 1200)
+    gen_config = GenerationConfig(
+        max_tokens=600 if citations_enabled else 1200,
+        context_window=config.context_window,
+    )
     answer = _sanitize_output(generator.generate_chat(messages, config=gen_config))
     
     # Print intent info and answer

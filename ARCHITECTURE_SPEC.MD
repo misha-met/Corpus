@@ -20,7 +20,7 @@ The system implements a **hybrid retrieval-augmented generation (RAG) pipeline**
 
 *   **LLM Inference:** `mlx-lm` (Apple Machine Learning/Metal optimized).
 *   **Embeddings:** `sentence-transformers` (Run on CPU to save VRAM).
-*   **Re-ranking:** `FlagEmbedding` (BGE-Reranker-v2-m3).
+*   **Re-ranking:** `jinaai/jina-reranker-v3-mlx` (Jina Reranker v3, MLX-native).
 *   **Sparse Search:** `rank_bm25`.
 *   **Vector Store:** `chromadb` (Local, HNSW with cosine distance).
 *   **Key-Value Store:** `sqlite3` (for Parent Chunks).
@@ -265,7 +265,7 @@ python -m src.cli query "Search for key terms" --no-generate
 - `rank-bm25` - Sparse search indexing
 - `pydantic` - Configuration validation
 - `sentence-transformers` - Embedding model inference
-- `FlagEmbedding` - Reranker model
+- `jinaai/jina-reranker-v3-mlx` - Reranker model (MLX-native)
 - `mlx-lm` - LLM inference on Apple Silicon
 - `pypdf` - PDF text extraction
 - `pdfminer.six` - Fallback PDF extraction

@@ -42,7 +42,7 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
                 mode="regular",
                 llm_model="mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
                 embedding_model="BAAI/bge-m3",
-                reranker_model="BAAI/bge-reranker-v2-m3",
+                reranker_model="jinaai/jina-reranker-v3-mlx",
                 embedding_device="cpu",
                 quantization="4-bit",
                 context_window=16_000,
@@ -52,7 +52,7 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
                 top_k_fused=50,
                 top_k_rerank=20,
                 top_k_final=5,
-                reranker_threshold=-6.0,  # Aggressive filtering for RAM protection
+                reranker_threshold=0.05,  # Cosine similarity threshold (Jina v3 scores in ~0..1)
                 reranker_min_docs=3,
                 system_ram_gb=ram_gb,
             )
@@ -62,7 +62,7 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
                 mode="regular",
                 llm_model="mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
                 embedding_model="BAAI/bge-m3",
-                reranker_model="BAAI/bge-reranker-v2-m3",
+                reranker_model="jinaai/jina-reranker-v3-mlx",
                 embedding_device="cpu",
                 quantization="4-bit",
                 context_window=64_000,
@@ -72,7 +72,7 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
                 top_k_fused=50,
                 top_k_rerank=20,
                 top_k_final=5,
-                reranker_threshold=-6.0,
+                reranker_threshold=0.05,
                 reranker_min_docs=3,
                 system_ram_gb=ram_gb,
             )
@@ -84,7 +84,7 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
             mode="power-fast",
             llm_model="mlx-community/Qwen3-30B-A3B-Instruct-2507-8bit",
             embedding_model="BAAI/bge-m3",
-            reranker_model="BAAI/bge-reranker-v2-m3",
+            reranker_model="jinaai/jina-reranker-v3-mlx",
             embedding_device="cpu",
             quantization="8-bit",
             context_window=96_000,
@@ -94,7 +94,7 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
             top_k_fused=150,
             top_k_rerank=80,
             top_k_final=15,
-            reranker_threshold=-8.0,
+            reranker_threshold=0.02,
             reranker_min_docs=5,
             system_ram_gb=ram_gb,
         )
@@ -106,7 +106,7 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
             mode="power-deep-research",
             llm_model="mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit",
             embedding_model="BAAI/bge-m3",
-            reranker_model="BAAI/bge-reranker-v2-m3",
+            reranker_model="jinaai/jina-reranker-v3-mlx",
             embedding_device="cpu",
             quantization="4-bit",
             context_window=32_000,
@@ -116,7 +116,7 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
             top_k_fused=150,
             top_k_rerank=80,
             top_k_final=15,
-            reranker_threshold=-10.0,
+            reranker_threshold=0.01,
             reranker_min_docs=10,
             system_ram_gb=ram_gb,
         )
