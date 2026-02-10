@@ -423,6 +423,7 @@ def run() -> None:
                         context=context_text,
                         question="Summarize this document.",
                         intent=Intent.SUMMARIZE,
+                        mode=config.mode,
                     )
                     summary_text = generator.generate_chat(summary_messages)
                     storage.upsert_source_summary(
@@ -579,6 +580,7 @@ def run() -> None:
         extra_instructions=extra_instructions,
         citations_enabled=citations_enabled,
         source_legend=source_legend,
+        mode=config.mode,
     )
 
     if generator is None:

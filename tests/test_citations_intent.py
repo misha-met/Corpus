@@ -262,7 +262,7 @@ class TestMessageBuilding:
             assert "tone" in cfg
 
     def test_system_message_contains_rules(self):
-        assert "ONLY on the provided context" in _SYSTEM_MESSAGE
+        assert "ONLY the provided context" in _SYSTEM_MESSAGE
 
     def test_extra_instructions_included(self):
         messages = build_messages(
