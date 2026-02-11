@@ -1,7 +1,5 @@
 ## Project: Offline Advanced RAG (Apple Silicon Optimized)
 
----
-
 ## 1. Core Architecture Overview
 
 The system implements a **hybrid retrieval-augmented generation (RAG) pipeline** optimized for Apple Silicon, combining:
@@ -21,7 +19,7 @@ The system implements a **hybrid retrieval-augmented generation (RAG) pipeline**
 *   **LLM Inference:** `mlx-lm` (Apple Machine Learning/Metal optimized).
 *   **Embeddings:** `sentence-transformers` (Run on CPU to save VRAM).
 *   **Re-ranking:** `jinaai/jina-reranker-v3-mlx` (Jina Reranker v3, MLX-native).
-*   **Sparse Search:** `rank_bm25`.
+*   **Sparse Search:** `rank-bm25`.
 *   **Vector Store:** `chromadb` (Local, HNSW with cosine distance).
 *   **Key-Value Store:** `sqlite3` (for Parent Chunks).
 
@@ -65,7 +63,7 @@ System configuration via `config.py`:
 
 ---
 
-## 4. Three-Mode RAG Configuration
+## 4. RAG Configuration and Modes
 
 ### Operating Modes
 
@@ -276,17 +274,3 @@ python -m src.cli query "Search for key terms" --no-generate
 
 ### Optional
 - `psutil` - Cross-platform RAM detection for auto mode selection
-
----
-
-## 11. Known Limitations & Future Improvements
-
-- **Reranker Context Safety**: A dynamic guard truncates the document list via binary search so the listwise prompt never exceeds the backbone’s 131K context window
-- **Tokenizer Robustness**: Special token IDs (`<|embed_token|>`, `<|rerank_token|>`) are resolved from the tokenizer vocabulary at runtime; hard-coded fallbacks are used only when lookup fails
-- **Numerical Stability**: An $\epsilon$ term is added to the cosine similarity denominator to prevent NaN from zero-vector embeddings
-- **Offline Mode**: `_enable_offline_if_cached` verifies that model snapshots contain actual weight files before forcing `HF_HUB_OFFLINE`
-- **Metadata Alignment**: Now correctly preserved across truncation (tracked via indices)
-- **PDF Page Labels**: Uses per-page API for consistent label extraction across PyMuPDF and pypdf
-- **Source Legend**: Filters out redundant mappings to reduce noise
-- **Citation Rules**: Conditionally applied only in Academic Mode to avoid prompt bloat
-
