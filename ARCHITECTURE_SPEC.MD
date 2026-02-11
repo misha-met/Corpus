@@ -69,29 +69,30 @@ System configuration via `config.py`:
 
 ### Operating Modes
 
-The system supports three operating modes, each optimized for different use cases and hardware configurations:
+The system supports two operating modes, with `regular` mode auto-scaling based on detected RAM:
 
 | Mode | LLM Model | Quantization | Context Window | Retrieval Budget | RAM Requirement |
 |------|-----------|--------------|----------------|------------------|-----------------|
-| `regular` | Qwen3-30B-A3B-Instruct-4bit | 4-bit | 64K | 32K | 32GB |
-| `power-fast` | Qwen3-30B-A3B-Instruct-2507-8bit | 8-bit | 96K | 50K | 64GB |
-| `power-deep-research` | Qwen3-Next-80B-A3B-Instruct-4bit | 4-bit | 32K | 20K | 64GB |
+| `regular` (32GB) | Qwen3-30B-A3B-Instruct-4bit | 4-bit | 16K | 8K | 32GB |
+| `regular` (48-63GB) | Qwen3-30B-A3B-Instruct-4bit | 4-bit | 64K | 32K | 48GB |
+| `regular` (64GB+) | Qwen3-30B-A3B-Instruct-4bit | 4-bit | 64K | 48K | 64GB |
+| `power-deep-research` | Qwen3-Next-80B-A3B-Instruct-4bit | 4-bit | 48K | 40K | 64GB |
 
 #### Mode Selection Precedence
 
-1. **CLI flag**: `--mode regular|power-fast|power-deep-research`
-2. **Environment variable**: `RAG_MODE=power-fast`
-3. **Auto-detection**: Based on system RAM (uses psutil if available)
+1. **CLI flag**: `--mode regular|power-deep-research`
+2. **Environment variable**: `RAG_MODE=power-deep-research`
+3. **Auto-detection**: Defaults to `regular` (uses RAM-aware parameter scaling)
 
 #### Retrieval Parameters by Mode
 
-| Parameter | Regular | Power-Fast / Deep-Research |
-|-----------|---------|---------------------------|
-| `top_k_dense` | 100 | 300 |
-| `top_k_sparse` | 100 | 300 |
-| `top_k_fused` | 50 | 150 |
-| `top_k_rerank` | 20 | 40 |
-| `top_k_final` | 5 | 15 |
+| Parameter | Regular (32GB) | Regular (48-63GB) | Regular Plus (64GB+) | Deep-Research |
+|-----------|----------------|-------------------|----------------------|---------------|
+| `top_k_dense` | 100 | 100 | 200 | 400 |
+| `top_k_sparse` | 100 | 100 | 200 | 400 |
+| `top_k_fused` | 50 | 50 | 100 | 200 |
+| `top_k_rerank` | 20 | 20 | 40 | 60 |
+| `top_k_final` | 5 | 5 | 8 | 10 |
 
 #### Reranker Threshold Filtering
 
@@ -99,9 +100,9 @@ Documents are filtered after reranking based on score thresholds.  Jina v3 score
 
 | Mode | Threshold Score | Minimum Documents |
 |------|----------------|-------------------|
-| `regular` | 0.05 | 3 |
-| `power-fast` | 0.02 | 5 |
-| `power-deep-research` | 0.01 | 10 |
+| `regular` (32-63GB) | 0.05 | 3 |
+| `regular` (64GB+) | 0.04 | 4 |
+| `power-deep-research` | 0.015 | 6 |
 
 After reranking, documents with `rerank_score >= threshold` are kept. If filtered count < min_docs, top min_docs results are used instead.
 
@@ -236,11 +237,11 @@ The retrieval and packing pipeline collects comprehensive metrics for analysis a
 ## 9. CLI Usage Examples
 
 ```bash
-# Auto-detect mode based on RAM
+# Auto-detect mode based on RAM (uses regular with RAM-based parameter scaling)
 python -m src.cli query "What is the main argument?"
 
-# Specify mode explicitly
-python -m src.cli query "Analyze the methodology" --mode power-fast
+# Specify deep-research mode explicitly
+python -m src.cli query "Analyze the methodology" --mode power-deep-research
 
 # Set mode via environment variable
 export RAG_MODE=power-deep-research

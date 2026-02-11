@@ -48,19 +48,44 @@ class TestModeConfig:
         assert config.context_window == 16_000  # Reduced for 32GB
         assert config.retrieval_budget == 8_000
 
-    def test_regular_mode_64gb(self):
-        config = _get_mode_config("regular", ram_gb=64.0)
-        assert config.context_window == 64_000  # Full for 64GB
+    def test_regular_mode_48gb(self):
+        """48-63GB systems get standard regular config."""
+        config = _get_mode_config("regular", ram_gb=48.0)
+        assert config.context_window == 64_000
         assert config.retrieval_budget == 32_000
+        assert config.top_k_dense == 100
+        assert config.top_k_rerank == 20
+        assert config.top_k_final == 5
 
-    def test_power_fast_mode(self):
-        config = _get_mode_config("power-fast", ram_gb=64.0)
-        assert config.quantization == "8-bit"
-        assert config.context_window == 96_000
+    def test_regular_mode_64gb(self):
+        """64GB+ 'Regular Plus': deeper retrieval exploiting M4 Max bandwidth."""
+        config = _get_mode_config("regular", ram_gb=64.0)
+        assert config.context_window == 64_000
+        assert config.retrieval_budget == 48_000
+        assert config.top_k_dense == 200
+        assert config.top_k_sparse == 200
+        assert config.top_k_fused == 100
+        assert config.top_k_rerank == 40
+        assert config.top_k_final == 8
+        assert config.reranker_threshold == 0.04
+        assert config.reranker_min_docs == 4
 
     def test_power_deep_research_mode(self):
+        """M4 Max 64GB calibration: aggressive but memory-safe."""
         config = _get_mode_config("power-deep-research", ram_gb=64.0)
         assert "80B" in config.llm_model or "Next" in config.llm_model
+        # Context sized for ~10GB KV cache, leaving 2GB OS buffer
+        assert config.context_window == 48_000
+        assert config.retrieval_budget == 40_000
+        # Wide initial retrieval, selective reranking
+        assert config.top_k_dense == 400
+        assert config.top_k_sparse == 400
+        assert config.top_k_fused == 200
+        assert config.top_k_rerank == 60
+        # Fewer final docs to mitigate Lost-in-the-Middle
+        assert config.top_k_final == 10
+        assert config.reranker_threshold == 0.015
+        assert config.reranker_min_docs == 6
 
     def test_unknown_mode_raises(self):
         with pytest.raises(ValueError, match="Unknown mode"):
@@ -80,11 +105,13 @@ class TestAutoModeSelection:
         assert _auto_select_mode(32.0) == "regular"
 
     def test_auto_high_ram(self):
-        assert _auto_select_mode(64.0) == "power-fast"
+        # Auto-select always returns 'regular'; RAM-aware scaling happens in _get_mode_config
+        assert _auto_select_mode(64.0) == "regular"
 
     def test_auto_boundary(self):
+        # Both RAM tiers auto-select to 'regular' with RAM-aware parameter scaling
         assert _auto_select_mode(63.9) == "regular"
-        assert _auto_select_mode(64.0) == "power-fast"
+        assert _auto_select_mode(64.0) == "regular"
 
 
 # ===========================================================================
@@ -93,14 +120,14 @@ class TestAutoModeSelection:
 
 class TestModeSelectionPrecedence:
     def test_cli_overrides_env(self):
-        with mock.patch.dict(os.environ, {"RAG_MODE": "power-fast"}):
+        with mock.patch.dict(os.environ, {"RAG_MODE": "power-deep-research"}):
             config = select_mode_config(manual_mode="regular")
             assert config.mode == "regular"
 
     def test_env_used_when_no_cli(self):
-        with mock.patch.dict(os.environ, {"RAG_MODE": "power-fast"}):
+        with mock.patch.dict(os.environ, {"RAG_MODE": "power-deep-research"}):
             config = select_mode_config(manual_mode=None)
-            assert config.mode == "power-fast"
+            assert config.mode == "power-deep-research"
 
     def test_auto_when_no_override(self):
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -116,13 +143,22 @@ class TestModeSelectionPrecedence:
             select_mode_config(manual_mode="super-turbo")
 
     def test_legacy_mapping(self):
-        # Legacy modes should be mapped
+        # Legacy modes should be mapped to regular
         with mock.patch.dict(os.environ, {}, clear=True):
             env = os.environ.copy()
             env.pop("RAG_MODE", None)
             with mock.patch.dict(os.environ, env, clear=True):
                 config = select_mode_config(manual_mode="high")
-                assert config.mode == "power-fast"
+                assert config.mode == "regular"
+
+    def test_power_fast_legacy_mapping(self):
+        # power-fast is now deprecated and maps to regular
+        with mock.patch.dict(os.environ, {}, clear=True):
+            env = os.environ.copy()
+            env.pop("RAG_MODE", None)
+            with mock.patch.dict(os.environ, env, clear=True):
+                config = select_mode_config(manual_mode="power-fast")
+                assert config.mode == "regular"
 
 
 # ===========================================================================
@@ -137,16 +173,16 @@ class TestModelConfig:
 
     def test_retrieval_params_differ_by_mode(self):
         regular = _get_mode_config("regular", 64.0)
-        power = _get_mode_config("power-fast", 64.0)
-        assert power.top_k_dense > regular.top_k_dense
-        assert power.top_k_rerank > regular.top_k_rerank
+        deep = _get_mode_config("power-deep-research", 64.0)
+        # Deep research mode has wider initial retrieval net
+        assert deep.top_k_dense > regular.top_k_dense
+        assert deep.top_k_rerank > regular.top_k_rerank
 
     def test_thresholds_differ_by_mode(self):
         regular = _get_mode_config("regular", 64.0)
-        power = _get_mode_config("power-fast", 64.0)
         deep = _get_mode_config("power-deep-research", 64.0)
-        assert regular.reranker_threshold >= power.reranker_threshold
-        assert power.reranker_threshold >= deep.reranker_threshold
+        # Deep research uses more permissive threshold for wider capture
+        assert regular.reranker_threshold >= deep.reranker_threshold
 
 
 # ===========================================================================

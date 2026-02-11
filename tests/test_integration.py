@@ -290,7 +290,7 @@ class TestIntentToContext:
 class TestModeSpecificBehaviour:
     """Test how different modes affect pipeline behaviour and metrics."""
 
-    @pytest.mark.parametrize("mode", ["regular", "power-fast", "power-deep-research"])
+    @pytest.mark.parametrize("mode", ["regular", "power-deep-research"])
     def test_mode_produces_valid_config(self, mode: str):
         config = _get_mode_config(mode, ram_gb=64.0)
         # Token budget must be positive
@@ -300,9 +300,9 @@ class TestModeSpecificBehaviour:
         assert config.top_k_dense >= config.top_k_sparse or config.top_k_sparse >= config.top_k_dense
 
     def test_mode_affects_retrieval_depth(self, tmp_storage, mock_embedder, mock_reranker):
-        """Power modes should retrieve more documents than regular."""
+        """Deep-research mode should retrieve more documents than regular."""
         results_by_mode = {}
-        for mode in ["regular", "power-fast"]:
+        for mode in ["regular", "power-deep-research"]:
             if mode == "regular":
                 config = ModelConfig(
                     mode=mode, llm_model="test", embedding_model="test",
@@ -329,7 +329,7 @@ class TestModeSpecificBehaviour:
             results_by_mode[mode] = len(results)
             logger.info(f"Mode {mode}: {len(results)} results")
 
-        assert results_by_mode["power-fast"] >= results_by_mode["regular"]
+        assert results_by_mode["power-deep-research"] >= results_by_mode["regular"]
 
 
 # ===========================================================================
@@ -456,8 +456,8 @@ class TestPipelineLatency:
                 top_k_rerank=3, top_k_final=2,
                 reranker_threshold=0.0, reranker_min_docs=1,
             ),
-            "power-fast": ModelConfig(
-                mode="power-fast", llm_model="test", embedding_model="test",
+            "power-deep-research": ModelConfig(
+                mode="power-deep-research", llm_model="test", embedding_model="test",
                 reranker_model="test",
                 top_k_dense=10, top_k_sparse=10, top_k_fused=8,
                 top_k_rerank=6, top_k_final=4,

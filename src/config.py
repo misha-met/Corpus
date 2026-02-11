@@ -56,8 +56,31 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
                 reranker_min_docs=3,
                 system_ram_gb=ram_gb,
             )
+        elif ram_gb >= 64:
+            # M4 Max 64GB "Regular Plus": deep retrieval exploiting 500GB/s+
+            # bandwidth and ~49GB headroom (30B-A3B 4-bit ≈ 15GB loaded).
+            # Wider retrieval net + deeper reranking while keeping 64K context
+            # at the Lost-in-the-Middle sweet spot.
+            return ModelConfig(
+                mode="regular",
+                llm_model="mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
+                embedding_model="BAAI/bge-m3",
+                reranker_model="jinaai/jina-reranker-v3-mlx",
+                embedding_device="cpu",
+                quantization="4-bit",
+                context_window=64_000,
+                retrieval_budget=48_000,
+                top_k_dense=200,
+                top_k_sparse=200,
+                top_k_fused=100,
+                top_k_rerank=40,
+                top_k_final=8,
+                reranker_threshold=0.04,
+                reranker_min_docs=4,
+                system_ram_gb=ram_gb,
+            )
         else:
-            # 48GB+ systems (e.g. M4 Max 64GB) can handle full context
+            # 48-63GB systems: standard context, moderate retrieval
             return ModelConfig(
                 mode="regular",
                 llm_model="mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
@@ -77,31 +100,15 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
                 system_ram_gb=ram_gb,
             )
 
-    elif mode == "power-fast":
-        if ram_gb < 64:
-            logger.warning(f"power-fast mode requires 64GB+ RAM. Detected {ram_gb:.0f}GB.")
-        return ModelConfig(
-            mode="power-fast",
-            llm_model="mlx-community/Qwen3-30B-A3B-Instruct-2507-8bit",
-            embedding_model="BAAI/bge-m3",
-            reranker_model="jinaai/jina-reranker-v3-mlx",
-            embedding_device="cpu",
-            quantization="8-bit",
-            context_window=96_000,
-            retrieval_budget=50_000,
-            top_k_dense=300,
-            top_k_sparse=300,
-            top_k_fused=150,
-            top_k_rerank=40,
-            top_k_final=15,
-            reranker_threshold=0.02,
-            reranker_min_docs=5,
-            system_ram_gb=ram_gb,
-        )
-
     elif mode == "power-deep-research":
         if ram_gb < 64:
             logger.warning(f"power-deep-research mode requires 64GB+ RAM. Detected {ram_gb:.0f}GB.")
+        # M4 Max 64GB calibration:
+        # 80B MoE 4-bit ≈ 48-52GB loaded → ~12GB headroom.
+        # KV cache at ~0.2MB/token → 48K ctx ≈ 9.6GB, leaving ~2.4GB OS buffer.
+        # Wide initial retrieval (400 dense+sparse) funneled through selective
+        # reranking (60) to 10 final docs — avoids Lost-in-the-Middle while
+        # maximizing research breadth.
         return ModelConfig(
             mode="power-deep-research",
             llm_model="mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit",
@@ -109,23 +116,23 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
             reranker_model="jinaai/jina-reranker-v3-mlx",
             embedding_device="cpu",
             quantization="4-bit",
-            context_window=32_000,
-            retrieval_budget=20_000,
-            top_k_dense=300,
-            top_k_sparse=300,
-            top_k_fused=150,
-            top_k_rerank=40,
-            top_k_final=15,
-            reranker_threshold=0.01,
-            reranker_min_docs=10,
+            context_window=48_000,
+            retrieval_budget=40_000,
+            top_k_dense=400,
+            top_k_sparse=400,
+            top_k_fused=200,
+            top_k_rerank=60,
+            top_k_final=10,
+            reranker_threshold=0.015,
+            reranker_min_docs=6,
             system_ram_gb=ram_gb,
         )
 
     raise ValueError(f"Unknown mode: {mode}")
 
 
-VALID_MODES = {"regular", "power-fast", "power-deep-research"}
-MODE_RAM_REQUIREMENTS: dict[str, float] = {"regular": 32.0, "power-fast": 64.0, "power-deep-research": 64.0}
+VALID_MODES = {"regular", "power-deep-research"}
+MODE_RAM_REQUIREMENTS: dict[str, float] = {"regular": 32.0, "power-deep-research": 64.0}
 
 
 # =============================================================================
@@ -192,7 +199,9 @@ def get_system_ram_gb() -> float:
 
 
 def _auto_select_mode(ram_gb: float) -> str:
-    return "power-fast" if ram_gb >= 64 else "regular"
+    # Both tiers (32GB and 64GB+) use 'regular' mode; RAM-aware config branching
+    # happens inside _get_mode_config() to provide different parameters
+    return "regular"
 
 
 def select_mode_config(*, manual_mode: Optional[str] = None) -> ModelConfig:
@@ -210,9 +219,10 @@ def select_mode_config(*, manual_mode: Optional[str] = None) -> ModelConfig:
         logger.info(f"Auto-selected mode '{mode}' based on {ram_gb:.0f}GB detected RAM")
 
     legacy_mapping = {
-        "high": "power-fast",
-        "high-performance": "power-fast",
-        "tier1": "power-fast",
+        "high": "regular",
+        "high-performance": "regular",
+        "tier1": "regular",
+        "power-fast": "regular",  # Deprecated: use 'regular' which auto-scales
         "efficiency": "regular",
         "tier2": "regular",
     }
