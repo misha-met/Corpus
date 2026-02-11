@@ -121,16 +121,7 @@ class TestEndToEnd:
                 reranker_threshold=0.0, reranker_min_docs=1,
                 retrieval_budget=8000,
             )
-        elif mode == "power-fast":
-            model_config = ModelConfig(
-                mode=mode, llm_model="test", embedding_model="test",
-                reranker_model="test",
-                top_k_dense=20, top_k_sparse=20, top_k_fused=15,
-                top_k_rerank=10, top_k_final=5,
-                reranker_threshold=0.0, reranker_min_docs=2,
-                retrieval_budget=50000,
-            )
-        else:
+        else:  # power-deep-research
             model_config = ModelConfig(
                 mode=mode, llm_model="test", embedding_model="test",
                 reranker_model="test",
@@ -267,7 +258,7 @@ class TestEndToEnd:
     def test_e2e_all_queries_all_modes(self):
         """Run all fixed queries across all modes, collecting comprehensive metrics."""
         valid_queries = [q for q in FIXED_QUERIES if q.strip()]
-        modes = ["regular", "power-fast", "power-deep-research"]
+        modes = ["regular", "power-deep-research"]
         all_results: list[dict] = []
 
         for mode in modes:

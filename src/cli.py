@@ -209,9 +209,9 @@ def run() -> None:
     ingest_parser.add_argument("--collection", default="child_chunks", help="Chroma collection name")
     ingest_parser.add_argument(
         "--mode",
-        choices=["regular", "power-fast", "power-deep-research"],
+        choices=["regular", "power-deep-research"],
         default=None,
-        help="Operating mode: regular (balanced), power-fast (8-bit, deeper retrieval), power-deep-research (80B model)",
+        help="Operating mode: regular (auto-scales to RAM), power-deep-research (80B model for deep research)",
     )
     # Allow verbosity flag after the subcommand as well
     ingest_parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging (show httpx, huggingface_hub, and detailed retrieval metrics)")
@@ -240,9 +240,9 @@ def run() -> None:
     query_parser.add_argument("--collection", default="child_chunks", help="Chroma collection name")
     query_parser.add_argument(
         "--mode",
-        choices=["regular", "power-fast", "power-deep-research"],
+        choices=["regular", "power-deep-research"],
         default=None,
-        help="Operating mode: regular (balanced), power-fast (8-bit, deeper retrieval), power-deep-research (80B model)",
+        help="Operating mode: regular (auto-scales to RAM), power-deep-research (80B model for deep research)",
     )
     # Allow verbosity flag after the subcommand as well
     query_parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging (show httpx, huggingface_hub, and detailed retrieval metrics)")
