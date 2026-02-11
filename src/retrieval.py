@@ -34,12 +34,14 @@ def format_chunk_for_citation(
 ) -> str:
     """Format a chunk with citation markers for Academic Mode.
 
-    The PAGE: marker is always present so the LLM never has to guess
-    or hallucinate a page number.  When metadata is missing the value
-    falls back to ``"Unknown"``.
+    When a page number is available the marker includes ``PAGE: X``.
+    When page metadata is missing the PAGE field is omitted so the LLM
+    cites as ``[SourceID]`` instead of ``[SourceID, p. Unknown]``.
     """
-    page_value = display_page if display_page else "Unknown"
-    header = f"[CHUNK START | SOURCE: {source_id} | PAGE: {page_value}]"
+    if display_page:
+        header = f"[CHUNK START | SOURCE: {source_id} | PAGE: {display_page}]"
+    else:
+        header = f"[CHUNK START | SOURCE: {source_id}]"
     return f"{header}\n{text.strip()}\n[CHUNK END]"
 
 
@@ -296,11 +298,10 @@ class RetrievalEngine:
         
         raw_scores = [float(s) for s in scores]
         
-        reranked = []
-        for item, score in zip(items, scores):
-            text = (item.get("rerank_text") or item.get("text") or "").lower()
-            penalty = 0.5 if any(pat in text for pat in _BOILERPLATE_PATTERNS) else 0.0
-            reranked.append({**item, "rerank_score": float(score) - penalty})
+        reranked = [
+            {**item, "rerank_score": float(score)}
+            for item, score in zip(items, scores)
+        ]
         reranked.sort(key=lambda item: item["rerank_score"], reverse=True)
         return reranked, raw_scores
 

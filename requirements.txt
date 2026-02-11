@@ -2,7 +2,7 @@ chromadb
 rank-bm25
 pydantic
 sentence-transformers
-FlagEmbedding
+safetensors
 mlx-lm
 pypdf
 pdfminer.six

@@ -16,6 +16,7 @@ class GenerationConfig:
     top_p: Optional[float] = None
     repetition_penalty: Optional[float] = None
     stop_tokens: Optional[list[str]] = None
+    context_window: Optional[int] = None
 
 
 DEFAULT_STOP_TOKENS = [
@@ -139,6 +140,18 @@ class MlxGenerator:
             # Use 1200 tokens (~900 words) for long-form academic answers when not specified
             final_max_tokens = max_tokens if max_tokens is not None else 1200
             prompt_tokens = count_tokens(prompt, self._tokenizer)
+            
+            # Warn if approaching the active mode's context window limit
+            ctx_limit = cfg.context_window
+            if ctx_limit and prompt_tokens > int(ctx_limit * 0.8):
+                logger.warning(
+                    "High prompt token count: %d tokens (%.0f%% of %dk context window). "
+                    "Consider reducing context.",
+                    prompt_tokens,
+                    100 * prompt_tokens / ctx_limit,
+                    ctx_limit // 1000,
+                )
+            
             start_time = time.perf_counter()
             output = generate(
                 self._model,

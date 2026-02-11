@@ -9,7 +9,7 @@ The system implements a **hybrid retrieval-augmented generation (RAG) pipeline**
 - **Dense retrieval** (embedding-based semantic search)
 - **Sparse retrieval** (BM25 keyword search)
 - **Reciprocal Rank Fusion** (RRF) for combining results
-- **Reranking** (BGE-Reranker-v2-m3 for relevance scoring)
+- **Reranking** (Jina Reranker v3 MLX – listwise cosine scoring with hardware-aware context windowing)
 - **Token budget packing** (greedy document packing with truncation fallback)
 - **Intent-based generation** (task-specific prompt engineering)
 - **Toggleable citations** (optional academic-style source attribution)
@@ -20,7 +20,7 @@ The system implements a **hybrid retrieval-augmented generation (RAG) pipeline**
 
 *   **LLM Inference:** `mlx-lm` (Apple Machine Learning/Metal optimized).
 *   **Embeddings:** `sentence-transformers` (Run on CPU to save VRAM).
-*   **Re-ranking:** `FlagEmbedding` (BGE-Reranker-v2-m3).
+*   **Re-ranking:** `jinaai/jina-reranker-v3-mlx` (Jina Reranker v3, MLX-native).
 *   **Sparse Search:** `rank_bm25`.
 *   **Vector Store:** `chromadb` (Local, HNSW with cosine distance).
 *   **Key-Value Store:** `sqlite3` (for Parent Chunks).
@@ -50,7 +50,7 @@ Hierarchical chunk structure for efficient retrieval and context expansion:
     *   **Sparse**: BM25 search on lexical index (configurable `top_k`).
 2.  **RRF Fusion**: Combine dense and sparse results using Reciprocal Rank Fusion ($$Score = \sum (1 / (60 + rank))$$).
 3.  **Early Deduplication**: Keep highest-scored child per unique `parent_id` to reduce redundancy before expensive reranking.
-4.  **Reranking**: Score document pairs with BGE-Reranker-v2-m3 for relevance assessment.
+4.  **Reranking**: Jina Reranker v3 (MLX-native) performs listwise scoring via cosine similarity between projected query and document embeddings. A context-window safety guard dynamically truncates the document list to stay within the backbone’s 131K context limit.
 5.  **Threshold Filtering**: Remove documents below score threshold based on operating mode.
 6.  **Context Expansion**: Map child chunks to parent chunks and apply token budget packing.
 
@@ -90,18 +90,18 @@ The system supports three operating modes, each optimized for different use case
 | `top_k_dense` | 100 | 300 |
 | `top_k_sparse` | 100 | 300 |
 | `top_k_fused` | 50 | 150 |
-| `top_k_rerank` | 20 | 80 |
+| `top_k_rerank` | 20 | 40 |
 | `top_k_final` | 5 | 15 |
 
 #### Reranker Threshold Filtering
 
-Documents are filtered after reranking based on score thresholds:
+Documents are filtered after reranking based on score thresholds.  Jina v3 scores are cosine similarities in the **0.0–1.0** range:
 
 | Mode | Threshold Score | Minimum Documents |
 |------|----------------|-------------------|
-| `regular` | -6.0 | 3 |
-| `power-fast` | -8.0 | 5 |
-| `power-deep-research` | -10.0 | 10 |
+| `regular` | 0.05 | 3 |
+| `power-fast` | 0.02 | 5 |
+| `power-deep-research` | 0.01 | 10 |
 
 After reranking, documents with `rerank_score >= threshold` are kept. If filtered count < min_docs, top min_docs results are used instead.
 
@@ -265,7 +265,7 @@ python -m src.cli query "Search for key terms" --no-generate
 - `rank-bm25` - Sparse search indexing
 - `pydantic` - Configuration validation
 - `sentence-transformers` - Embedding model inference
-- `FlagEmbedding` - Reranker model
+- `jinaai/jina-reranker-v3-mlx` - Reranker model (MLX-native)
 - `mlx-lm` - LLM inference on Apple Silicon
 - `pypdf` - PDF text extraction
 - `pdfminer.six` - Fallback PDF extraction
@@ -280,6 +280,10 @@ python -m src.cli query "Search for key terms" --no-generate
 
 ## 11. Known Limitations & Future Improvements
 
+- **Reranker Context Safety**: A dynamic guard truncates the document list via binary search so the listwise prompt never exceeds the backbone’s 131K context window
+- **Tokenizer Robustness**: Special token IDs (`<|embed_token|>`, `<|rerank_token|>`) are resolved from the tokenizer vocabulary at runtime; hard-coded fallbacks are used only when lookup fails
+- **Numerical Stability**: An $\epsilon$ term is added to the cosine similarity denominator to prevent NaN from zero-vector embeddings
+- **Offline Mode**: `_enable_offline_if_cached` verifies that model snapshots contain actual weight files before forcing `HF_HUB_OFFLINE`
 - **Metadata Alignment**: Now correctly preserved across truncation (tracked via indices)
 - **PDF Page Labels**: Uses per-page API for consistent label extraction across PyMuPDF and pypdf
 - **Source Legend**: Filters out redundant mappings to reduce noise

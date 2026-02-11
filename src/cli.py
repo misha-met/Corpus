@@ -62,7 +62,17 @@ _CHATTER_PHRASES = [
     "let me know if",
     "feel free to ask",
     "is there anything else",
+    "the texts leave open the possibility",
+    "future research may",
+    "it remains to be seen",
+    "only time will tell",
 ]
+
+
+_RECURSIVE_DENIAL = re.compile(
+    r"\n+\s*The provided context does not contain sufficient information[^\n]*$",
+    re.IGNORECASE,
+)
 
 
 def _strip_chatter(text: str) -> str:
@@ -70,6 +80,9 @@ def _strip_chatter(text: str) -> str:
     if not text:
         return text
     result = text
+    # Strip recursive denial: substantive answer followed by "insufficient info" disclaimer
+    if len(result) > 200:
+        result = _RECURSIVE_DENIAL.sub("", result).rstrip()
     lowered = result.lower()
     for phrase in _CHATTER_PHRASES:
         idx = lowered.rfind(phrase)
@@ -125,6 +138,10 @@ _EXPANSION_TERMS: dict[Intent, list[str]] = {
     Intent.SUMMARIZE: ["main argument", "thesis", "conclusion", "key points"],
     Intent.EXPLAIN: [],
     Intent.ANALYZE: ["criticism", "critique", "debate", "objection", "response", "controversy"],
+    Intent.COMPARE: ["compare", "contrast", "difference", "similarity"],
+    Intent.CRITIQUE: ["criticism", "critique", "debate", "objection", "weakness", "strength"],
+    Intent.FACTUAL: [],
+    Intent.COLLECTION: [],
 }
 
 
@@ -138,10 +155,73 @@ def _log_query(original: str, expanded: Optional[str], intent: IntentResult, exp
     logger.info(f"Query log: {json.dumps({'original_query': original, 'expanded_query': expanded, 'intent': intent.intent.value, 'intent_confidence': intent.confidence, 'intent_method': intent.method, 'expansion_enabled': expansion_enabled})}")
 
 
+def _enable_offline_if_cached(config: ModelConfig) -> None:
+    """Enable HF offline mode if all models for the active config are cached.
+
+    Must be called **after** mode selection so the model list is accurate.
+    Uses ``huggingface_hub.constants.HF_HUB_CACHE`` to honour custom cache paths.
+    """
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+        cache_dir = Path(HF_HUB_CACHE)
+    except ImportError:
+        cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+
+    if not cache_dir.exists():
+        logger.debug("HF cache dir %s does not exist; staying online", cache_dir)
+        return
+
+    required_models = [
+        config.llm_model,
+        config.embedding_model,
+        config.reranker_model,
+    ]
+
+    for model_id in required_models:
+        cache_folder = f"models--{model_id.replace('/', '--')}"
+        model_cache = cache_dir / cache_folder
+        if not model_cache.exists():
+            logger.debug("Model %s not cached; staying online", model_id)
+            return
+
+        # Verify that at least one snapshot with actual files exists.
+        snapshots_dir = model_cache / "snapshots"
+        if not snapshots_dir.is_dir():
+            logger.debug("Model %s cached but missing snapshots/; staying online", model_id)
+            return
+        snapshot_dirs = [d for d in snapshots_dir.iterdir() if d.is_dir()]
+        if not snapshot_dirs:
+            logger.debug("Model %s has empty snapshots/; staying online", model_id)
+            return
+        # Check that the latest snapshot contains at least one weight file.
+        latest = max(snapshot_dirs, key=lambda d: d.stat().st_mtime)
+        weight_exts = {".safetensors", ".bin", ".gguf", ".npz"}
+        has_weights = any(
+            f.suffix in weight_exts or f.name == "config.json"
+            for f in latest.iterdir()
+            if f.is_file() or f.is_symlink()
+        )
+        if not has_weights:
+            logger.debug(
+                "Model %s snapshot %s has no weight files; staying online",
+                model_id, latest.name,
+            )
+            return
+
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    logger.info("All models cached — enabled offline mode")
+
+
 def run() -> None:
     logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 
     parser = argparse.ArgumentParser(description="Offline RAG CLI")
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Enable verbose logging (show httpx, huggingface_hub, and detailed retrieval metrics)",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     ingest_parser = subparsers.add_parser("ingest", help="Ingest a Markdown file")
@@ -158,15 +238,26 @@ def run() -> None:
         default=None,
         help="Operating mode: regular (balanced), power-fast (8-bit, deeper retrieval), power-deep-research (80B model)",
     )
+    # Allow verbosity flag after the subcommand as well
+    ingest_parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging (show httpx, huggingface_hub, and detailed retrieval metrics)")
     ingest_parser.add_argument(
         "--model",
         default=None,
         help="Path or Hugging Face ID for mlx-lm model (used for summaries)",
     )
-    ingest_parser.add_argument(
+    _summarize_group = ingest_parser.add_mutually_exclusive_group()
+    _summarize_group.add_argument(
         "--summarize",
         action="store_true",
-        help="Generate and store a per-source summary during ingest",
+        dest="summarize",
+        default=True,
+        help="Generate and store a per-source summary during ingest (default: enabled)",
+    )
+    _summarize_group.add_argument(
+        "--no-summarize",
+        action="store_false",
+        dest="summarize",
+        help="Disable automatic summary generation during ingest",
     )
 
     query_parser = subparsers.add_parser("query", help="Query the RAG system")
@@ -181,6 +272,8 @@ def run() -> None:
         default=None,
         help="Operating mode: regular (balanced), power-fast (8-bit, deeper retrieval), power-deep-research (80B model)",
     )
+    # Allow verbosity flag after the subcommand as well
+    query_parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging (show httpx, huggingface_hub, and detailed retrieval metrics)")
     query_parser.add_argument(
         "--source-id",
         default=None,
@@ -203,7 +296,7 @@ def run() -> None:
     )
     query_parser.add_argument(
         "--intent",
-        choices=["overview", "summarize", "explain", "analyze"],
+        choices=["overview", "summarize", "explain", "analyze", "compare", "critique", "factual", "collection"],
         default=None,
         help="Override automatic intent classification",
     )
@@ -235,7 +328,16 @@ def run() -> None:
     if args.cite and args.no_cite:
         parser.error("Conflicting flags: use only one of --cite or --no-cite.")
 
+    # ---- logging verbosity ----
+    verbose = getattr(args, "verbose", False)
+    if not verbose:
+        # Suppress noisy third-party loggers in normal mode
+        for noisy in ("httpx", "huggingface_hub", "chromadb", "urllib3",
+                       "sentence_transformers", "filelock", "fsspec"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
+
     config = select_mode_config(manual_mode=getattr(args, 'mode', None))
+    _enable_offline_if_cached(config)
     mode_source = "CLI" if getattr(args, 'mode', None) else "env" if os.getenv("RAG_MODE") else "auto"
     print(f"\n[Hardware: {config.system_ram_gb:.0f}GB | Mode: {config.mode} ({mode_source})]")
     print(f"[LLM: {config.llm_model} | Quant: {config.quantization}]")
@@ -246,10 +348,7 @@ def run() -> None:
     except Exception as exc:  # pragma: no cover - dependency runtime
         raise RuntimeError("sentence-transformers is required for embeddings.") from exc
 
-    try:
-        from FlagEmbedding import FlagReranker
-    except Exception as exc:  # pragma: no cover - dependency runtime
-        raise RuntimeError("FlagEmbedding is required for reranking.") from exc
+    from .reranker import JinaRerankerMLX
 
     embedding_model = SentenceTransformer(config.embedding_model, device=config.embedding_device)
 
@@ -264,8 +363,9 @@ def run() -> None:
     bm25_path = Path(args.bm25)
 
     if args.command == "ingest":
+        do_summarize = args.summarize
         generator: Optional[MlxGenerator] = None
-        if args.summarize:
+        if do_summarize:
             model_id = args.model or config.llm_model
             generator = MlxGenerator(model_id)
         parents_count, children_count = ingest_file_to_storage(
@@ -275,11 +375,11 @@ def run() -> None:
             storage=storage,
             embedding_model=embedding_model,
             bm25_path=bm25_path,
-            summarize=args.summarize,
+            summarize=do_summarize,
             summary_generator=generator,
         )
         print(f"Ingested {parents_count} parents and {children_count} children.")
-        if args.summarize:
+        if do_summarize:
             print(f"Stored summary for source: {args.source_id}")
         return
 
@@ -299,7 +399,7 @@ def run() -> None:
         )
 
     storage.load_bm25(bm25_path)
-    reranker = FlagReranker(config.reranker_model, use_fp16=True, device="cpu")
+    reranker = JinaRerankerMLX(model_id=config.reranker_model)
 
     retrieval = RetrievalEngine(
         storage=storage,
@@ -324,6 +424,8 @@ def run() -> None:
         intent_map = {
             "overview": Intent.OVERVIEW, "summarize": Intent.SUMMARIZE,
             "explain": Intent.EXPLAIN, "analyze": Intent.ANALYZE,
+            "compare": Intent.COMPARE, "critique": Intent.CRITIQUE,
+            "factual": Intent.FACTUAL, "collection": Intent.COLLECTION,
         }
         intent_result = IntentResult(intent=intent_map[args.intent], confidence=1.0, method="manual")
         logger.info(f"Using manual intent override: {intent_result.intent.value}")
@@ -348,7 +450,59 @@ def run() -> None:
 
     extra_instructions: Optional[str] = None
 
-    if intent_result.intent == Intent.SUMMARIZE and not args.source_id:
+    # --- COLLECTION intent: always use document summaries ---
+    if intent_result.intent == Intent.COLLECTION:
+        sources = storage.list_source_ids()
+        if not sources:
+            print("No documents found in the database.")
+            del reranker, embedding_model, retrieval
+            gc.collect()
+            return
+
+        summaries = storage.get_source_summaries()
+        missing = [source for source in sources if source not in summaries]
+        if missing:
+            if args.no_generate:
+                print("Some sources are missing summaries. Re-run without --no-generate.")
+                for source in missing:
+                    print(f"- {source}")
+                del reranker, embedding_model, retrieval
+                gc.collect()
+                return
+
+            if generator is None:
+                generator = MlxGenerator(model_id)
+
+            for source in missing:
+                p_texts = storage.get_parent_texts_by_source(source_id=source)
+                context_text = "\n\n".join(p_texts)
+                if len(context_text) > 12000:
+                    context_text = context_text[:12000]
+                summary_messages = build_messages(
+                    context=context_text,
+                    question="Summarize this document.",
+                    intent=Intent.SUMMARIZE,
+                    mode=config.mode,
+                )
+                summary_text = generator.generate_chat(summary_messages)
+                storage.upsert_source_summary(source_id=source, summary=summary_text)
+            summaries = storage.get_source_summaries()
+
+        summary_blocks = [
+            f"Source: {source}\nSummary: {summaries[source]}"
+            for source in sources
+            if source in summaries
+        ]
+        context = "\n\n".join(summary_blocks)
+        results = []
+        source_ids = sources
+        parent_texts = []
+        if citations_enabled:
+            logger.info("Auto-disabling citations: context is built from document summaries (no chunk markers)")
+            citations_enabled = False
+
+    # --- SUMMARIZE with multiple sources (no --source-id): use summaries ---
+    elif intent_result.intent == Intent.SUMMARIZE and not args.source_id:
         sources = storage.list_source_ids()
         if len(sources) > 1:
             summaries = storage.get_source_summaries()
@@ -375,6 +529,7 @@ def run() -> None:
                         context=context_text,
                         question="Summarize this document.",
                         intent=Intent.SUMMARIZE,
+                        mode=config.mode,
                     )
                     summary_text = generator.generate_chat(summary_messages)
                     storage.upsert_source_summary(
@@ -412,15 +567,17 @@ def run() -> None:
     retrieval_metrics: Optional[RetrievalMetrics] = results[0].metrics if results and results[0].metrics else None
 
     # Release retrieval-only models to free memory before LLM generation.
-    # On 32GB Apple Silicon, the reranker (~1.1GB) and embedding model (~2GB)
+    # On 32GB Apple Silicon, the reranker (~1.2GB) and embedding model (~2GB)
     # competing with the MLX LLM for unified memory can cause swap thrashing.
     del reranker, embedding_model, retrieval
     gc.collect()
     logger.debug("Released reranker and embedding model to free memory for LLM generation")
 
     budget_metrics: Optional[BudgetMetrics] = None
-    context: str = ""
     source_legend: Optional[str] = None
+    # context may already be set by COLLECTION or multi-doc SUMMARIZE paths above
+    if 'context' not in locals():
+        context: str = ""
     has_parent_texts = 'parent_texts' in locals() and parent_texts
     result_metadatas: list[dict] = [r.metadata for r in results if r.parent_text] if has_parent_texts and results else []
     
@@ -506,7 +663,8 @@ def run() -> None:
                 query=retrieval_metrics.query,
                 mode=retrieval_metrics.mode,
             )
-        log_metrics(retrieval_metrics, config.mode, logger)
+        if verbose:
+            log_metrics(retrieval_metrics, config.mode, logger)
         print(f"[Retrieval: {format_metrics_summary(retrieval_metrics)}]")
 
     if args.no_generate:
@@ -514,13 +672,18 @@ def run() -> None:
         print(f"[Intent: {intent_result.intent.value} (confidence: {intent_result.confidence:.2f})]\n")
         if source_ids:
             print(f"[Sources: {', '.join(source_ids)}]\n")
-        for idx, result in enumerate(results, start=1):
-            header_path = result.metadata.get("header_path", "")
-            snippet = (result.parent_text or result.text or "").strip()
-            snippet = textwrap.shorten(snippet, width=600, placeholder="...")
-            print(f"[{idx}] score={result.score:.4f} header={header_path}")
-            print(snippet)
-            print("-" * 80)
+        if results:
+            for idx, result in enumerate(results, start=1):
+                header_path = result.metadata.get("header_path", "")
+                snippet = (result.parent_text or result.text or "").strip()
+                snippet = textwrap.shorten(snippet, width=600, placeholder="...")
+                print(f"[{idx}] score={result.score:.4f} header={header_path}")
+                print(snippet)
+                print("-" * 80)
+        elif context:
+            print(context)
+        else:
+            print("No context retrieved.")
         return
 
     messages = build_messages(
@@ -530,6 +693,7 @@ def run() -> None:
         extra_instructions=extra_instructions,
         citations_enabled=citations_enabled,
         source_legend=source_legend,
+        mode=config.mode,
     )
 
     if generator is None:
@@ -537,7 +701,10 @@ def run() -> None:
 
     # Academic mode (citations): 600 tokens for concise, cited answers
     # Casual mode: 1200 tokens for comprehensive, long-form responses
-    gen_config = GenerationConfig(max_tokens=600 if citations_enabled else 1200)
+    gen_config = GenerationConfig(
+        max_tokens=600 if citations_enabled else 1200,
+        context_window=config.context_window,
+    )
     answer = _sanitize_output(generator.generate_chat(messages, config=gen_config))
     
     # Print intent info and answer

@@ -1,5 +1,8 @@
 .DS_Store
 
+*.jsonl
+*.json
+
 # Python cache
 __pycache__/
 *.pyc
@@ -27,3 +30,6 @@ chroma/
 !models/.gitkeep
 
 *.md
+# Allow specific markdown files in tests/
+!tests/README.md
+!tests/TEST_REPORT.md
