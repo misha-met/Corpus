@@ -66,6 +66,42 @@ INTENT_INSTRUCTIONS_REGULAR: dict[Intent, dict[str, str]] = {
         ),
         "tone": "Analytical, objective, and scholarly.",
     },
+    Intent.COMPARE: {
+        "task": (
+            "Identify the two or more ideas, positions, theories, or documents being compared. "
+            "For each, state the core claim or position clearly. "
+            "Then systematically map: (1) where they agree or overlap, "
+            "(2) where they diverge or conflict, (3) what drives the differences "
+            "(e.g. differing assumptions, methods, or goals)."
+        ),
+        "format": (
+            "Write a structured narrative — do NOT use bullet points. "
+            "Structure: (1) a 1-2 sentence opening that names the items being compared and the axis of comparison, "
+            "(2) a section on points of convergence with evidence from the context, "
+            "(3) a section on points of divergence with evidence from the context, "
+            "(4) a brief closing (1-2 sentences) on what the comparison reveals. "
+            "Keep to 2-4 paragraphs total. Do NOT repeat points across paragraphs."
+        ),
+        "tone": "Balanced, precise, and scholarly.",
+    },
+    Intent.CRITIQUE: {
+        "task": (
+            "Identify the central argument or claim the user is asking about. "
+            "Report how the text itself evaluates, defends, or challenges that argument. "
+            "Surface any critiques, objections, limitations, or counterpoints that the text raises. "
+            "If the text is one-sided, say so — do NOT invent counterarguments or limitations not present in the context. "
+            "You may note what the text leaves unaddressed, but label it clearly as an omission rather than a flaw."
+        ),
+        "format": (
+            "Write a structured evaluative narrative — do NOT use bullet points. "
+            "Structure: (1) a 1-2 sentence opening that states the argument being examined, "
+            "(2) a section reporting how the text supports or defends the argument with specific evidence, "
+            "(3) a section on critiques, limitations, or counterpoints the text itself raises (if any), "
+            "(4) a brief closing (1-2 sentences) noting overall assessment or what the text leaves open. "
+            "Keep to 2-4 paragraphs total. Do NOT repeat points across paragraphs."
+        ),
+        "tone": "Evaluative, text-grounded, and intellectually rigorous.",
+    },
     Intent.FACTUAL: {
         "task": (
             "Answer the user's question directly and concisely using ONLY the provided context. "
@@ -155,6 +191,42 @@ INTENT_INSTRUCTIONS_DEEP_RESEARCH: dict[Intent, dict[str, str]] = {
             "Keep to 2-4 paragraphs total. Do NOT repeat points across paragraphs."
         ),
         "tone": "Analytical, objective, and scholarly.",
+    },
+    Intent.COMPARE: {
+        "task": (
+            "Identify the two or more ideas, positions, theories, or documents being compared. "
+            "For each, state the core claim or position clearly. "
+            "Then systematically map: (1) where they agree or overlap, "
+            "(2) where they diverge or conflict, (3) what drives the differences "
+            "(e.g. differing assumptions, methods, or goals)."
+        ),
+        "format": (
+            "Write a structured narrative — do NOT use bullet points. "
+            "Structure: (1) a 1-2 sentence opening that names the items being compared and the axis of comparison, "
+            "(2) a section on points of convergence with evidence from the context, "
+            "(3) a section on points of divergence with evidence from the context, "
+            "(4) a brief closing (1-2 sentences) on what the comparison reveals. "
+            "Keep to 2-4 paragraphs total. Do NOT repeat points across paragraphs."
+        ),
+        "tone": "Balanced, precise, and scholarly.",
+    },
+    Intent.CRITIQUE: {
+        "task": (
+            "Identify the central argument or claim the user is asking about. "
+            "Report how the text itself evaluates, defends, or challenges that argument. "
+            "Surface any critiques, objections, limitations, or counterpoints that the text raises. "
+            "If the text is one-sided, say so — do NOT invent counterarguments or limitations not present in the context. "
+            "You may note what the text leaves unaddressed, but label it clearly as an omission rather than a flaw."
+        ),
+        "format": (
+            "Write a structured evaluative narrative — do NOT use bullet points. "
+            "Structure: (1) a 1-2 sentence opening that states the argument being examined, "
+            "(2) a section reporting how the text supports or defends the argument with specific evidence, "
+            "(3) a section on critiques, limitations, or counterpoints the text itself raises (if any), "
+            "(4) a brief closing (1-2 sentences) noting overall assessment or what the text leaves open. "
+            "Keep to 2-4 paragraphs total. Do NOT repeat points across paragraphs."
+        ),
+        "tone": "Evaluative, text-grounded, and intellectually rigorous.",
     },
     Intent.FACTUAL: {
         "task": (

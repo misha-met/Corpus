@@ -125,6 +125,8 @@ _EXPANSION_TERMS: dict[Intent, list[str]] = {
     Intent.SUMMARIZE: ["main argument", "thesis", "conclusion", "key points"],
     Intent.EXPLAIN: [],
     Intent.ANALYZE: ["criticism", "critique", "debate", "objection", "response", "controversy"],
+    Intent.COMPARE: ["compare", "contrast", "difference", "similarity"],
+    Intent.CRITIQUE: ["criticism", "critique", "debate", "objection", "weakness", "strength"],
     Intent.FACTUAL: [],
     Intent.COLLECTION: [],
 }
@@ -253,7 +255,7 @@ def run() -> None:
     )
     query_parser.add_argument(
         "--intent",
-        choices=["overview", "summarize", "explain", "analyze", "factual", "collection"],
+        choices=["overview", "summarize", "explain", "analyze", "compare", "critique", "factual", "collection"],
         default=None,
         help="Override automatic intent classification",
     )
@@ -381,6 +383,7 @@ def run() -> None:
         intent_map = {
             "overview": Intent.OVERVIEW, "summarize": Intent.SUMMARIZE,
             "explain": Intent.EXPLAIN, "analyze": Intent.ANALYZE,
+            "compare": Intent.COMPARE, "critique": Intent.CRITIQUE,
             "factual": Intent.FACTUAL, "collection": Intent.COLLECTION,
         }
         intent_result = IntentResult(intent=intent_map[args.intent], confidence=1.0, method="manual")

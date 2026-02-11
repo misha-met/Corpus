@@ -174,7 +174,7 @@ class TestIntentClassification:
             ("What is this paper about?", Intent.OVERVIEW),
             ("Summarize the key points", Intent.SUMMARIZE),
             ("Explain this in simple terms", Intent.EXPLAIN),
-            ("Compare the two approaches", Intent.ANALYZE),
+            ("Compare the two approaches", Intent.COMPARE),
             ("What are the main arguments?", Intent.SUMMARIZE),
             ("Give me the gist", Intent.OVERVIEW),
             ("ELI5", Intent.EXPLAIN),
@@ -269,6 +269,18 @@ class TestLLMResponseParsing:
         parsed = _parse_llm_response(response)
         assert parsed is not None
         assert parsed[0] == Intent.COLLECTION
+
+    def test_parse_compare_intent(self):
+        response = '{"intent": "compare", "confidence": 0.90}'
+        parsed = _parse_llm_response(response)
+        assert parsed is not None
+        assert parsed[0] == Intent.COMPARE
+
+    def test_parse_critique_intent(self):
+        response = '{"intent": "critique", "confidence": 0.88}'
+        parsed = _parse_llm_response(response)
+        assert parsed is not None
+        assert parsed[0] == Intent.CRITIQUE
 
 
 # ===========================================================================
@@ -408,6 +420,93 @@ class TestFactualIntent:
         assert Intent.FACTUAL in INTENT_INSTRUCTIONS_DEEP_RESEARCH
         assert "task" in INTENT_INSTRUCTIONS_REGULAR[Intent.FACTUAL]
         assert "task" in INTENT_INSTRUCTIONS_DEEP_RESEARCH[Intent.FACTUAL]
+
+
+# ===========================================================================
+# COMPARE intent: classification + message building
+# ===========================================================================
+
+class TestCompareIntent:
+    """Tests for the COMPARE intent — side-by-side analysis of ideas."""
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "Compare Chomsky's and Skinner's views on language",
+            "Contrast the two approaches to learning",
+            "What is the difference between behaviorism and nativism?",
+            "How does connectionism differ from symbolic AI?",
+            "Compare and contrast these positions",
+        ],
+    )
+    def test_compare_classification(self, query: str):
+        result = _classify_heuristic(query)
+        assert result.intent == Intent.COMPARE, (
+            f"Query '{query}': expected compare, got {result.intent.value} "
+            f"(confidence={result.confidence:.2f})"
+        )
+
+    def test_compare_generation_messages(self):
+        """COMPARE messages should contain comparison-specific instructions."""
+        messages = build_messages(
+            context="Theory A says X. Theory B says Y.",
+            question="Compare these two theories",
+            intent=Intent.COMPARE,
+            citations_enabled=False,
+        )
+        system = messages[0]["content"]
+        assert "converge" in system.lower() or "diverge" in system.lower() or "compared" in system.lower()
+
+    def test_compare_instructions_in_all_modes(self):
+        from src.generation import INTENT_INSTRUCTIONS_REGULAR, INTENT_INSTRUCTIONS_DEEP_RESEARCH
+        assert Intent.COMPARE in INTENT_INSTRUCTIONS_REGULAR
+        assert Intent.COMPARE in INTENT_INSTRUCTIONS_DEEP_RESEARCH
+        assert "task" in INTENT_INSTRUCTIONS_REGULAR[Intent.COMPARE]
+        assert "task" in INTENT_INSTRUCTIONS_DEEP_RESEARCH[Intent.COMPARE]
+
+
+# ===========================================================================
+# CRITIQUE intent: classification + message building
+# ===========================================================================
+
+class TestCritiqueIntent:
+    """Tests for the CRITIQUE intent — evaluative analysis of arguments."""
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "Evaluate the argument that language is innate",
+            "Critique Skinner's behaviorist model",
+            "What are the strengths and weaknesses of connectionism?",
+            "Assess whether the author's conclusion follows from the evidence",
+            "How convincing is the poverty of the stimulus argument?",
+        ],
+    )
+    def test_critique_classification(self, query: str):
+        result = _classify_heuristic(query)
+        assert result.intent == Intent.CRITIQUE, (
+            f"Query '{query}': expected critique, got {result.intent.value} "
+            f"(confidence={result.confidence:.2f})"
+        )
+
+    def test_critique_generation_messages(self):
+        """CRITIQUE messages should contain text-grounded evaluative instructions."""
+        messages = build_messages(
+            context="The argument claims X. Evidence shows Y.",
+            question="Evaluate this argument",
+            intent=Intent.CRITIQUE,
+            citations_enabled=False,
+        )
+        system = messages[0]["content"]
+        assert "text" in system.lower() or "context" in system.lower()
+        assert "invent" in system.lower() or "one-sided" in system.lower()
+
+    def test_critique_instructions_in_all_modes(self):
+        from src.generation import INTENT_INSTRUCTIONS_REGULAR, INTENT_INSTRUCTIONS_DEEP_RESEARCH
+        assert Intent.CRITIQUE in INTENT_INSTRUCTIONS_REGULAR
+        assert Intent.CRITIQUE in INTENT_INSTRUCTIONS_DEEP_RESEARCH
+        assert "task" in INTENT_INSTRUCTIONS_REGULAR[Intent.CRITIQUE]
+        assert "task" in INTENT_INSTRUCTIONS_DEEP_RESEARCH[Intent.CRITIQUE]
 
 
 # ===========================================================================
@@ -553,9 +652,9 @@ class TestIntentBoundaries:
         result = _classify_heuristic("Who wrote the original paper?")
         assert result.intent == Intent.FACTUAL
 
-    def test_compare_is_analyze(self):
+    def test_compare_is_compare(self):
         result = _classify_heuristic("Compare these two approaches")
-        assert result.intent == Intent.ANALYZE
+        assert result.intent == Intent.COMPARE
 
     def test_explain_is_explain(self):
         result = _classify_heuristic("Explain this in simple terms")
