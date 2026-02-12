@@ -82,10 +82,10 @@ class TestModeConfig:
         assert config.top_k_sparse == 400
         assert config.top_k_fused == 200
         assert config.top_k_rerank == 60
-        # Fewer final docs to mitigate Lost-in-the-Middle
-        assert config.top_k_final == 10
-        assert config.reranker_threshold == 0.015
-        assert config.reranker_min_docs == 6
+        # final docs matched to Regular mode's signal-to-noise sweet spot
+        assert config.top_k_final == 8
+        assert config.reranker_threshold == 0.04
+        assert config.reranker_min_docs == 4
 
     def test_unknown_mode_raises(self):
         with pytest.raises(ValueError, match="Unknown mode"):

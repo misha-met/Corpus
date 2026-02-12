@@ -107,8 +107,10 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
         # 80B MoE 4-bit ≈ 48-52GB loaded → ~12GB headroom.
         # KV cache at ~0.2MB/token → 48K ctx ≈ 9.6GB, leaving ~2.4GB OS buffer.
         # Wide initial retrieval (400 dense+sparse) funneled through selective
-        # reranking (60) to 10 final docs — avoids Lost-in-the-Middle while
-        # maximizing research breadth.
+        # reranking (60) to 8 final docs — matches Regular mode's sweet spot
+        # for signal-to-noise ratio. Prior top_k_final=10 with threshold=0.015
+        # admitted low-scored docs (0.03-0.05) that diluted context without
+        # improving synthesis. Threshold=0.04 aligns with Regular mode.
         return ModelConfig(
             mode="power-deep-research",
             llm_model="mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit",
@@ -122,9 +124,9 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
             top_k_sparse=400,
             top_k_fused=200,
             top_k_rerank=60,
-            top_k_final=10,
-            reranker_threshold=0.015,
-            reranker_min_docs=6,
+            top_k_final=8,
+            reranker_threshold=0.04,
+            reranker_min_docs=4,
             system_ram_gb=ram_gb,
         )
 

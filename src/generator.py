@@ -117,7 +117,7 @@ class MlxGenerator:
                 temperature = temperature or 0.05
                 top_p = top_p or 0.7
             elif model_size >= 70:
-                repetition_penalty = repetition_penalty or 1.05
+                repetition_penalty = repetition_penalty or 1.15
                 temperature = temperature or 0.2
                 top_p = top_p or 0.9
             else:

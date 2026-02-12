@@ -18,6 +18,7 @@ from .generation import build_messages
 from .generator import GenerationConfig, MlxGenerator, count_tokens, enforce_token_budget
 from .ingest import ingest_file_to_storage
 from .intent import Intent, IntentClassifier, IntentResult
+from .latency import LatencyProfiler
 from .metrics import BudgetMetrics, RetrievalMetrics, ThresholdMetrics, format_metrics_summary, log_metrics
 from .retrieval import RetrievalEngine, build_source_legend, format_context_with_citations
 from .storage import StorageConfig, StorageEngine
@@ -318,6 +319,11 @@ def run() -> None:
         default=None,
         help="Disable inline citations (overrides CITATIONS_ENABLED default).",
     )
+    query_parser.add_argument(
+        "--latency",
+        action="store_true",
+        help="Enable detailed latency profiling for every pipeline stage.",
+    )
 
     args = parser.parse_args()
 
@@ -332,8 +338,15 @@ def run() -> None:
                        "sentence_transformers", "filelock", "fsspec"):
             logging.getLogger(noisy).setLevel(logging.WARNING)
 
-    config = select_mode_config(manual_mode=getattr(args, 'mode', None))
-    _enable_offline_if_cached(config)
+    # ---- latency profiler ----
+    latency_enabled = getattr(args, "latency", False) and args.command == "query"
+    profiler = LatencyProfiler(enabled=latency_enabled)
+    profiler.start_wall()
+
+    with profiler.span("Config / mode selection"):
+        config = select_mode_config(manual_mode=getattr(args, 'mode', None))
+        _enable_offline_if_cached(config)
+
     mode_source = "CLI" if getattr(args, 'mode', None) else "env" if os.getenv("RAG_MODE") else "auto"
     print(f"\n[Hardware: {config.system_ram_gb:.0f}GB | Mode: {config.mode} ({mode_source})]")
     print(f"[LLM: {config.llm_model} | Quant: {config.quantization}]")
@@ -346,14 +359,47 @@ def run() -> None:
 
     from .reranker import JinaRerankerMLX
 
-    embedding_model = SentenceTransformer(config.embedding_model, device=config.embedding_device)
+    # ---- parallel model loading (embedding + reranker overlap) ----
+    import concurrent.futures
+    import time as _time
 
-    storage = StorageEngine(
-        StorageConfig(
-            lance_dir=Path(args.lance),
-            lance_table=args.collection,
+    _embed_result: list = [None]
+    _reranker_result: list = [None]
+    _embed_time_ms: list = [0.0]
+    _reranker_time_ms: list = [0.0]
+
+    def _load_embedding():
+        t0 = _time.perf_counter()
+        _embed_result[0] = SentenceTransformer(config.embedding_model, device=config.embedding_device)
+        _embed_time_ms[0] = (_time.perf_counter() - t0) * 1000
+
+    def _load_reranker():
+        t0 = _time.perf_counter()
+        _reranker_result[0] = JinaRerankerMLX(model_id=config.reranker_model)
+        _reranker_time_ms[0] = (_time.perf_counter() - t0) * 1000
+
+    # Only parallelize for query (not ingest); ingest doesn't need reranker.
+    if args.command == "query" and not getattr(args, "list_sources", False):
+        with profiler.span("Load models (parallel: embedding + reranker)"):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                pool.submit(_load_embedding)
+                pool.submit(_load_reranker)
+                pool.shutdown(wait=True)
+        embedding_model = _embed_result[0]
+        if profiler.enabled:
+            profiler.record("  \u2514 Embedding model", _embed_time_ms[0], config.embedding_model.split("/")[-1])
+            profiler.record("  \u2514 Reranker model", _reranker_time_ms[0], config.reranker_model.split("/")[-1])
+    else:
+        with profiler.span("Load embedding model"):
+            embedding_model = SentenceTransformer(config.embedding_model, device=config.embedding_device)
+
+    with profiler.span("Open storage / LanceDB"):
+        storage = StorageEngine(
+            StorageConfig(
+                lance_dir=Path(args.lance),
+                lance_table=args.collection,
+            )
         )
-    )
 
     if args.command == "ingest":
         do_summarize = args.summarize
@@ -385,7 +431,8 @@ def run() -> None:
                 print(f"- {source}")
         return
 
-    reranker = JinaRerankerMLX(model_id=config.reranker_model)
+    # Reranker was already loaded in parallel above
+    reranker = _reranker_result[0] if _reranker_result[0] is not None else JinaRerankerMLX(model_id=config.reranker_model)
 
     retrieval = RetrievalEngine(
         storage=storage,
@@ -416,15 +463,17 @@ def run() -> None:
         intent_result = IntentResult(intent=intent_map[args.intent], confidence=1.0, method="manual")
         logger.info(f"Using manual intent override: {intent_result.intent.value}")
     else:
-        use_llm_intent = not args.no_llm_intent and not args.no_generate
-        if use_llm_intent:
-            generator = MlxGenerator(model_id)
-        classifier = IntentClassifier(
-            generator=generator,
-            confidence_threshold=args.intent_confidence_threshold,
-            use_llm=use_llm_intent,
-        )
-        intent_result = classifier.classify(args.query)
+        with profiler.span("Intent classification"):
+            use_llm_intent = not args.no_llm_intent and not args.no_generate
+            # Use the reranker's 0.6B backbone for intent classification —
+            # it is already loaded and runs in ~100-200 ms instead of loading
+            # the full LLM (30B/80B) which takes 5-9 s just for a 50-token
+            # JSON classification.
+            classifier = IntentClassifier(
+                lightweight_generator=reranker if use_llm_intent else None,
+                confidence_threshold=args.intent_confidence_threshold,
+            )
+            intent_result = classifier.classify(args.query)
         logger.info(f"Classified intent: {intent_result.intent.value} (confidence={intent_result.confidence:.2f}, method={intent_result.method})")
 
     search_query = args.query
@@ -542,11 +591,13 @@ def run() -> None:
                 logger.info("Auto-disabling citations: context is built from document summaries (no chunk markers)")
                 citations_enabled = False
         else:
-            results = retrieval.search(search_query, source_id=args.source_id)
+            with profiler.span("Retrieval (hybrid search + rerank)"):
+                results = retrieval.search(search_query, source_id=args.source_id)
             source_ids = sorted({r.metadata.get("source_id") for r in results if r.metadata.get("source_id")})
             parent_texts = [r.parent_text for r in results if r.parent_text]
     else:
-        results = retrieval.search(search_query, source_id=args.source_id)
+        with profiler.span("Retrieval (hybrid search + rerank)"):
+            results = retrieval.search(search_query, source_id=args.source_id)
         source_ids = sorted({r.metadata.get("source_id") for r in results if r.metadata.get("source_id")})
         parent_texts = [r.parent_text for r in results if r.parent_text]
 
@@ -555,8 +606,9 @@ def run() -> None:
     # Release retrieval-only models to free memory before LLM generation.
     # On 32GB Apple Silicon, the reranker (~1.2GB) and embedding model (~2GB)
     # competing with the MLX LLM for unified memory can cause swap thrashing.
-    del reranker, embedding_model, retrieval
-    gc.collect()
+    with profiler.span("Memory cleanup (gc)"):
+        del reranker, embedding_model, retrieval
+        gc.collect()
     logger.debug("Released reranker and embedding model to free memory for LLM generation")
 
     budget_metrics: Optional[BudgetMetrics] = None
@@ -572,17 +624,17 @@ def run() -> None:
             generator = MlxGenerator(model_id)
 
         import time
-        pack_start = time.perf_counter()
-        pack_result = enforce_token_budget(
-            docs=parent_texts,
-            max_tokens=config.retrieval_budget,
-            tokenizer=generator.tokenizer,
-            consecutive_fail_threshold=3,
-            allow_truncation=True,
-            log=logger,
-        )
-        
-        pack_time_ms = (time.perf_counter() - pack_start) * 1000
+        with profiler.span("Budget packing"):
+            pack_start = time.perf_counter()
+            pack_result = enforce_token_budget(
+                docs=parent_texts,
+                max_tokens=config.retrieval_budget,
+                tokenizer=generator.tokenizer,
+                consecutive_fail_threshold=3,
+                allow_truncation=True,
+                log=logger,
+            )
+            pack_time_ms = (time.perf_counter() - pack_start) * 1000
 
         packed_metadatas = [result_metadatas[i] for i in pack_result.packed_indices if i < len(result_metadatas)]
         
@@ -672,18 +724,20 @@ def run() -> None:
             print("No context retrieved.")
         return
 
-    messages = build_messages(
-        context,
-        args.query,
-        intent=intent_result.intent,
-        extra_instructions=extra_instructions,
-        citations_enabled=citations_enabled,
-        source_legend=source_legend,
-        mode=config.mode,
-    )
+    with profiler.span("Build prompt / messages"):
+        messages = build_messages(
+            context,
+            args.query,
+            intent=intent_result.intent,
+            extra_instructions=extra_instructions,
+            citations_enabled=citations_enabled,
+            source_legend=source_legend,
+            mode=config.mode,
+        )
 
     if generator is None:
-        generator = MlxGenerator(model_id)
+        with profiler.span("Load LLM model"):
+            generator = MlxGenerator(model_id)
 
     # Academic mode (citations): 600 tokens for concise, cited answers
     # Casual mode: 1200 tokens for comprehensive, long-form responses
@@ -691,7 +745,10 @@ def run() -> None:
         max_tokens=600 if citations_enabled else 1200,
         context_window=config.context_window,
     )
-    answer = _sanitize_output(generator.generate_chat(messages, config=gen_config))
+    with profiler.span("LLM generation"):
+        raw_answer = generator.generate_chat(messages, config=gen_config)
+    with profiler.span("Output sanitisation"):
+        answer = _sanitize_output(raw_answer)
     
     # Print intent info and answer
     cite_mode = "Academic" if citations_enabled else "Casual"
@@ -701,6 +758,17 @@ def run() -> None:
     else:
         print()
     print(answer)
+
+    # ---- latency report ----
+    profiler.end_wall()
+    if profiler.enabled:
+        # Inject sub-timings from retrieval metrics for finer detail
+        if retrieval_metrics:
+            t = retrieval_metrics.timing
+            profiler.record("    └ Hybrid search (LanceDB)", t.dense_search_ms)
+            profiler.record("    └ Deduplication", t.dedup_ms)
+            profiler.record("    └ Reranking", t.rerank_ms)
+        print(profiler.format_report())
 
 
 if __name__ == "__main__":

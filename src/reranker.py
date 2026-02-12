@@ -47,6 +47,11 @@ _MAX_QUERY_TOKENS = 512
 # Context-window safety: leave headroom below the 131 K backbone limit.
 _MAX_RERANK_PROMPT_TOKENS = 120_000
 
+# Rough token-overhead estimates for fast budget check (avoids re-tokenising
+# the entire prompt when the total is clearly within budget).
+_PROMPT_OVERHEAD_TOKENS = 300   # system text + query section + markers
+_PER_DOC_OVERHEAD_TOKENS = 25   # <passage id="X"> … </passage> per doc
+
 # Numerical stability for cosine similarity.
 _EPS = 1e-8
 
@@ -217,6 +222,52 @@ class JinaRerankerMLX:
 
     # -- Public interface (compatible with FlagReranker) --------------------
 
+    # -- Lightweight generation (reuse 0.6B backbone) ----------------------
+
+    def generate_text(
+        self,
+        prompt: str,
+        max_tokens: int = 100,
+        temperature: float = 0.1,
+    ) -> str:
+        """Lightweight text generation using the reranker's 0.6B backbone.
+
+        The Qwen3-0.6B backbone retains general instruction-following ability.
+        Use this for cheap tasks (intent classification, query rewriting) where
+        loading a large LLM would be wasteful.  Typical latency: ~100-200 ms
+        for 50 tokens.
+        """
+        from mlx_lm import generate as mlx_generate
+        from mlx_lm.generate import make_sampler
+
+        # Apply chat template so the backbone sees a well-formed prompt.
+        messages = [{"role": "user", "content": prompt}]
+        try:
+            formatted = self._tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+                enable_thinking=False,
+            )
+        except TypeError:
+            try:
+                formatted = self._tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True,
+                )
+            except Exception:
+                formatted = prompt
+        except Exception:
+            formatted = prompt
+
+        sampler = make_sampler(temp=temperature, top_p=0.9)
+        return mlx_generate(
+            model=self._model,
+            tokenizer=self._tokenizer,
+            prompt=formatted,
+            max_tokens=max_tokens,
+            sampler=sampler,
+        )
+
+    # -- Public interface (compatible with FlagReranker) --------------------
+
     def compute_score(self, pairs: List[Tuple[str, str]]) -> List[float]:
         """Score ``(query, document)`` pairs.
 
@@ -233,34 +284,83 @@ class JinaRerankerMLX:
         query = pairs[0][0]
         docs = [p[1] for p in pairs]
 
-        # Truncate documents that are excessively long
-        docs = self._truncate_docs(docs)
+        # Truncate documents that are excessively long.
+        # Returns per-doc token counts so we can skip re-tokenisation later.
+        docs, doc_token_counts = self._truncate_docs(docs)
 
         # Context-window safety: trim the document list so the
         # listwise prompt stays within the backbone's context limit.
-        docs = self._enforce_context_budget(query, docs)
+        docs = self._enforce_context_budget(query, docs, doc_token_counts)
 
         scores = self._score_listwise(query, docs)
         return scores
 
     # -- Internals ----------------------------------------------------------
 
-    def _truncate_docs(self, docs: List[str]) -> List[str]:
-        """Truncate documents to ``_MAX_DOC_TOKENS`` tokens each."""
+    def _truncate_docs(self, docs: List[str]) -> Tuple[List[str], List[int]]:
+        """Truncate documents to ``_MAX_DOC_TOKENS`` tokens each.
+
+        Returns ``(truncated_docs, per_doc_token_counts)`` so that
+        downstream code can estimate the total prompt length without
+        re-tokenising every document.
+        """
         truncated: List[str] = []
+        token_counts: List[int] = []
+        total_original_tokens = 0
+        total_truncated_tokens = 0
+        truncation_count = 0
         for doc in docs:
             tok_ids = self._tokenizer.encode(doc)
+            total_original_tokens += len(tok_ids)
             if len(tok_ids) > _MAX_DOC_TOKENS:
                 tok_ids = tok_ids[:_MAX_DOC_TOKENS]
                 doc = self._tokenizer.decode(tok_ids)
+                truncation_count += 1
+            total_truncated_tokens += len(tok_ids)
             truncated.append(doc)
-        return truncated
+            token_counts.append(len(tok_ids))
+        if truncation_count > 0:
+            logger.info(
+                "Reranker doc truncation: %d/%d docs truncated, "
+                "tokens %d → %d (saved %d tokens, %.0f%% reduction)",
+                truncation_count, len(docs),
+                total_original_tokens, total_truncated_tokens,
+                total_original_tokens - total_truncated_tokens,
+                100 * (1 - total_truncated_tokens / max(total_original_tokens, 1)),
+            )
+        return truncated, token_counts
 
-    def _enforce_context_budget(self, query: str, docs: List[str]) -> List[str]:
+    def _estimate_prompt_tokens(
+        self, query: str, doc_token_counts: List[int],
+    ) -> int:
+        """Fast estimate of total prompt tokens from pre-computed doc counts."""
+        query_tokens = len(self._tokenizer.encode(query))
+        return (
+            _PROMPT_OVERHEAD_TOKENS
+            + _PER_DOC_OVERHEAD_TOKENS * len(doc_token_counts)
+            + sum(doc_token_counts)
+            + query_tokens
+        )
+
+    def _enforce_context_budget(
+        self, query: str, docs: List[str],
+        doc_token_counts: Optional[List[int]] = None,
+    ) -> List[str]:
         """Trim the document list so the listwise prompt fits the context window."""
         if not docs:
             return docs
 
+        # ---- fast path: skip full tokenisation when clearly under budget ----
+        if doc_token_counts is not None:
+            estimate = self._estimate_prompt_tokens(query, doc_token_counts)
+            if estimate < _MAX_RERANK_PROMPT_TOKENS * 0.85:
+                logger.debug(
+                    "Context budget fast-pass: estimated %d tokens (limit %d)",
+                    estimate, _MAX_RERANK_PROMPT_TOKENS,
+                )
+                return docs
+
+        # ---- slow path: full tokenisation (only near the limit) ----
         prompt = _build_prompt(query, docs)
         token_count = len(self._tokenizer.encode(prompt))
 
@@ -292,8 +392,11 @@ class JinaRerankerMLX:
         input_ids = self._tokenizer.encode(prompt)
 
         token_count = len(input_ids)
-        logger.debug(
-            "Reranker prompt: %d tokens, %d documents", token_count, len(docs)
+        logger.info(
+            "Reranker forward pass: %d tokens total, %d documents "
+            "(avg %.0f tok/doc)",
+            token_count, len(docs),
+            token_count / max(len(docs), 1),
         )
 
         # Forward through backbone – get last-layer hidden states

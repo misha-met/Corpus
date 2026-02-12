@@ -158,6 +158,23 @@ def _classify_heuristic(query: str) -> IntentResult:
             if pattern.search(query):
                 scores[intent] += 1
 
+    # ---- noun-phrase de-boost ----
+    # "Chomsky's critique", "chomskys critique", "the critique of X" → the
+    # word "critique" is a noun, NOT an instruction to critique.  De-boost
+    # CRITIQUE so it doesn't tie with COMPARE / ANALYZE on queries that
+    # merely *mention* a critique.
+    if scores[Intent.CRITIQUE] > 0:
+        noun_critique = re.search(
+            r"(?:\b\w+(?:'s|s)\s+|(?:the|a|an|this|that|his|her|their|its)\s+)critique\b",
+            query, re.IGNORECASE,
+        )
+        if noun_critique:
+            scores[Intent.CRITIQUE] = max(0, scores[Intent.CRITIQUE] - 1)
+            logger.debug(
+                "De-boosted CRITIQUE: 'critique' appears as noun phrase (%s)",
+                noun_critique.group(),
+            )
+
     analyze_bias = _is_technical_how_why(query)
     if analyze_bias:
         # Boost whichever analytical intent scored highest, or ANALYZE as default
@@ -193,6 +210,22 @@ def _classify_heuristic(query: str) -> IntentResult:
         if scores[Intent.COLLECTION] >= scores[Intent.SUMMARIZE]:
             best_intent = Intent.COLLECTION
             best_score = scores[Intent.COLLECTION]
+
+    # COMPARE should win ties with CRITIQUE when both match at score 1
+    # ("What is a similarity in Chomsky's critique" → COMPARE, not CRITIQUE)
+    if (
+        scores[Intent.COMPARE] > 0
+        and scores[Intent.CRITIQUE] > 0
+        and scores[Intent.COMPARE] >= scores[Intent.CRITIQUE]
+    ):
+        best_intent = Intent.COMPARE
+        best_score = scores[Intent.COMPARE]
+        # Zero out CRITIQUE so the confidence calc doesn't penalise the
+        # false tie — we've resolved the ambiguity.
+        scores[Intent.CRITIQUE] = 0
+
+    # Recalculate matching intents after all tiebreaks / de-boosts.
+    matching_intents = [i for i, s in scores.items() if s > 0]
 
     if len(matching_intents) > 1 and best_score == 1:
         confidence = _HEURISTIC_CONFIDENCE["weak_match"]
@@ -256,12 +289,33 @@ def _parse_llm_response(response: str) -> Optional[Tuple[Intent, float]]:
 
 
 class IntentClassifier:
-    """Classifies user queries into intent types with LLM or heuristic fallback."""
+    """Classifies user queries into intent types with LLM or heuristic fallback.
 
-    def __init__(self, generator: Optional[object] = None, confidence_threshold: float = 0.6, use_llm: bool = True) -> None:
+    Supports two kinds of LLM backend:
+
+    * **lightweight_generator** – an object with a ``generate_text(prompt, max_tokens)``
+      method (e.g. the reranker's 0.6B backbone).  Preferred because it is
+      already loaded and adds only ~100-200 ms.
+    * **generator** – a full ``MlxGenerator`` instance.  Only used when no
+      lightweight generator is supplied and ``use_llm=True``.
+    """
+
+    def __init__(
+        self,
+        generator: Optional[object] = None,
+        confidence_threshold: float = 0.6,
+        use_llm: bool = True,
+        lightweight_generator: Optional[object] = None,
+        mode: Optional[str] = None,   # kept for backward compat; unused
+    ) -> None:
         self._generator = generator
+        self._lightweight_generator = lightweight_generator
         self._confidence_threshold = confidence_threshold
-        self._use_llm = use_llm and generator is not None
+        # Prefer lightweight generator (already loaded, fast).
+        if lightweight_generator is not None:
+            self._use_llm = True
+        else:
+            self._use_llm = use_llm and generator is not None
 
     def classify(self, query: str) -> IntentResult:
         """Classify query intent. Falls back to OVERVIEW if confidence < threshold."""
@@ -285,20 +339,38 @@ class IntentClassifier:
         return result
     
     def _classify_with_llm(self, query: str) -> Optional[IntentResult]:
-        """Classify using LLM generator."""
-        if self._generator is None:
+        """Classify using LLM generator (lightweight or full)."""
+        prompt = _build_classification_prompt(query)
+        response: Optional[str] = None
+
+        if self._lightweight_generator is not None:
+            # Fast path: reranker's 0.6B backbone (~100-200 ms)
+            try:
+                response = self._lightweight_generator.generate_text(
+                    prompt, max_tokens=50, temperature=0.1,
+                )
+            except Exception as e:
+                logger.warning("Lightweight LLM intent classification failed: %s", e)
+                return None
+        elif self._generator is not None:
+            # Slow path: full LLM
+            from .generator import GenerationConfig
+            config = GenerationConfig(max_tokens=50, temperature=0.1, top_p=0.9)
+            response = self._generator.generate(prompt, config=config)
+        else:
             return None
 
-        from .generator import GenerationConfig
-        config = GenerationConfig(max_tokens=50, temperature=0.1, top_p=0.9)
-        response = self._generator.generate(_build_classification_prompt(query), config=config)
+        if response is None:
+            return None
+
         parsed = _parse_llm_response(response)
 
         if parsed is None:
-            logger.warning(f"Failed to parse LLM response: {response}")
+            logger.warning("Failed to parse LLM intent response: %s", response[:200])
             return None
 
-        return IntentResult(intent=parsed[0], confidence=parsed[1], method="llm")
+        method = "llm-light" if self._lightweight_generator is not None else "llm"
+        return IntentResult(intent=parsed[0], confidence=parsed[1], method=method)
 
 
 def classify_intent(
@@ -306,6 +378,13 @@ def classify_intent(
     generator: Optional[object] = None,
     confidence_threshold: float = 0.6,
     use_llm: bool = True,
+    lightweight_generator: Optional[object] = None,
+    mode: Optional[str] = None,
 ) -> IntentResult:
     """Convenience function to classify query intent."""
-    return IntentClassifier(generator=generator, confidence_threshold=confidence_threshold, use_llm=use_llm).classify(query)
+    return IntentClassifier(
+        generator=generator,
+        confidence_threshold=confidence_threshold,
+        use_llm=use_llm,
+        lightweight_generator=lightweight_generator,
+    ).classify(query)
