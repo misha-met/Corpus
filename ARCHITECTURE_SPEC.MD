@@ -2,11 +2,9 @@
 
 ## 1. Core Architecture Overview
 
-The system implements a **hybrid retrieval-augmented generation (RAG) pipeline** optimized for Apple Silicon, combining:
+The system implements a **hybrid retrieval-augmented generation (RAG) pipeline** optimized for Apple Silicon, using:
 
-- **Dense retrieval** (embedding-based semantic search)
-- **Sparse retrieval** (BM25 keyword search)
-- **Reciprocal Rank Fusion** (RRF) for combining results
+- **Native hybrid retrieval** (LanceDB vector ANN + full-text search with default RRF fusion)
 - **Reranking** (Jina Reranker v3 MLX – listwise cosine scoring with hardware-aware context windowing)
 - **Token budget packing** (greedy document packing with truncation fallback)
 - **Intent-based generation** (task-specific prompt engineering)
@@ -19,9 +17,8 @@ The system implements a **hybrid retrieval-augmented generation (RAG) pipeline**
 *   **LLM Inference:** `mlx-lm` (Apple Machine Learning/Metal optimized).
 *   **Embeddings:** `sentence-transformers` (Run on CPU to save VRAM).
 *   **Re-ranking:** `jinaai/jina-reranker-v3-mlx` (Jina Reranker v3, MLX-native).
-*   **Sparse Search:** `rank-bm25`.
-*   **Vector Store:** `chromadb` (Local, HNSW with cosine distance).
-*   **Key-Value Store:** `sqlite3` (for Parent Chunks).
+*   **Unified Data Store:** `lancedb` (Columnar store with native hybrid search: vector ANN + FTS with RRF).
+*   **Arrow Format:** `pyarrow` (Efficient serialization for LanceDB).
 
 ---
 
@@ -37,17 +34,16 @@ Hierarchical chunk structure for efficient retrieval and context expansion:
 
 ### Module B: Storage Engine
 
-*   **Vector Index**: Embeddings of child chunks stored in Chroma (HNSW, cosine distance).
-*   **Lexical Index**: BM25 index of child chunk text for keyword-based search.
-*   **Context Store**: SQLite database mapping `parent_id` to full parent text for context expansion.
+Unified LanceDB-backed storage with three tables:
+
+*   **child_chunks**: Embeddings with vector ANN index and full-text search index. Hybrid queries combine both via RRF.
+*   **parent_chunks**: Full parent chunk text (no vectors), used for context expansion during reranking.
+*   **source_summaries**: Per-source summaries generated during ingest, optional metadata for context.
 
 ### Module C: Retrieval Pipeline
 
-1.  **Parallel Search**:
-    *   **Dense**: Cosine similarity on vector index (configurable `top_k`).
-    *   **Sparse**: BM25 search on lexical index (configurable `top_k`).
-2.  **RRF Fusion**: Combine dense and sparse results using Reciprocal Rank Fusion ($$Score = \sum (1 / (60 + rank))$$).
-3.  **Early Deduplication**: Keep highest-scored child per unique `parent_id` to reduce redundancy before expensive reranking.
+1.  **Hybrid Search**: Single LanceDB query combining vector ANN + FTS with RRF internally ($$Score = \sum (1 / (60 + rank))$$).
+2.  **Early Deduplication**: Keep highest-scored child per unique `parent_id` to reduce redundancy before expensive reranking.
 4.  **Reranking**: Jina Reranker v3 (MLX-native) performs listwise scoring via cosine similarity between projected query and document embeddings. A context-window safety guard dynamically truncates the document list to stay within the backbone’s 131K context limit.
 5.  **Threshold Filtering**: Remove documents below score threshold based on operating mode.
 6.  **Context Expansion**: Map child chunks to parent chunks and apply token budget packing.
@@ -86,8 +82,6 @@ The system supports two operating modes, with `regular` mode auto-scaling based 
 
 | Parameter | Regular (32GB) | Regular (48-63GB) | Regular Plus (64GB+) | Deep-Research |
 |-----------|----------------|-------------------|----------------------|---------------|
-| `top_k_dense` | 100 | 100 | 200 | 400 |
-| `top_k_sparse` | 100 | 100 | 200 | 400 |
 | `top_k_fused` | 50 | 50 | 100 | 200 |
 | `top_k_rerank` | 20 | 20 | 40 | 60 |
 | `top_k_final` | 5 | 5 | 8 | 10 |
@@ -211,9 +205,7 @@ The retrieval and packing pipeline collects comprehensive metrics for analysis a
 - `docs_packed/skipped/truncated`: Document counts
 
 ### Timing Metrics (per stage)
-- `dense_search_ms`: Embedding search time
-- `sparse_search_ms`: BM25 search time
-- `rrf_fusion_ms`: RRF fusion time
+- `hybrid_search_ms`: Combined vector ANN + FTS with RRF fusion time
 - `rerank_ms`: Reranking time
 - `dedup_ms`: Deduplication time
 - `budget_packing_ms`: Token budget packing time
@@ -235,7 +227,7 @@ The retrieval and packing pipeline collects comprehensive metrics for analysis a
 ## 9. CLI Usage Examples
 
 ```bash
-# Auto-detect mode based on RAM (uses regular with RAM-based parameter scaling)
+# Auto-detect mode based on RAM
 python -m src.cli query "What is the main argument?"
 
 # Specify deep-research mode explicitly
@@ -245,8 +237,11 @@ python -m src.cli query "Analyze the methodology" --mode power-deep-research
 export RAG_MODE=power-deep-research
 python -m src.cli query "Compare the two approaches"
 
-# Ingest with specific mode
-python -m src.cli ingest document.md --source-id doc1 --mode regular
+# Ingest with summaries (uses LanceDB via --lance)
+python -m src.cli ingest document.pdf --source-id doc1 --lance data/lance
+
+# Ingest without generating summaries
+python -m src.cli ingest document.pdf --source-id doc1 --lance data/lance --no-summarize
 
 # Enable citations with custom intent
 python -m src.cli query "Explain the concept" --cite --intent explain
@@ -260,8 +255,8 @@ python -m src.cli query "Search for key terms" --no-generate
 ## 10. Dependencies
 
 ### Required
-- `chromadb` - Vector database (HNSW, cosine distance)
-- `rank-bm25` - Sparse search indexing
+- `lancedb` - Unified vector and metadata store with native hybrid search
+- `pyarrow` - Columnar serialization for LanceDB
 - `pydantic` - Configuration validation
 - `sentence-transformers` - Embedding model inference
 - `jinaai/jina-reranker-v3-mlx` - Reranker model (MLX-native)
