@@ -89,9 +89,8 @@ class TestLatencyProfiler:
         self.tokenizer = MockTokenizer()
 
         config = StorageConfig(
-            sqlite_path=tmp_path / "perf.sqlite",
-            chroma_dir=tmp_path / "perf_chroma",
-            chroma_collection="perf_chunks",
+            lance_dir=tmp_path / "perf_lance",
+            lance_table="perf_chunks",
         )
         self.storage = StorageEngine(config)
 
@@ -100,10 +99,6 @@ class TestLatencyProfiler:
         texts = [c.text for c in children]
         embeddings = self.embedder.encode(texts, normalize_embeddings=True)
         self.storage.add_children(children, embeddings=embeddings)
-
-        bm25_path = tmp_path / "bm25.json"
-        self.storage.persist_bm25(bm25_path)
-        self.storage.load_bm25(bm25_path)
 
         self.model_config = ModelConfig(
             mode="regular", llm_model="test", embedding_model="test",
@@ -138,39 +133,17 @@ class TestLatencyProfiler:
         logger.info(f"embedding_encode: {json.dumps(profile.to_dict())}")
 
     def test_profile_vector_query(self):
-        """Profile vector (Chroma) query latency."""
-        q_emb = self.embedder.encode(["test query"], normalize_embeddings=True)
+        """Profile hybrid search latency."""
+        q_vec = self.embedder.encode(["test query"], normalize_embeddings=True)[0]
         for k in [5, 10]:
             profile = self._profile(
-                f"vector_query_k{k}",
-                lambda: self.storage.query_children(embeddings=q_emb, top_k=k),
+                f"hybrid_search_k{k}",
+                lambda: self.storage.hybrid_search(
+                    query_text="test query", query_vector=q_vec, top_k=k,
+                ),
                 top_k=k,
             )
-            logger.info(f"vector_query_k{k}: {json.dumps(profile.to_dict())}")
-
-    def test_profile_bm25_search(self):
-        """Profile BM25 search latency."""
-        bm25 = self.storage.bm25
-        for query in ["Chomsky language", "epistemology knowledge Kant"]:
-            tokens = query.split()
-            profile = self._profile(
-                f"bm25_search",
-                lambda: bm25.get_scores(tokens),
-                query=query,
-            )
-            logger.info(f"bm25_search '{query}': {json.dumps(profile.to_dict())}")
-
-    def test_profile_rrf_fusion(self):
-        """Profile RRF fusion latency with varying input sizes."""
-        for n in [10, 50, 100]:
-            dense = [{"id": f"d{i}", "rank": i + 1} for i in range(n)]
-            sparse = [{"id": f"s{i}", "rank": i + 1} for i in range(n)]
-            profile = self._profile(
-                f"rrf_fusion_{n}",
-                lambda: RetrievalEngine._rrf_fuse(dense, sparse),
-                input_size=n,
-            )
-            logger.info(f"rrf_fusion n={n}: {json.dumps(profile.to_dict())}")
+            logger.info(f"hybrid_search_k{k}: {json.dumps(profile.to_dict())}")
 
     def test_profile_deduplication(self):
         """Profile deduplication latency with varying input sizes."""
@@ -218,7 +191,7 @@ class TestLatencyProfiler:
             logger.info(f"budget_packing n={n_docs}: {json.dumps(profile.to_dict())}")
 
     def test_profile_parent_lookup(self):
-        """Profile SQLite parent text lookup latency."""
+        """Profile parent text lookup latency."""
         parents, _ = generate_parent_child_corpus()
         parent_id = parents[0].id
         profile = self._profile(
@@ -270,21 +243,12 @@ class TestLatencyProfiler:
         p = self._profile("embed", lambda: self.embedder.encode(texts, normalize_embeddings=True))
         stages["embedding"] = p.to_dict()
 
-        # Vector query
-        q_emb = self.embedder.encode(texts, normalize_embeddings=True)
-        p = self._profile("vector_query", lambda: self.storage.query_children(embeddings=q_emb, top_k=10))
-        stages["vector_query"] = p.to_dict()
-
-        # BM25
-        bm25 = self.storage.bm25
-        p = self._profile("bm25", lambda: bm25.get_scores("test query".split()))
-        stages["bm25_search"] = p.to_dict()
-
-        # RRF
-        dense = [{"id": f"d{i}", "rank": i + 1} for i in range(50)]
-        sparse = [{"id": f"s{i}", "rank": i + 1} for i in range(50)]
-        p = self._profile("rrf", lambda: RetrievalEngine._rrf_fuse(dense, sparse))
-        stages["rrf_fusion"] = p.to_dict()
+        # Hybrid search
+        q_vec = self.embedder.encode(texts, normalize_embeddings=True)[0]
+        p = self._profile("hybrid_search", lambda: self.storage.hybrid_search(
+            query_text="test query", query_vector=q_vec, top_k=10,
+        ))
+        stages["hybrid_search"] = p.to_dict()
 
         # Dedup
         items = [{"id": f"c{i}", "score": float(i), "metadata": {"parent_id": f"p{i%10}"}} for i in range(50)]

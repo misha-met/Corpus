@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -16,80 +15,83 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class StorageConfig:
-    sqlite_path: Path
     lance_dir: Path
     lance_table: str = "child_chunks"
 
 
 class StorageEngine:
-    """Storage engine backed by LanceDB (vectors + FTS) and SQLite (parents + summaries)."""
+    """Unified storage engine backed entirely by LanceDB."""
+
+    _PARENTS_TABLE = "parent_chunks"
+    _SUMMARIES_TABLE = "source_summaries"
 
     def __init__(self, config: StorageConfig) -> None:
         self._config = config
-        config.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
         config.lance_dir.mkdir(parents=True, exist_ok=True)
 
-        self._conn = sqlite3.connect(str(config.sqlite_path))
-        self._conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS parent_chunks (
-                parent_id TEXT PRIMARY KEY,
-                source_id TEXT NOT NULL,
-                page_number INTEGER,
-                page_label TEXT,
-                display_page TEXT,
-                header_path TEXT NOT NULL,
-                text TEXT NOT NULL
-            )
-            """
-        )
-        self._conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS source_summaries (
-                source_id TEXT PRIMARY KEY,
-                summary TEXT NOT NULL
-            )
-            """
-        )
-        self._conn.commit()
-
-        # LanceDB for child chunk vectors + full-text search
         self._db = lancedb.connect(str(config.lance_dir))
         self._table_name = config.lance_table
+
+        # --- child chunks (vectors + FTS) ---
         self._table: Optional[lancedb.table.Table] = None
         try:
             self._table = self._db.open_table(self._table_name)
-            logger.info("Opened existing LanceDB table '%s'", self._table_name)
+            logger.info("Opened LanceDB table '%s'", self._table_name)
         except Exception:
-            logger.info("LanceDB table '%s' does not exist yet; will be created on first ingest", self._table_name)
+            logger.info(
+                "LanceDB table '%s' not found; will create on first ingest",
+                self._table_name,
+            )
+
+        # --- parent chunks (no vectors) ---
+        self._parents: Optional[lancedb.table.Table] = None
+        try:
+            self._parents = self._db.open_table(self._PARENTS_TABLE)
+        except Exception:
+            pass
+
+        # --- source summaries (no vectors) ---
+        self._summaries: Optional[lancedb.table.Table] = None
+        try:
+            self._summaries = self._db.open_table(self._SUMMARIES_TABLE)
+        except Exception:
+            pass
 
     def close(self) -> None:
-        self._conn.close()
+        pass  # LanceDB connections do not require explicit close
 
     def add_parents(self, parents: Iterable[ParentChunk]) -> None:
-        rows = [
-            (
-                parent.id,
-                parent.metadata.source_id,
-                parent.metadata.page_number,
-                parent.metadata.page_label,
-                parent.metadata.display_page,
-                parent.metadata.header_path,
-                parent.text,
-            )
-            for parent in parents
+        records = [
+            {
+                "parent_id": p.id,
+                "source_id": p.metadata.source_id,
+                "page_number": p.metadata.page_number or 0,
+                "page_label": p.metadata.page_label or "",
+                "display_page": p.metadata.display_page or "",
+                "header_path": p.metadata.header_path,
+                "text": p.text,
+            }
+            for p in parents
         ]
-        if not rows:
+        if not records:
             return
-        with self._conn:
-            self._conn.executemany(
-                """
-                INSERT OR REPLACE INTO parent_chunks
-                    (parent_id, source_id, page_number, page_label, display_page, header_path, text)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows,
+
+        if self._parents is None:
+            self._parents = self._db.create_table(self._PARENTS_TABLE, records)
+            logger.info(
+                "Created LanceDB table '%s' (%d rows)",
+                self._PARENTS_TABLE,
+                len(records),
             )
+        else:
+            # Upsert: remove existing parent_ids then re-add
+            ids = [r["parent_id"] for r in records]
+            id_list = ", ".join(f"'{pid}'" for pid in ids)
+            try:
+                self._parents.delete(f"parent_id IN ({id_list})")
+            except Exception:
+                pass
+            self._parents.add(records)
 
     def add_children(
         self,
@@ -135,27 +137,30 @@ class StorageEngine:
             logger.info("Added %d rows to LanceDB table '%s' + rebuilt FTS index", len(records), self._table_name)
 
     def get_parent_text(self, parent_id: str) -> Optional[str]:
-        cursor = self._conn.execute(
-            "SELECT text FROM parent_chunks WHERE parent_id = ?",
-            (parent_id,),
-        )
-        row = cursor.fetchone()
-        return row[0] if row else None
+        if self._parents is None:
+            return None
+        for row in self._parents.to_arrow().to_pylist():
+            if row["parent_id"] == parent_id:
+                return row["text"]
+        return None
 
     def get_children_by_ids(self, ids: list[str]) -> dict[str, dict[str, object]]:
         """Fetch child chunks by their IDs from LanceDB."""
         if not ids or self._table is None:
             return {}
-        # Use SQL filter to fetch by ID list
-        id_list = ", ".join(f"'{cid}'" for cid in ids)
+        id_set = set(ids)
+        _NON_VECTOR_COLS = [
+            "id", "text", "source_id", "page_number",
+            "page_label", "display_page", "header_path", "parent_id",
+        ]
         try:
-            rows = self._table.search().where(f"id IN ({id_list})").limit(len(ids)).to_list()
+            rows = self._table.to_arrow().select(_NON_VECTOR_COLS).to_pylist()
         except Exception:
             return {}
         result: dict[str, dict[str, object]] = {}
         for row in rows:
             child_id = row.get("id")
-            if child_id:
+            if child_id in id_set:
                 meta = {
                     "source_id": row.get("source_id", ""),
                     "page_number": row.get("page_number"),
@@ -164,7 +169,6 @@ class StorageEngine:
                     "header_path": row.get("header_path", ""),
                     "parent_id": row.get("parent_id", ""),
                 }
-                # Clean up empty/zero values to match Chroma-era behavior
                 meta = {k: v for k, v in meta.items() if v is not None and v != "" and v != 0}
                 result[child_id] = {"text": row.get("text", ""), "metadata": meta}
         return result
@@ -214,41 +218,44 @@ class StorageEngine:
         return results
 
     def list_source_ids(self) -> list[str]:
-        cursor = self._conn.execute(
-            "SELECT DISTINCT source_id FROM parent_chunks ORDER BY source_id"
-        )
-        rows = cursor.fetchall()
-        return [row[0] for row in rows if row and row[0]]
+        if self._parents is None:
+            return []
+        rows = self._parents.to_arrow().to_pylist()
+        return sorted(set(r["source_id"] for r in rows if r.get("source_id")))
 
     def upsert_source_summary(self, *, source_id: str, summary: str) -> None:
         if not source_id.strip():
             raise ValueError("source_id must be non-empty.")
         if not summary.strip():
             raise ValueError("summary must be non-empty.")
-        with self._conn:
-            self._conn.execute(
-                """
-                INSERT OR REPLACE INTO source_summaries (source_id, summary)
-                VALUES (?, ?)
-                """,
-                (source_id.strip(), summary.strip()),
-            )
+        sid = source_id.strip()
+        record = {"source_id": sid, "summary": summary.strip()}
+        if self._summaries is None:
+            self._summaries = self._db.create_table(self._SUMMARIES_TABLE, [record])
+            logger.info("Created LanceDB table '%s'", self._SUMMARIES_TABLE)
+        else:
+            try:
+                self._summaries.delete(f"source_id = '{sid}'")
+            except Exception:
+                pass
+            self._summaries.add([record])
 
     def get_source_summaries(self) -> dict[str, str]:
-        cursor = self._conn.execute(
-            "SELECT source_id, summary FROM source_summaries ORDER BY source_id"
-        )
-        rows = cursor.fetchall()
+        if self._summaries is None:
+            return {}
+        rows = self._summaries.to_arrow().to_pylist()
         return {
-            source_id: summary
-            for source_id, summary in rows
-            if source_id and summary
+            r["source_id"]: r["summary"]
+            for r in rows
+            if r.get("source_id") and r.get("summary")
         }
 
     def get_parent_texts_by_source(self, *, source_id: str) -> list[str]:
-        cursor = self._conn.execute(
-            "SELECT text FROM parent_chunks WHERE source_id = ? ORDER BY page_number",
-            (source_id,),
-        )
-        rows = cursor.fetchall()
-        return [row[0] for row in rows if row and row[0]]
+        if self._parents is None:
+            return []
+        rows = [
+            r for r in self._parents.to_arrow().to_pylist()
+            if r.get("source_id") == source_id
+        ]
+        rows.sort(key=lambda r: r.get("page_number", 0))
+        return [r["text"] for r in rows if r.get("text")]

@@ -228,7 +228,6 @@ def run() -> None:
     ingest_parser.add_argument("file", help="Markdown file path")
     ingest_parser.add_argument("--source-id", required=True, help="Source identifier")
     ingest_parser.add_argument("--page-number", type=int, default=None, help="Page number")
-    ingest_parser.add_argument("--sqlite", default="data/context.sqlite", help="SQLite DB path")
     ingest_parser.add_argument("--lance", default="data/lance", help="LanceDB directory")
     ingest_parser.add_argument("--collection", default="child_chunks", help="LanceDB table name")
     ingest_parser.add_argument(
@@ -261,7 +260,6 @@ def run() -> None:
 
     query_parser = subparsers.add_parser("query", help="Query the RAG system")
     query_parser.add_argument("query", help="User query")
-    query_parser.add_argument("--sqlite", default="data/context.sqlite", help="SQLite DB path")
     query_parser.add_argument("--lance", default="data/lance", help="LanceDB directory")
     query_parser.add_argument("--collection", default="child_chunks", help="LanceDB table name")
     query_parser.add_argument(
@@ -352,7 +350,6 @@ def run() -> None:
 
     storage = StorageEngine(
         StorageConfig(
-            sqlite_path=Path(args.sqlite),
             lance_dir=Path(args.lance),
             lance_table=args.collection,
         )

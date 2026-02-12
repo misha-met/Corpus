@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sqlite3
 import sys
 import tempfile
 import time
@@ -349,9 +348,8 @@ def tmp_storage(tmp_path: Path, mock_embedder: MockEmbeddingModel):
     from src.storage import StorageConfig, StorageEngine
 
     config = StorageConfig(
-        sqlite_path=tmp_path / "test.sqlite",
-        chroma_dir=tmp_path / "chroma",
-        chroma_collection="test_chunks",
+        lance_dir=tmp_path / "lance",
+        lance_table="test_chunks",
     )
     engine = StorageEngine(config)
 
@@ -361,11 +359,6 @@ def tmp_storage(tmp_path: Path, mock_embedder: MockEmbeddingModel):
     texts = [c.text for c in children]
     embeddings = mock_embedder.encode(texts, normalize_embeddings=True)
     engine.add_children(children, embeddings=embeddings)
-
-    # Persist BM25 and reload for search
-    bm25_path = tmp_path / "bm25.json"
-    engine.persist_bm25(bm25_path)
-    engine.load_bm25(bm25_path)
 
     yield engine
     engine.close()

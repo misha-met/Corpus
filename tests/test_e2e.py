@@ -75,9 +75,8 @@ class TestEndToEnd:
         self.tokenizer = MockTokenizer()
 
         config = StorageConfig(
-            sqlite_path=tmp_path / "e2e.sqlite",
-            chroma_dir=tmp_path / "e2e_chroma",
-            chroma_collection="e2e_chunks",
+            lance_dir=tmp_path / "e2e_lance",
+            lance_table="e2e_chunks",
         )
         self.storage = StorageEngine(config)
 
@@ -89,10 +88,6 @@ class TestEndToEnd:
         texts = [c.text for c in children]
         embeddings = self.embedder.encode(texts, normalize_embeddings=True)
         self.storage.add_children(children, embeddings=embeddings)
-
-        bm25_path = tmp_path / "bm25.json"
-        self.storage.persist_bm25(bm25_path)
-        self.storage.load_bm25(bm25_path)
 
         yield
         self.storage.close()

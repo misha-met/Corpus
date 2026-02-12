@@ -64,9 +64,8 @@ EXPERIMENT_QUERIES = [q for q in FIXED_QUERIES if q.strip()]
 def _create_storage(tmp_path: Path, embedder: MockEmbeddingModel) -> StorageEngine:
     """Create a fresh StorageEngine with the fixed corpus loaded."""
     config = StorageConfig(
-        sqlite_path=tmp_path / "test.sqlite",
-        chroma_dir=tmp_path / "chroma",
-        chroma_collection="test_chunks",
+        lance_dir=tmp_path / "lance",
+        lance_table="test_chunks",
     )
     engine = StorageEngine(config)
     parents, children = generate_parent_child_corpus()
@@ -74,9 +73,6 @@ def _create_storage(tmp_path: Path, embedder: MockEmbeddingModel) -> StorageEngi
     texts = [c.text for c in children]
     embeddings = embedder.encode(texts, normalize_embeddings=True)
     engine.add_children(children, embeddings=embeddings)
-    bm25_path = tmp_path / "bm25.json"
-    engine.persist_bm25(bm25_path)
-    engine.load_bm25(bm25_path)
     return engine
 
 
@@ -236,7 +232,7 @@ class TestExp2DedupOrder:
 
         query_results = []
         for q in EXPERIMENT_QUERIES:
-            # --- Current order: dedup BEFORE rerank (as in retrieval.py) ---
+            # --- Current order: hybrid → dedup → rerank (as in retrieval.py) ---
             engine_current = RetrievalEngine(
                 storage=storage, embedding_model=embedder,
                 reranker=reranker, config=config,
@@ -245,12 +241,9 @@ class TestExp2DedupOrder:
             current_results = engine_current.search(q)
             current_ms = (time.perf_counter() - t0) * 1000
 
-            # --- Alternative: dedup AFTER rerank ---
-            # Simulate by running stages manually
+            # --- Alternative: hybrid → rerank → dedup ---
             t0 = time.perf_counter()
-            dense = engine_current._dense_search(q, config.top_k_dense)
-            sparse = engine_current._sparse_search(q, config.top_k_sparse)
-            fused = engine_current._rrf_fuse(dense, sparse)
+            fused = engine_current._hybrid_search(q, config.top_k_fused)
 
             # Hydrate missing text/metadata
             missing_ids = [item["id"] for item in fused if "text" not in item or "metadata" not in item]
@@ -260,12 +253,6 @@ class TestExp2DedupOrder:
                     if item["id"] in fetched:
                         item.setdefault("text", fetched[item["id"]].get("text"))
                         item.setdefault("metadata", fetched[item["id"]].get("metadata"))
-            for item in fused:
-                if "text" not in item or "metadata" not in item:
-                    lookup = next((d for d in dense if d["id"] == item["id"]), None)
-                    if lookup:
-                        item.setdefault("text", lookup.get("text"))
-                        item.setdefault("metadata", lookup.get("metadata"))
 
             # Expand parent text for reranking
             parent_cache: dict[str, str] = {}
@@ -342,10 +329,8 @@ class TestExp2DedupOrder:
         )
 
         for q in EXPERIMENT_QUERIES:
-            # Current pipeline: dedup runs first, then rerank on deduped set
-            dense = engine._dense_search(q, config.top_k_dense)
-            sparse = engine._sparse_search(q, config.top_k_sparse)
-            fused = engine._rrf_fuse(dense, sparse)
+            # Current pipeline: hybrid → dedup → rerank
+            fused = engine._hybrid_search(q, config.top_k_fused)
 
             before_dedup = len(fused)
             deduped, _ = engine._deduplicate_by_parent(fused, config.top_k_fused)
@@ -364,7 +349,7 @@ class TestExp2DedupOrder:
                 f"rerank_batch_current={batch_size_current} rerank_batch_alt={batch_size_alternative}"
             )
 
-            # Dedup-first should produce smaller reranker batch
+            # Dedup-first should produce smaller or equal reranker batch
             assert batch_size_current <= batch_size_alternative
 
         storage.close()
@@ -467,9 +452,8 @@ class TestExp3RealModelProfiling:
 
         # Build storage with real embeddings
         config = StorageConfig(
-            sqlite_path=tmp_path / "real.sqlite",
-            chroma_dir=tmp_path / "real_chroma",
-            chroma_collection="real_chunks",
+            lance_dir=tmp_path / "real_lance",
+            lance_table="real_chunks",
         )
         storage = StorageEngine(config)
         parents, children = generate_parent_child_corpus()
@@ -482,9 +466,6 @@ class TestExp3RealModelProfiling:
         results["ingest_embedding_ms"] = round(ingest_embed_ms, 2)
 
         storage.add_children(children, embeddings=embeddings)
-        bm25_path = tmp_path / "real_bm25.json"
-        storage.persist_bm25(bm25_path)
-        storage.load_bm25(bm25_path)
 
         mock_reranker = MockReranker()
         pipeline_config = _get_mode_config("regular", 32.0)
