@@ -22,7 +22,7 @@ class BudgetMetrics:
 @dataclass
 class TimingMetrics:
     """Stage-level timing metrics in milliseconds."""
-    dense_search_ms: float = 0.0
+    hybrid_search_ms: float = 0.0
     sparse_search_ms: float = 0.0
     rrf_fusion_ms: float = 0.0
     rerank_ms: float = 0.0
@@ -112,7 +112,7 @@ def log_metrics(
 
     t = metrics.timing
     logger.info("TIMING:")
-    logger.info(f"   Dense search:   {t.dense_search_ms:>8.1f} ms")
+    logger.info(f"   Hybrid search:  {t.hybrid_search_ms:>8.1f} ms")
     logger.info(f"   Sparse search:  {t.sparse_search_ms:>8.1f} ms")
     logger.info(f"   RRF fusion:     {t.rrf_fusion_ms:>8.1f} ms")
     logger.info(f"   Reranking:      {t.rerank_ms:>8.1f} ms")

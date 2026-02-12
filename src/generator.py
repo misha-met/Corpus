@@ -33,18 +33,21 @@ class MlxGenerator:
 
     def __init__(self, model_path: str) -> None:
         self._model_id = model_path
-        self._prompt_cache = None
+        self._make_prompt_cache = None
         try:
             from mlx_lm import load
             self._model, self._tokenizer = load(model_path)
-            # Create a reusable prompt cache for KV context warming
+            # Attempt to verify KVCache support for this model
             try:
                 from mlx_lm.utils import make_prompt_cache
-                self._prompt_cache = make_prompt_cache(self._model)
-                logger.info("KVCache initialized for model %s", model_path)
+                self._make_prompt_cache = make_prompt_cache
+                # Verify cache creation works before committing to the path
+                _test_cache = make_prompt_cache(self._model)
+                del _test_cache
+                logger.info("KVCache support verified for model %s", model_path)
             except (ImportError, AttributeError, Exception) as cache_exc:
                 logger.debug("KVCache not available (mlx-lm version may not support it): %s", cache_exc)
-                self._prompt_cache = None
+                self._make_prompt_cache = None
         except Exception as exc:
             raise RuntimeError(f"Failed to load mlx-lm model at {model_path}") from exc
 
@@ -172,11 +175,11 @@ class MlxGenerator:
                 sampler=sampler,
                 logits_processors=logits_processors or None,
             )
-            if self._prompt_cache is not None:
+            if self._make_prompt_cache is not None:
                 try:
-                    from mlx_lm.utils import make_prompt_cache
-                    # Fresh cache per generation to avoid stale KV state
-                    cache = make_prompt_cache(self._model)
+                    # Fresh cache per call — KV state is prompt-specific so
+                    # reusing a stale cache would corrupt generation.
+                    cache = self._make_prompt_cache(self._model)
                     generate_kwargs["prompt_cache"] = cache
                 except (ImportError, AttributeError, TypeError):
                     pass  # Graceful fallback if API doesn't support prompt_cache kwarg

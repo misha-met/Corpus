@@ -365,7 +365,7 @@ class TestCrossStageMetrics:
         assert metrics is not None
 
         # Timing should be populated
-        assert metrics.timing.dense_search_ms > 0
+        assert metrics.timing.hybrid_search_ms > 0
         assert metrics.timing.sparse_search_ms >= 0
         assert metrics.timing.total_ms > 0
 
@@ -422,7 +422,7 @@ class TestPipelineLatency:
             stage_breakdown = {}
             if metrics:
                 stage_breakdown = {
-                    "dense_ms": metrics.timing.dense_search_ms,
+                    "dense_ms": metrics.timing.hybrid_search_ms,
                     "sparse_ms": metrics.timing.sparse_search_ms,
                     "rrf_ms": metrics.timing.rrf_fusion_ms,
                     "rerank_ms": metrics.timing.rerank_ms,
@@ -483,7 +483,7 @@ class TestPipelineLatency:
             }
             if results and results[0].metrics:
                 mode_timings[mode_name]["breakdown"] = {
-                    "dense_ms": results[0].metrics.timing.dense_search_ms,
+                    "dense_ms": results[0].metrics.timing.hybrid_search_ms,
                     "sparse_ms": results[0].metrics.timing.sparse_search_ms,
                     "rerank_ms": results[0].metrics.timing.rerank_ms,
                 }

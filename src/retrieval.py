@@ -234,11 +234,11 @@ class RetrievalEngine:
         # Stage 1: LanceDB native hybrid search (replaces dense + sparse + RRF)
         t0 = time.perf_counter()
         fused = self._hybrid_search(query, k_fused, source_id=source_id)
-        timing.dense_search_ms = (time.perf_counter() - t0) * 1000
+        timing.hybrid_search_ms = (time.perf_counter() - t0) * 1000
         # sparse_search_ms and rrf_fusion_ms are zero — LanceDB does it all in one call
         timing.sparse_search_ms = 0.0
         timing.rrf_fusion_ms = 0.0
-        logger.info("LanceDB hybrid search returned %d hits in %.3fms", len(fused), timing.dense_search_ms)
+        logger.info("LanceDB hybrid search returned %d hits in %.3fms", len(fused), timing.hybrid_search_ms)
 
         # Stage 2: Deduplicate by parent
         t0 = time.perf_counter()

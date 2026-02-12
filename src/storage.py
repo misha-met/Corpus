@@ -43,7 +43,7 @@ class StorageEngine:
         try:
             self._table = self._db.open_table(self._table_name)
             logger.info("Opened LanceDB table '%s'", self._table_name)
-        except Exception:
+        except ValueError:
             logger.info(
                 "LanceDB table '%s' not found; will create on first ingest",
                 self._table_name,
@@ -55,15 +55,15 @@ class StorageEngine:
         self._parents: Optional[lancedb.table.Table] = None
         try:
             self._parents = self._db.open_table(self._PARENTS_TABLE)
-        except Exception:
-            pass
+        except ValueError:
+            pass  # Table does not exist yet
 
         # --- source summaries (no vectors) ---
         self._summaries: Optional[lancedb.table.Table] = None
         try:
             self._summaries = self._db.open_table(self._SUMMARIES_TABLE)
-        except Exception:
-            pass
+        except ValueError:
+            pass  # Table does not exist yet
 
     def close(self) -> None:
         pass  # LanceDB connections do not require explicit close

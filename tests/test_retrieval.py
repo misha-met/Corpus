@@ -1,4 +1,4 @@
-"""Tests for retrieval pipeline: dense, sparse, RRF fusion, deduplication, reranking, thresholds."""
+"""Tests for retrieval pipeline: hybrid search, deduplication, reranking, thresholds."""
 from __future__ import annotations
 
 from typing import Any
@@ -87,115 +87,40 @@ def retrieval_engine(tmp_storage, mock_embedder, mock_reranker):
 
 
 # ===========================================================================
-# Dense search
+# Hybrid search
 # ===========================================================================
 
-class TestDenseSearch:
-    def test_dense_returns_results(self, retrieval_engine: RetrievalEngine):
-        results = retrieval_engine._dense_search("Chomsky theory", top_k=5)
+class TestHybridSearch:
+    def test_hybrid_returns_results(self, retrieval_engine: RetrievalEngine):
+        results = retrieval_engine._hybrid_search("Chomsky theory", top_k=5)
         assert len(results) > 0
         assert all("id" in r for r in results)
 
-    def test_dense_rank_ordering(self, retrieval_engine: RetrievalEngine):
-        results = retrieval_engine._dense_search("language acquisition", top_k=5)
-        ranks = [r["rank"] for r in results]
-        assert ranks == sorted(ranks)
-
-    def test_dense_empty_query_raises(self, retrieval_engine: RetrievalEngine):
-        with pytest.raises(ValueError):
-            retrieval_engine._dense_search("", top_k=5)
-
-    def test_dense_whitespace_query_raises(self, retrieval_engine: RetrievalEngine):
-        with pytest.raises(ValueError):
-            retrieval_engine._dense_search("   ", top_k=5)
-
-
-# ===========================================================================
-# Sparse search
-# ===========================================================================
-
-class TestSparseSearch:
-    def test_sparse_returns_results(self, retrieval_engine: RetrievalEngine):
-        results = retrieval_engine._sparse_search("Chomsky grammar", top_k=5)
-        assert len(results) > 0
-
-    def test_sparse_rank_ordering(self, retrieval_engine: RetrievalEngine):
-        results = retrieval_engine._sparse_search("epistemology knowledge", top_k=5)
-        # Scores should be in descending order
-        scores = [r["score"] for r in results]
-        assert scores == sorted(scores, reverse=True)
-
-    def test_sparse_empty_query_raises(self, retrieval_engine: RetrievalEngine):
-        with pytest.raises(ValueError):
-            retrieval_engine._sparse_search("", top_k=5)
-
-    def test_sparse_top_k_limit(self, retrieval_engine: RetrievalEngine):
-        results = retrieval_engine._sparse_search("word", top_k=2)
+    def test_hybrid_top_k_limit(self, retrieval_engine: RetrievalEngine):
+        results = retrieval_engine._hybrid_search("language acquisition", top_k=2)
         assert len(results) <= 2
 
+    def test_hybrid_deterministic(self, retrieval_engine: RetrievalEngine):
+        r1 = retrieval_engine._hybrid_search("epistemology knowledge", top_k=5)
+        r2 = retrieval_engine._hybrid_search("epistemology knowledge", top_k=5)
+        assert [r["id"] for r in r1] == [r["id"] for r in r2]
 
-# ===========================================================================
-# RRF Fusion
-# ===========================================================================
+    def test_hybrid_empty_query_raises(self, retrieval_engine: RetrievalEngine):
+        with pytest.raises(ValueError):
+            retrieval_engine._hybrid_search("", top_k=5)
 
-class TestRRFFusion:
-    def test_fuse_basic(self):
-        dense = [
-            {"id": "a", "rank": 1, "text": "doc a", "metadata": {}},
-            {"id": "b", "rank": 2, "text": "doc b", "metadata": {}},
-            {"id": "c", "rank": 3, "text": "doc c", "metadata": {}},
-        ]
-        sparse = [
-            {"id": "b", "rank": 1, "score": 5.0},
-            {"id": "d", "rank": 2, "score": 3.0},
-            {"id": "a", "rank": 3, "score": 1.0},
-        ]
-        fused = RetrievalEngine._rrf_fuse(dense, sparse)
-        assert len(fused) == 4  # a, b, c, d
-        ids = [f["id"] for f in fused]
-        assert "a" in ids
-        assert "b" in ids
+    def test_hybrid_whitespace_query_raises(self, retrieval_engine: RetrievalEngine):
+        with pytest.raises(ValueError):
+            retrieval_engine._hybrid_search("   ", top_k=5)
 
-    def test_fuse_deterministic(self):
-        """Same inputs should always produce same output."""
-        dense = [
-            {"id": "x", "rank": 1},
-            {"id": "y", "rank": 2},
-        ]
-        sparse = [
-            {"id": "y", "rank": 1},
-            {"id": "z", "rank": 2},
-        ]
-        r1 = RetrievalEngine._rrf_fuse(dense, sparse)
-        r2 = RetrievalEngine._rrf_fuse(dense, sparse)
-        assert [f["id"] for f in r1] == [f["id"] for f in r2]
-        assert [f["score"] for f in r1] == [f["score"] for f in r2]
-
-    def test_fuse_overlap_gets_higher_score(self):
-        """Items appearing in both lists should have higher RRF scores."""
-        dense = [{"id": "a", "rank": 1}, {"id": "b", "rank": 2}]
-        sparse = [{"id": "a", "rank": 2}, {"id": "c", "rank": 1}]
-        fused = RetrievalEngine._rrf_fuse(dense, sparse)
-        scores = {f["id"]: f["score"] for f in fused}
-        # 'a' appears in both, should have highest score
-        assert scores["a"] > scores["b"]
-        assert scores["a"] > scores["c"]
-
-    def test_fuse_rrf_formula(self):
-        """Verify RRF formula: Score = sum(1 / (60 + rank))."""
-        dense = [{"id": "x", "rank": 1}]
-        sparse = [{"id": "x", "rank": 3}]
-        fused = RetrievalEngine._rrf_fuse(dense, sparse)
-        expected = 1.0 / (60 + 1) + 1.0 / (60 + 3)
-        assert abs(fused[0]["score"] - expected) < 1e-9
-
-    def test_fuse_empty_inputs(self):
-        assert RetrievalEngine._rrf_fuse([], []) == []
-
-    def test_fuse_one_side_empty(self):
-        dense = [{"id": "a", "rank": 1}]
-        fused = RetrievalEngine._rrf_fuse(dense, [])
-        assert len(fused) == 1
+    def test_hybrid_source_filter_applies(self, retrieval_engine: RetrievalEngine):
+        results = retrieval_engine._hybrid_search(
+            "language",
+            top_k=10,
+            source_id="test_doc_linguistics",
+        )
+        assert len(results) > 0
+        assert all((r.get("metadata") or {}).get("source_id") == "test_doc_linguistics" for r in results)
 
 
 # ===========================================================================
@@ -273,17 +198,29 @@ class TestReranking:
         scores = [r["rerank_score"] for r in reranked]
         assert scores == sorted(scores, reverse=True)
 
-    def test_rerank_boilerplate_penalty(self, retrieval_engine: RetrievalEngine):
-        """Boilerplate text should receive a penalty."""
-        items = [
-            {"id": "c1", "text": "As an AI language model, I cannot help"},
-            {"id": "c2", "text": "Chomsky language theory"},
-        ]
-        reranked, _ = retrieval_engine._rerank("language", items)
-        boilerplate = next(r for r in reranked if r["id"] == "c1")
-        normal = next(r for r in reranked if r["id"] == "c2")
-        # boilerplate should be penalized
-        assert boilerplate["rerank_score"] < normal["rerank_score"]
+    def test_boilerplate_filtered_in_search_stage(self, retrieval_engine: RetrievalEngine, monkeypatch):
+        """Boilerplate is filtered in final search stage, not _rerank()."""
+        def _fake_hybrid_search(query: str, top_k: int, *, source_id=None):
+            return [
+                {
+                    "id": "boiler",
+                    "text": "As an AI language model, I cannot be considered a person",
+                    "score": 0.9,
+                    "metadata": {"parent_id": "p1", "source_id": "test_doc_linguistics"},
+                },
+                {
+                    "id": "normal",
+                    "text": "Chomsky language theory and generative grammar",
+                    "score": 0.8,
+                    "metadata": {"parent_id": "p2", "source_id": "test_doc_linguistics"},
+                },
+            ]
+
+        monkeypatch.setattr(retrieval_engine, "_hybrid_search", _fake_hybrid_search)
+        results = retrieval_engine.search("language", collect_metrics=False)
+        ids = [r.child_id for r in results]
+        assert "boiler" not in ids
+        assert "normal" in ids
 
     def test_rerank_empty_items(self, retrieval_engine: RetrievalEngine):
         reranked, scores = retrieval_engine._rerank("test", [])
@@ -401,7 +338,7 @@ class TestFullSearch:
             metrics = results[0].metrics
             assert metrics is not None
             assert metrics.timing.total_ms > 0
-            assert metrics.timing.dense_search_ms >= 0
+            assert metrics.timing.hybrid_search_ms >= 0
             assert metrics.timing.sparse_search_ms >= 0
 
     def test_search_no_duplicate_parents(self, retrieval_engine: RetrievalEngine):
@@ -445,24 +382,11 @@ class TestModeComparison:
 # ===========================================================================
 
 class TestRetrievalLatency:
-    def test_dense_search_latency(self, retrieval_engine: RetrievalEngine):
+    def test_hybrid_search_latency(self, retrieval_engine: RetrievalEngine):
         for q in ["Chomsky theory", "epistemology knowledge", "ethics"]:
-            with Timer("dense_search", query=q) as t:
-                retrieval_engine._dense_search(q, top_k=10)
-            logger.info(f"dense_search '{q}': {t.result.elapsed_ms:.2f}ms")
-
-    def test_sparse_search_latency(self, retrieval_engine: RetrievalEngine):
-        for q in ["Chomsky grammar", "epistemology", "ethics moral"]:
-            with Timer("sparse_search", query=q) as t:
-                retrieval_engine._sparse_search(q, top_k=10)
-            logger.info(f"sparse_search '{q}': {t.result.elapsed_ms:.2f}ms")
-
-    def test_rrf_fusion_latency(self):
-        dense = [{"id": f"d{i}", "rank": i + 1} for i in range(100)]
-        sparse = [{"id": f"s{i}", "rank": i + 1} for i in range(100)]
-        with Timer("rrf_fusion", dense_count=100, sparse_count=100) as t:
-            RetrievalEngine._rrf_fuse(dense, sparse)
-        logger.info(f"rrf_fusion 100+100: {t.result.elapsed_ms:.2f}ms")
+            with Timer("hybrid_search", query=q) as t:
+                retrieval_engine._hybrid_search(q, top_k=10)
+            logger.info(f"hybrid_search '{q}': {t.result.elapsed_ms:.2f}ms")
 
     def test_rerank_latency_by_batch_size(self, retrieval_engine: RetrievalEngine):
         for batch_size in [5, 10, 20]:

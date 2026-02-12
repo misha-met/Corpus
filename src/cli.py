@@ -840,7 +840,7 @@ def run() -> None:
         # Inject sub-timings from retrieval metrics for finer detail
         if retrieval_metrics:
             t = retrieval_metrics.timing
-            profiler.record("    └ Hybrid search (LanceDB)", t.dense_search_ms)
+            profiler.record("    └ Hybrid search (LanceDB)", t.hybrid_search_ms)
             profiler.record("    └ Deduplication", t.dedup_ms)
             profiler.record("    └ Reranking", t.rerank_ms)
         print(profiler.format_report())

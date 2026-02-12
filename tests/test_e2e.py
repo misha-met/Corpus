@@ -191,7 +191,7 @@ class TestEndToEnd:
         }
         if metrics:
             timing_ms.update({
-                "dense_search_ms": metrics.timing.dense_search_ms,
+                "hybrid_search_ms": metrics.timing.hybrid_search_ms,
                 "sparse_search_ms": metrics.timing.sparse_search_ms,
                 "rrf_fusion_ms": metrics.timing.rrf_fusion_ms,
                 "rerank_ms": metrics.timing.rerank_ms,

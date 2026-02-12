@@ -323,7 +323,7 @@ class IntentClassifier:
             return IntentResult(intent=Intent.OVERVIEW, confidence=1.0, method="fallback")
 
         result: Optional[IntentResult] = None
-        if self._use_llm and self._generator is not None:
+        if self._use_llm and (self._lightweight_generator is not None or self._generator is not None):
             try:
                 result = self._classify_with_llm(query)
             except Exception as e:

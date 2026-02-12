@@ -254,12 +254,12 @@ class TestMetricsFormatting:
 class TestTimingMetrics:
     def test_timing_defaults_zero(self):
         t = TimingMetrics()
-        assert t.dense_search_ms == 0.0
+        assert t.hybrid_search_ms == 0.0
         assert t.total_ms == 0.0
 
     def test_timing_all_stages(self):
         t = TimingMetrics(
-            dense_search_ms=10.0,
+            hybrid_search_ms=10.0,
             sparse_search_ms=5.0,
             rrf_fusion_ms=1.0,
             rerank_ms=100.0,
@@ -269,7 +269,7 @@ class TestTimingMetrics:
         )
         assert t.rerank_ms == 100.0
         # Total should be sum of stages (approximately)
-        stage_sum = t.dense_search_ms + t.sparse_search_ms + t.rrf_fusion_ms + t.rerank_ms + t.dedup_ms + t.budget_packing_ms
+        stage_sum = t.hybrid_search_ms + t.sparse_search_ms + t.rrf_fusion_ms + t.rerank_ms + t.dedup_ms + t.budget_packing_ms
         assert abs(t.total_ms - stage_sum) < 1.0
 
 
