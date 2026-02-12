@@ -429,6 +429,16 @@ def run() -> None:
     profiler = LatencyProfiler(enabled=latency_enabled)
     profiler.start_wall()
 
+    def _print_latency_report(metrics: Optional[RetrievalMetrics]) -> None:
+        profiler.end_wall()
+        if profiler.enabled:
+            if metrics:
+                t = metrics.timing
+                profiler.record("    └ Hybrid search (LanceDB)", t.hybrid_search_ms)
+                profiler.record("    └ Deduplication", t.dedup_ms)
+                profiler.record("    └ Reranking", t.rerank_ms)
+            print(profiler.format_report())
+
     with profiler.span("Config / mode selection"):
         config = select_mode_config(manual_mode=getattr(args, 'mode', None))
         _enable_offline_if_cached(config)
@@ -554,7 +564,7 @@ def run() -> None:
         with profiler.span("Intent classification"):
             llm_fallback_enabled = not args.no_generate and not getattr(args, "no_llm_fallback", False)
             llm_model_id = args.intent_model if llm_fallback_enabled else None
-            llm_fallback_threshold = 1.0 if llm_fallback_enabled else getattr(args, "llm_fallback_threshold", 0.70)
+            llm_fallback_threshold = getattr(args, "llm_fallback_threshold", 0.70)
 
             classifier = IntentClassifier(
                 confidence_threshold=args.intent_confidence_threshold,
@@ -833,6 +843,7 @@ def run() -> None:
             print(context)
         else:
             print("No context retrieved.")
+        _print_latency_report(retrieval_metrics)
         return
 
     with profiler.span("Build prompt / messages"):
@@ -871,15 +882,7 @@ def run() -> None:
     print(answer)
 
     # ---- latency report ----
-    profiler.end_wall()
-    if profiler.enabled:
-        # Inject sub-timings from retrieval metrics for finer detail
-        if retrieval_metrics:
-            t = retrieval_metrics.timing
-            profiler.record("    └ Hybrid search (LanceDB)", t.hybrid_search_ms)
-            profiler.record("    └ Deduplication", t.dedup_ms)
-            profiler.record("    └ Reranking", t.rerank_ms)
-        print(profiler.format_report())
+    _print_latency_report(retrieval_metrics)
 
 
 if __name__ == "__main__":

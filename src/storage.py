@@ -153,9 +153,10 @@ class StorageEngine:
             )
         else:
             # Upsert: remove existing parent_ids then re-add
-            ids = [r["parent_id"] for r in records]
+            ids = list(dict.fromkeys(r["parent_id"] for r in records))
             try:
-                self._parents.delete(self._where_in("parent_id", ids))
+                for id_batch in self._chunk(ids, self._MAX_IN_CLAUSE_VALUES):
+                    self._parents.delete(self._where_in("parent_id", id_batch))
             except Exception as exc:
                 logger.critical(
                     "Upsert delete failed for parents table; aborting to prevent duplicates. "

@@ -160,17 +160,17 @@ class RetrievalEngine:
 
         deduplicated = list(seen_parents.values()) + no_parent_items
         deduplicated.sort(key=lambda x: x.get("score", 0), reverse=True)
-        deduplicated = deduplicated[:top_k]
-
-        after_count = len(deduplicated)
+        deduplicated_count = len(deduplicated)
+        dedup_removed_count = max(0, before_count - deduplicated_count)
+        top_k_limited = deduplicated[:top_k]
 
         metrics = DeduplicationMetrics(
             children_before_dedup=before_count,
-            children_after_dedup=after_count,
-            reduction_pct=100 * (1 - after_count / before_count) if before_count > 0 else 0,
-            parents_deduplicated=max(0, before_count - after_count),
+            children_after_dedup=deduplicated_count,
+            reduction_pct=100 * (1 - deduplicated_count / before_count) if before_count > 0 else 0,
+            parents_deduplicated=dedup_removed_count,
         )
-        return deduplicated, metrics
+        return top_k_limited, metrics
 
     def _rerank(
         self,

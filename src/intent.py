@@ -575,6 +575,7 @@ class IntentClassifier:
             self._llm_tokenizer,
             prompt=formatted,
             max_tokens=60,
+            temp=0.0,
         )
 
         parsed = _parse_llm_response(response)
