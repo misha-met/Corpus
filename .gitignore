@@ -3,6 +3,9 @@
 *.jsonl
 *.json
 !data/lance/schema_version.json
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/tsconfig.json
 
 # Python cache
 __pycache__/
