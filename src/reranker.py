@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -36,7 +36,7 @@ _PROJECTOR_FILENAME = "projector.safetensors"
 _FALLBACK_DOC_EMBED_TOKEN_ID = 151670   # <|embed_token|>
 _FALLBACK_QUERY_EMBED_TOKEN_ID = 151671  # <|rerank_token|>
 
-_SPECIAL_TOKENS: Dict[str, str] = {
+_SPECIAL_TOKENS: dict[str, str] = {
     "query_embed_token": "<|rerank_token|>",
     "doc_embed_token": "<|embed_token|>",
 }
@@ -67,7 +67,7 @@ def _sanitize(text: str) -> str:
     return text
 
 
-def _build_prompt(query: str, docs: List[str]) -> str:
+def _build_prompt(query: str, docs: list[str]) -> str:
     """Build the listwise prompt consumed by jina-reranker-v3.
 
     Format:
@@ -222,111 +222,7 @@ class JinaRerankerMLX:
 
     # -- Public interface (compatible with FlagReranker) --------------------
 
-    # -- Lightweight generation (reuse 0.6B backbone) ----------------------
-
-    def generate_text(
-        self,
-        prompt: str,
-        max_tokens: int = 100,
-        temperature: float = 0.1,
-    ) -> str:
-        """Lightweight text generation using the reranker's 0.6B backbone.
-
-        The Qwen3-0.6B backbone retains general instruction-following ability.
-        Use this for cheap tasks (intent classification, query rewriting) where
-        loading a large LLM would be wasteful.  Typical latency: ~100-200 ms
-        for 50 tokens.
-        """
-        from mlx_lm import generate as mlx_generate
-        from mlx_lm.generate import make_sampler
-
-        # Apply chat template so the backbone sees a well-formed prompt.
-        messages = [{"role": "user", "content": prompt}]
-        try:
-            formatted = self._tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True,
-                enable_thinking=False,
-            )
-        except TypeError:
-            try:
-                formatted = self._tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True,
-                )
-            except Exception:
-                formatted = prompt
-        except Exception:
-            formatted = prompt
-
-        sampler = make_sampler(temp=temperature, top_p=0.9)
-        return mlx_generate(
-            model=self._model,
-            tokenizer=self._tokenizer,
-            prompt=formatted,
-            max_tokens=max_tokens,
-            sampler=sampler,
-        )
-
-    def score_intent_labels(
-        self,
-        prompt: str,
-        labels: List[str],
-    ) -> Dict[str, Dict[str, float]]:
-        """Score candidate labels from backbone logits (no generation).
-
-        For each label, computes continuation scores conditioned on ``prompt``:
-        - ``raw_logit_sum``: sum of selected token logits (pre-softmax)
-        - ``avg_logit``: length-normalized raw logit sum
-        - ``logprob_sum``: sum of token log-probabilities
-        - ``avg_logprob``: length-normalized log-probability
-        """
-        if not labels:
-            return {}
-
-        base_ids = self._tokenizer.encode(prompt, add_special_tokens=False)
-        if not base_ids:
-            return {}
-
-        scores: Dict[str, Dict[str, float]] = {}
-        for label in labels:
-            label_text = label.strip()
-            if not label_text:
-                continue
-
-            label_ids = self._tokenizer.encode(label_text, add_special_tokens=False)
-            if not label_ids:
-                label_ids = self._tokenizer.encode(f" {label_text}", add_special_tokens=False)
-            if not label_ids:
-                continue
-
-            full_ids = base_ids + label_ids
-            logits = self._model(mx.array(full_ids)[None, :])[0]  # [seq_len, vocab]
-
-            raw_logit_sum = 0.0
-            logprob_sum = 0.0
-            for offset, token_id in enumerate(label_ids):
-                pos = len(base_ids) + offset - 1
-                step_logits = logits[pos]
-
-                token_logit = float(step_logits[int(token_id)].item())
-                lse = float(mx.logsumexp(step_logits).item())
-
-                raw_logit_sum += token_logit
-                logprob_sum += token_logit - lse
-
-            token_count = max(len(label_ids), 1)
-            scores[label_text] = {
-                "raw_logit_sum": raw_logit_sum,
-                "avg_logit": raw_logit_sum / token_count,
-                "logprob_sum": logprob_sum,
-                "avg_logprob": logprob_sum / token_count,
-                "token_count": float(token_count),
-            }
-
-        return scores
-
-    # -- Public interface (compatible with FlagReranker) --------------------
-
-    def compute_score(self, pairs: List[Tuple[str, str]]) -> List[float]:
+    def compute_score(self, pairs: list[tuple[str, str]]) -> list[float]:
         """Score ``(query, document)`` pairs.
 
         All pairs are assumed to share the **same query** (which is the case
@@ -355,15 +251,15 @@ class JinaRerankerMLX:
 
     # -- Internals ----------------------------------------------------------
 
-    def _truncate_docs(self, docs: List[str]) -> Tuple[List[str], List[int]]:
+    def _truncate_docs(self, docs: list[str]) -> tuple[list[str], list[int]]:
         """Truncate documents to ``_MAX_DOC_TOKENS`` tokens each.
 
         Returns ``(truncated_docs, per_doc_token_counts)`` so that
         downstream code can estimate the total prompt length without
         re-tokenising every document.
         """
-        truncated: List[str] = []
-        token_counts: List[int] = []
+        truncated: list[str] = []
+        token_counts: list[int] = []
         total_original_tokens = 0
         total_truncated_tokens = 0
         truncation_count = 0
@@ -389,7 +285,7 @@ class JinaRerankerMLX:
         return truncated, token_counts
 
     def _estimate_prompt_tokens(
-        self, query: str, doc_token_counts: List[int],
+        self, query: str, doc_token_counts: list[int],
     ) -> int:
         """Fast estimate of total prompt tokens from pre-computed doc counts."""
         query_tokens = len(self._tokenizer.encode(query))
@@ -401,9 +297,9 @@ class JinaRerankerMLX:
         )
 
     def _enforce_context_budget(
-        self, query: str, docs: List[str],
-        doc_token_counts: Optional[List[int]] = None,
-    ) -> List[str]:
+        self, query: str, docs: list[str],
+        doc_token_counts: Optional[list[int]] = None,
+    ) -> list[str]:
         """Trim the document list so the listwise prompt fits the context window."""
         if not docs:
             return docs
@@ -444,7 +340,7 @@ class JinaRerankerMLX:
         logger.warning("Truncated to %d documents to fit context window.", lo)
         return docs[:lo]
 
-    def _score_listwise(self, query: str, docs: List[str]) -> List[float]:
+    def _score_listwise(self, query: str, docs: list[str]) -> list[float]:
         """Run a single-pass listwise forward and return per-doc scores."""
         prompt = _build_prompt(query, docs)
         input_ids = self._tokenizer.encode(prompt)
@@ -512,11 +408,3 @@ class JinaRerankerMLX:
         )
         return scores[: len(docs)]
 
-
-# ---------------------------------------------------------------------------
-# Factory helper
-# ---------------------------------------------------------------------------
-
-def load_jina_reranker(model_id: str = _JINA_MLX_REPO) -> JinaRerankerMLX:
-    """Convenience factory – loads the Jina Reranker v3 for MLX."""
-    return JinaRerankerMLX(model_id=model_id)

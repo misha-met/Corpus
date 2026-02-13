@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
-from typing import Any, Iterable, Optional
+from dataclasses import dataclass
+from typing import Any, Optional
 
 from .config import ModelConfig
 from .metrics import (

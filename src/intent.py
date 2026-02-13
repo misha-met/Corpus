@@ -17,7 +17,7 @@ import logging
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Tuple
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -434,7 +434,7 @@ Respond with ONLY a JSON object in this exact format:
 {{"intent": "<overview|summarize|explain|compare|critique|analyze|factual|collection>", "confidence": <0.0-1.0>}}"""
 
 
-def _parse_llm_response(response: str) -> Optional[Tuple[Intent, float]]:
+def _parse_llm_response(response: str) -> Optional[tuple[Intent, float]]:
     """Parse JSON intent classification from LLM response."""
     response = response.strip()
     if "```" in response:
@@ -585,18 +585,3 @@ class IntentClassifier:
 
         return IntentResult(intent=parsed[0], confidence=parsed[1], method="llm-fallback")
 
-
-# ── Convenience function ──────────────────────────────────────────────────────
-
-def classify_intent(
-    query: str,
-    confidence_threshold: float = 0.6,
-    llm_model_id: Optional[str] = None,
-    llm_fallback_threshold: float = 0.70,
-) -> IntentResult:
-    """One-shot convenience wrapper around :class:`IntentClassifier`."""
-    return IntentClassifier(
-        confidence_threshold=confidence_threshold,
-        llm_model_id=llm_model_id,
-        llm_fallback_threshold=llm_fallback_threshold,
-    ).classify(query)

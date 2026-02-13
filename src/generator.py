@@ -328,66 +328,6 @@ class MlxGenerator:
         output = self.generate(prompt, config=config)
         return self._strip_thinking_blocks(output)
 
-    def score_intent_labels(
-        self,
-        prompt: str,
-        labels: list[str],
-    ) -> dict[str, dict[str, float]]:
-        """Score candidate continuation labels from raw next-token logits.
-
-        Returns per-label metrics (pre-normalization and log-probability based)
-        to support calibrated intent classification.
-        """
-        if not prompt.strip() or not labels:
-            return {}
-
-        try:
-            import mlx.core as mx
-        except Exception:
-            return {}
-
-        base_ids = self._tokenizer.encode(prompt, add_special_tokens=False)
-        if not base_ids:
-            return {}
-
-        scores: dict[str, dict[str, float]] = {}
-        for label in labels:
-            label_text = label.strip()
-            if not label_text:
-                continue
-
-            label_ids = self._tokenizer.encode(label_text, add_special_tokens=False)
-            if not label_ids:
-                label_ids = self._tokenizer.encode(f" {label_text}", add_special_tokens=False)
-            if not label_ids:
-                continue
-
-            full_ids = base_ids + label_ids
-            logits = self._model(mx.array(full_ids)[None, :])[0]
-
-            raw_logit_sum = 0.0
-            logprob_sum = 0.0
-            for offset, token_id in enumerate(label_ids):
-                pos = len(base_ids) + offset - 1
-                step_logits = logits[pos]
-
-                token_logit = float(step_logits[int(token_id)].item())
-                lse = float(mx.logsumexp(step_logits).item())
-
-                raw_logit_sum += token_logit
-                logprob_sum += token_logit - lse
-
-            token_count = max(len(label_ids), 1)
-            scores[label_text] = {
-                "raw_logit_sum": raw_logit_sum,
-                "avg_logit": raw_logit_sum / token_count,
-                "logprob_sum": logprob_sum,
-                "avg_logprob": logprob_sum / token_count,
-                "token_count": float(token_count),
-            }
-
-        return scores
-
     def _apply_chat_template(self, messages: list[dict[str, str]]) -> str:
         if hasattr(self._tokenizer, "apply_chat_template"):
             try:

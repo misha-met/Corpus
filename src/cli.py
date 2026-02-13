@@ -883,15 +883,11 @@ def run() -> None:
         )
 
     if generator is None:
-        # Clear stale MLX buffers from retrieval phase, but do NOT set
-        # cache_limit=0.  MLX's buffer cache allows reuse of intermediate
-        # tensors between decode steps — disabling it forces constant
-        # malloc/free and can degrade throughput by 20-40%.
-        # Instead, let MLX manage its own cache (default is generous but
-        # memory-pressure-aware) and rely on macOS unified-memory paging.
+        # Set conservative cache limit before loading the large LLM to ensure
+        # headroom for KV cache growth during generation (~2-3GB for 16K context)
         try:
             import mlx.core as mx
-            mx.clear_cache()  # Release stale buffers from retrieval models
+            mx.set_cache_limit(0)  # Disable caching to maximize available memory
         except Exception:
             pass
         with profiler.span("Load LLM model"):

@@ -11,6 +11,9 @@ from .generation import build_messages
 from .generator import MlxGenerator
 from .storage import StorageEngine
 
+# Maximum characters of parent text to feed into summary generation.
+_SUMMARY_CONTEXT_CHAR_LIMIT = 12_000
+
 HEADER_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 
 PARENT_MIN_TOKENS = 1000
@@ -373,7 +376,6 @@ def _coerce_embeddings(raw_embeddings: object) -> list[list[float]]:
     raise TypeError("Unsupported embeddings type.")
 
 
-
 def ingest_file_to_storage(
     file_path: str | Path,
     *,
@@ -411,8 +413,8 @@ def ingest_file_to_storage(
         if generator is None:
             raise ValueError("summary_generator is required when summarize=True")
         context = "\n\n".join(parent.text for parent in parents)
-        if len(context) > 12000:
-            context = context[:12000]
+        if len(context) > _SUMMARY_CONTEXT_CHAR_LIMIT:
+            context = context[:_SUMMARY_CONTEXT_CHAR_LIMIT]
         messages = build_messages(
             context=context,
             question="Summarize this document.",
