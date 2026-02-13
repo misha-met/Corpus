@@ -39,7 +39,7 @@ class TestCitationFormatting:
         result = format_chunk_for_citation(
             "Some text here.", source_id="doc1", display_page="5"
         )
-        assert "[CHUNK START | SOURCE: doc1 | PAGE: 5]" in result
+        assert "[CHUNK 1 | SOURCE: doc1 | PAGE: 5]" in result
         assert "Some text here." in result
         assert "[CHUNK END]" in result
 
@@ -47,7 +47,7 @@ class TestCitationFormatting:
         result = format_chunk_for_citation(
             "Some text.", source_id="doc1", display_page=None
         )
-        assert "[CHUNK START | SOURCE: doc1]" in result
+        assert "[CHUNK 1 | SOURCE: doc1]" in result
         assert "PAGE" not in result
 
     def test_format_chunk_empty_page(self):
@@ -355,7 +355,8 @@ class TestMessageBuilding:
         assert "Be very concise" in system
 
     def test_citation_rules_format(self):
-        assert "[SourceID, p. X]" in _CITATION_RULES
+        assert "[1], [2], [3]" in _CITATION_RULES
+        assert "MUST cite" in _CITATION_RULES.upper() or "MUST CITE" in _CITATION_RULES.upper()
 
 
 # ===========================================================================

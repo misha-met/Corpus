@@ -34,14 +34,15 @@ def format_chunk_for_citation(
 ) -> str:
     """Format a chunk with citation markers for Academic Mode.
 
+    Chunks are numbered sequentially so the LLM can cite by number [1], [2].
     When a page number is available the marker includes ``PAGE: X``.
     When page metadata is missing the PAGE field is omitted so the LLM
-    cites as ``[SourceID]`` instead of ``[SourceID, p. Unknown]``.
+    cites as ``[SourceID]`` or ``[N]`` instead of ``[SourceID, p. Unknown]``.
     """
     if display_page:
-        header = f"[CHUNK START | SOURCE: {source_id} | PAGE: {display_page}]"
+        header = f"[CHUNK {chunk_index} | SOURCE: {source_id} | PAGE: {display_page}]"
     else:
-        header = f"[CHUNK START | SOURCE: {source_id}]"
+        header = f"[CHUNK {chunk_index} | SOURCE: {source_id}]"
     return f"{header}\n{text.strip()}\n[CHUNK END]"
 
 

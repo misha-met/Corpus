@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, LockBusyError } from "@/lib/api-fetch";
 import { useAppDispatch, useAppState } from "@/context/app-context";
+import type { CitationEntry, CitationPayload } from "@/lib/api-client";
 
 /** Last status line before the assistant message; everything before this is status. */
 const MESSAGE_START_STATUS = "Generating answer...";
@@ -14,40 +15,23 @@ type ChatMessage = {
   timestamp: number;
   /** Source IDs referenced in this message (populated from stream annotations) */
   sourceIds?: string[];
+  /** Structured citation list parsed from the CITATIONS: stream line */
+  citations?: CitationEntry[];
 };
 
-/** Parse citation references like [source_id] or [N] from text */
-function parseCitations(
-  text: string
-): Array<{ index: number; label: string; sourceId: string }> {
-  const citations: Array<{
-    index: number;
-    label: string;
-    sourceId: string;
-  }> = [];
-  const regex = /\[([^\]]+)\]/g;
-  let match;
-  let citationNum = 1;
-  while ((match = regex.exec(text)) !== null) {
-    citations.push({
-      index: citationNum++,
-      label: match[1],
-      sourceId: match[1],
-    });
-  }
-  return citations;
-}
-
-/** Render text with citation numbers as superscript */
+/** Render text with citation numbers as superscript.
+ *  Uses the original [N] number as the display label (not a sequential counter)
+ *  so buttons match the Sources header.  Unresolved [N] (N > citations.length)
+ *  is rendered as plain text.  Duplicate [N] occurrences get the same label. */
 function renderTextWithCitations(
   text: string,
-  onCitationClick: (sourceId: string) => void
+  citations: CitationEntry[] | undefined,
+  onCitationClick: (payload: CitationPayload) => void
 ): React.ReactNode[] {
   const parts: React.ReactNode[] = [];
   const regex = /\[([^\]]+)\]/g;
   let lastIndex = 0;
   let match;
-  let citationCounter = 1;
 
   while ((match = regex.exec(text)) !== null) {
     // Text before citation
@@ -58,22 +42,64 @@ function renderTextWithCitations(
         </span>
       );
     }
-    // Citation superscript
-    const sourceId = match[1];
-    const num = citationCounter++;
-    parts.push(
-      <button
-        key={`cite-${match.index}`}
-        onClick={(e) => {
-          e.stopPropagation();
-          onCitationClick(sourceId);
-        }}
-        className="inline-flex items-center justify-center w-4 h-4 text-[10px] font-bold text-blue-400 hover:text-blue-300 bg-blue-500/20 hover:bg-blue-500/30 rounded-full align-super ml-0.5 mr-0.5 cursor-pointer transition-colors"
-        title={`View source: ${sourceId}`}
-      >
-        {num}
-      </button>
-    );
+
+    const raw = match[1].trim();
+    let payload: CitationPayload | null = null;
+    let displayLabel = raw;
+
+    // Resolve numbered [N]
+    const numMatch = raw.match(/^(\d+)$/);
+    if (numMatch && citations) {
+      const idx = parseInt(numMatch[1], 10) - 1;
+      if (idx >= 0 && idx < citations.length) {
+        const c = citations[idx];
+        displayLabel = numMatch[1];
+        payload = {
+          source_id: c.source_id,
+          chunk_id: c.chunk_id,
+          page_number: c.page_number,
+          display_page: c.display_page,
+          header_path: c.header_path,
+          chunk_text: c.chunk_text,
+        };
+      }
+    } else {
+      // Try [SourceID, p. X]
+      const pageMatch = raw.match(/^(.+?),\s*p\.\s*(\d+)$/);
+      const sourceId = pageMatch ? pageMatch[1].trim() : raw;
+      const entry = citations?.find((c) => c.source_id === sourceId);
+      if (entry) {
+        payload = {
+          source_id: entry.source_id,
+          chunk_id: entry.chunk_id,
+          page_number: entry.page_number,
+          display_page: entry.display_page,
+          header_path: entry.header_path,
+          chunk_text: entry.chunk_text,
+        };
+      }
+    }
+
+    if (payload) {
+      parts.push(
+        <button
+          key={`cite-${match.index}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onCitationClick(payload);
+          }}
+          className="inline-flex items-center justify-center w-4 h-4 text-[10px] font-bold text-blue-400 hover:text-blue-300 bg-blue-500/20 hover:bg-blue-500/30 rounded-full align-super ml-0.5 mr-0.5 cursor-pointer transition-colors"
+          title={`View source: ${payload.source_id}`}
+        >
+          {displayLabel}
+        </button>
+      );
+    } else {
+      // Unresolved citation — render as plain text (no clickable button)
+      parts.push(
+        <span key={`text-${match.index}`}>{match[0]}</span>
+      );
+    }
     lastIndex = match.index + match[0].length;
   }
 
@@ -110,7 +136,7 @@ function formatTimestamp(ts: number): string {
 interface ChatPanelProps {
   selectedSourceIds: string[];
   sourceCount: number;
-  onCitationClick: (sourceId: string) => void;
+  onCitationClick: (payload: CitationPayload) => void;
 }
 
 /**
@@ -131,6 +157,8 @@ export function ChatPanel({
   const [isStreaming, setIsStreaming] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  /** Holds citations parsed from current stream, attached to assistant message on finish */
+  const pendingCitationsRef = useRef<CitationEntry[] | null>(null);
 
   // Sync status when not streaming
   useEffect(() => {
@@ -197,6 +225,7 @@ export function ChatPanel({
         ],
         data: {
           source_ids: selectedSourceIds.length > 0 ? selectedSourceIds : undefined,
+          citations_enabled: true,
         },
       };
 
@@ -239,6 +268,17 @@ export function ChatPanel({
           while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
             const line = buffer.slice(0, newlineIdx);
             buffer = buffer.slice(newlineIdx + 1);
+
+            // Parse CITATIONS: line (emitted before "Generating answer...")
+            if (line.startsWith("CITATIONS:")) {
+              try {
+                const json = line.slice("CITATIONS:".length);
+                pendingCitationsRef.current = JSON.parse(json) as CitationEntry[];
+              } catch {
+                /* ignore malformed citations line */
+              }
+              continue;
+            }
 
             if (!messageMode.current) {
               if (line.trim()) dispatch({ type: "SET_STATUS", status: line });
@@ -336,6 +376,19 @@ export function ChatPanel({
           setMessages((prev) => prev.slice(0, -1));
         }
       } finally {
+        // Attach parsed citations to the last assistant message
+        if (pendingCitationsRef.current) {
+          const cits = pendingCitationsRef.current;
+          setMessages((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (last?.role === "assistant") {
+              next[next.length - 1] = { ...last, citations: cits };
+            }
+            return next;
+          });
+          pendingCitationsRef.current = null;
+        }
         abortRef.current = null;
         setIsStreaming(false);
         dispatch({ type: "CHAT_FINISH" });
@@ -430,7 +483,7 @@ export function ChatPanel({
           if (!text && message.role === "assistant" && !isStreaming) return null;
 
           const isUser = message.role === "user";
-          const citations = !isUser ? parseCitations(text) : [];
+          const msgCitations = message.citations ?? [];
 
           // Show timestamp between user/assistant pairs or at certain intervals
           const showTimestamp =
@@ -453,16 +506,23 @@ export function ChatPanel({
                   }`}
                 >
                   {/* Citation strip for assistant */}
-                  {!isUser && citations.length > 0 && (
+                  {!isUser && msgCitations.length > 0 && (
                     <div className="flex items-center gap-1.5 mb-2 pb-2 border-b border-gray-700/50">
                       <span className="text-xs text-gray-400">Sources:</span>
                       <div className="flex items-center gap-1 flex-wrap">
-                        {citations.map((c) => (
+                        {msgCitations.map((c) => (
                           <button
                             key={c.index}
-                            onClick={() => onCitationClick(c.sourceId)}
+                            onClick={() => onCitationClick({
+                              source_id: c.source_id,
+                              chunk_id: c.chunk_id,
+                              page_number: c.page_number,
+                              display_page: c.display_page,
+                              header_path: c.header_path,
+                              chunk_text: c.chunk_text,
+                            })}
                             className="inline-flex items-center justify-center min-w-5 h-5 px-1.5 text-[10px] font-bold text-blue-400 hover:text-blue-300 bg-blue-500/20 hover:bg-blue-500/30 rounded-full cursor-pointer transition-colors"
-                            title={`View: ${c.sourceId}`}
+                            title={`View: ${c.source_id}`}
                           >
                             {c.index}
                           </button>
@@ -478,7 +538,7 @@ export function ChatPanel({
                     ) : isUser ? (
                       text
                     ) : (
-                      renderTextWithCitations(text, onCitationClick)
+                      renderTextWithCitations(text, message.citations, onCitationClick)
                     )}
                   </div>
                 </div>

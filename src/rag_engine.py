@@ -44,6 +44,7 @@ from .retrieval import (
     format_context_with_citations,
 )
 from .query_events import (
+    CitationListEvent,
     ErrorEvent,
     FinishEvent,
     IntentEvent,
@@ -1088,6 +1089,24 @@ class RagEngine:
                     texts=pack_result.packed_docs, metadatas=packed_metadatas
                 )
                 source_legend = build_source_legend(source_mapping)
+
+                # Build citation list for the frontend
+                citation_list: list[dict[str, object]] = []
+                for ci, pack_idx in enumerate(pack_result.packed_indices):
+                    if pack_idx >= len(results):
+                        continue
+                    r = results[pack_idx]
+                    citation_list.append({
+                        "index": ci + 1,
+                        "source_id": r.metadata.get("source_id", ""),
+                        "chunk_id": r.child_id,
+                        "page_number": r.metadata.get("page_number"),
+                        "display_page": r.metadata.get("display_page"),
+                        "header_path": r.metadata.get("header_path", ""),
+                        "chunk_text": r.text[:500] if r.text else "",
+                    })
+                if citation_list:
+                    yield CitationListEvent(citations=citation_list)
             elif cite:
                 cite = False
             else:

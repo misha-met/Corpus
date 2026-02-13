@@ -19,14 +19,16 @@ import asyncio
 import logging
 import threading
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncGenerator, Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .api_schemas import (
     ChatRequest,
+    ChunkDetailResponse,
     ErrorResponse,
     HealthResponse,
     IngestRequest,
@@ -37,6 +39,7 @@ from .api_schemas import (
     SourceListResponse,
 )
 from .query_events import (
+    CitationListEvent,
     ErrorEvent,
     FinishEvent,
     IntentEvent,
@@ -186,11 +189,15 @@ def _event_to_text_chunk(event: QueryEvent) -> Optional[str]:
 
     We send status events as lines so the client receives data during long
     model-load phases and does not timeout. Text tokens and errors are sent as-is.
+    CitationListEvent is serialised as a ``CITATIONS:{json}`` line.
     """
     if isinstance(event, StatusEvent):
         return event.status + "\n"
     if isinstance(event, TextTokenEvent):
         return event.token
+    if isinstance(event, CitationListEvent):
+        import json as _json
+        return f"CITATIONS:{_json.dumps(event.citations)}\n"
     if isinstance(event, ErrorEvent):
         return f"Error: {event.message}\n"
     return None
@@ -426,8 +433,6 @@ async def ingest_source(request: IngestRequest):
 
     Also creates a text snapshot for the ``/content`` endpoint.
     """
-    from pathlib import Path
-
     from .source_cache import save_snapshot
 
     file_path = request.file_path
@@ -501,6 +506,139 @@ async def ingest_source(request: IngestRequest):
         )
 
 
+# Maximum upload size: 50 MB
+_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+_UPLOAD_DIR = Path(__file__).resolve().parent.parent / "data" / "uploads"
+_ALLOWED_EXTENSIONS = {".pdf", ".md", ".markdown"}
+
+
+def _sanitize_source_id(name: str) -> str:
+    """Derive a safe source_id from a filename."""
+    import re as _re
+    stem = Path(name).stem
+    # Replace non-alphanumeric (except hyphen/underscore) with underscore
+    safe = _re.sub(r"[^\w\-]", "_", stem)
+    # Collapse multiple underscores
+    safe = _re.sub(r"_+", "_", safe).strip("_")
+    return safe[:120] or "uploaded_doc"
+
+
+@app.post("/api/sources/upload", response_model=IngestResponse)
+async def upload_source(
+    file: UploadFile = File(...),
+    source_id: str = Form(""),
+    summarize: bool = Form(True),
+):
+    """Upload and ingest a document (PDF or Markdown) from the browser.
+
+    Accepts ``multipart/form-data`` with fields:
+    - ``file``: The document file (.pdf, .md, .markdown)
+    - ``source_id``: Optional custom ID (auto-generated from filename if empty)
+    - ``summarize``: Whether to generate a summary (default true)
+    """
+    from .source_cache import save_snapshot
+
+    # --- Validate file extension ---
+    filename = file.filename or "unknown"
+    ext = Path(filename).suffix.lower()
+    if ext not in _ALLOWED_EXTENSIONS:
+        return JSONResponse(
+            status_code=422,
+            content=http_error_body(
+                "INVALID_FILE_TYPE",
+                f"Unsupported file type '{ext}'. Allowed: {', '.join(sorted(_ALLOWED_EXTENSIONS))}",
+            ),
+        )
+
+    # --- Read and validate size ---
+    contents = await file.read()
+    if len(contents) > _MAX_UPLOAD_BYTES:
+        return JSONResponse(
+            status_code=413,
+            content=http_error_body(
+                "FILE_TOO_LARGE",
+                f"File exceeds {_MAX_UPLOAD_BYTES // (1024*1024)}MB limit ({len(contents) / (1024*1024):.1f}MB uploaded).",
+            ),
+        )
+    if len(contents) == 0:
+        return JSONResponse(
+            status_code=422,
+            content=http_error_body("INVALID_FILE", "Uploaded file is empty."),
+        )
+
+    # --- Derive source_id ---
+    sid = source_id.strip() if source_id else _sanitize_source_id(filename)
+    if not sid:
+        sid = _sanitize_source_id(filename)
+
+    # --- Save uploaded file to data/uploads/ ---
+    _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    dest = _UPLOAD_DIR / f"{sid}{ext}"
+    dest.write_bytes(contents)
+    logger.info("Saved upload to %s (%d bytes)", dest, len(contents))
+
+    try:
+        engine = await asyncio.to_thread(_get_engine)
+
+        # Run ingest in thread (blocking operation)
+        result = await asyncio.to_thread(
+            engine.ingest,  # type: ignore[union-attr]
+            str(dest),
+            source_id=sid,
+            summarize=summarize,
+        )
+
+        # Create text snapshot for /content endpoint
+        snapshot_path = ""
+        try:
+            storage = engine.storage  # type: ignore[union-attr]
+            parent_texts = storage.get_parent_texts_by_source(source_id=sid)
+            if parent_texts:
+                full_text = "\n\n".join(parent_texts)
+                snapshot_path = await asyncio.to_thread(
+                    save_snapshot, sid, full_text
+                )
+        except Exception as snap_exc:
+            logger.warning("Failed to create snapshot for %s: %s", sid, snap_exc)
+
+        # Update the summary record with file paths (schema v2)
+        try:
+            storage = engine.storage  # type: ignore[union-attr]
+            summaries = storage.get_source_summaries()
+            summary_text = summaries.get(sid, "")
+            if summary_text:
+                storage.upsert_source_summary(
+                    source_id=sid,
+                    summary=summary_text,
+                    source_path=str(dest.resolve()),
+                    snapshot_path=snapshot_path,
+                )
+        except Exception as path_exc:
+            logger.warning("Failed to update source paths for %s: %s", sid, path_exc)
+
+        return IngestResponse(
+            source_id=result.source_id,
+            parents_count=result.parents_count,
+            children_count=result.children_count,
+            summarized=result.summarized,
+        )
+
+    except Exception as exc:
+        logger.exception("Upload ingest failed for %s: %s", sid, exc)
+        # Clean up the uploaded file on failure
+        try:
+            dest.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return JSONResponse(
+            status_code=500,
+            content=http_error_body(
+                "INGEST_FAILED",
+                f"Ingest failed: {type(exc).__name__}: {exc}",
+            ),
+        )
+
+
 @app.delete("/api/sources/{source_id}", response_model=SourceDeleteResponse)
 async def delete_source(source_id: str):
     """Delete a source and all its chunks, summary, and cached snapshot."""
@@ -531,6 +669,19 @@ async def delete_source(source_id: str):
         )
 
 
+def _detect_format(source_path: Optional[str]) -> str:
+    """Derive content format from the source file extension."""
+    if not source_path:
+        return "text"
+    from pathlib import Path as _P
+    ext = _P(source_path).suffix.lower()
+    if ext == ".pdf":
+        return "pdf"
+    if ext in {".md", ".markdown", ".mdx"}:
+        return "markdown"
+    return "text"
+
+
 @app.get("/api/sources/{source_id}/content", response_model=SourceContentResponse)
 async def get_source_content(source_id: str):
     """Get the full text content of a source document.
@@ -555,6 +706,7 @@ async def get_source_content(source_id: str):
 
         source_path = detail.get("source_path", "") or None
         snapshot_path = detail.get("snapshot_path", "") or None
+        fmt = _detect_format(source_path)
 
         result = await asyncio.to_thread(resolve_content, source_path, snapshot_path)
         if result is None:
@@ -565,6 +717,7 @@ async def get_source_content(source_id: str):
                     source_id=source_id,
                     content="\n\n".join(parent_texts),
                     content_source="summary",
+                    format=fmt,
                 )
             return JSONResponse(
                 status_code=404,
@@ -579,6 +732,7 @@ async def get_source_content(source_id: str):
             source_id=source_id,
             content=content,
             content_source=content_source,
+            format=fmt,
         )
 
     except Exception as exc:
@@ -586,4 +740,71 @@ async def get_source_content(source_id: str):
         return JSONResponse(
             status_code=500,
             content=http_error_body("INTERNAL", f"Content fetch failed: {exc}"),
+        )
+
+
+@app.get("/api/sources/{source_id}/chunk/{chunk_id}", response_model=ChunkDetailResponse)
+async def get_chunk_detail(source_id: str, chunk_id: str):
+    """Return full citation context for a single chunk.
+
+    Used by the frontend to populate the document viewer modal with
+    chunk text, page number, header path, and format so it can scroll
+    and highlight the cited passage.
+    """
+    try:
+        engine = await asyncio.to_thread(_get_engine)
+        storage = engine.storage  # type: ignore[union-attr]
+
+        children = storage.get_children_by_ids([chunk_id])
+        if chunk_id not in children:
+            return JSONResponse(
+                status_code=404,
+                content=http_error_body(
+                    "SOURCE_NOT_FOUND",
+                    f"Chunk '{chunk_id}' not found",
+                ),
+            )
+
+        child = children[chunk_id]
+        meta = child.get("metadata", {})
+        if isinstance(meta, dict) and meta.get("source_id") != source_id:
+            return JSONResponse(
+                status_code=404,
+                content=http_error_body(
+                    "SOURCE_NOT_FOUND",
+                    f"Chunk '{chunk_id}' does not belong to source '{source_id}'",
+                ),
+            )
+
+        # Fetch parent text if available
+        parent_text: Optional[str] = None
+        parent_id = meta.get("parent_id") if isinstance(meta, dict) else None
+        if parent_id:
+            parent_text = storage.get_parent_text(parent_id)
+
+        # Get source detail for format/source_path
+        detail = storage.get_source_detail(source_id)
+        sp = detail.get("source_path", "") if detail else ""
+        fmt = _detect_format(sp or None)
+
+        page_num_raw = meta.get("page_number") if isinstance(meta, dict) else None
+        page_number = int(page_num_raw) if page_num_raw is not None else None
+
+        return ChunkDetailResponse(
+            source_id=source_id,
+            chunk_id=chunk_id,
+            chunk_text=str(child.get("text", "")),
+            parent_text=parent_text,
+            page_number=page_number,
+            display_page=str(meta.get("display_page", "")) if isinstance(meta, dict) and meta.get("display_page") else None,
+            header_path=str(meta.get("header_path", "")) if isinstance(meta, dict) else "",
+            format=fmt,
+            source_path=sp or None,
+        )
+
+    except Exception as exc:
+        logger.exception("Chunk detail failed for %s/%s: %s", source_id, chunk_id, exc)
+        return JSONResponse(
+            status_code=500,
+            content=http_error_body("INTERNAL", f"Chunk detail failed: {exc}"),
         )

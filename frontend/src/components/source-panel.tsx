@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { sourceApi, type SourceInfo } from "@/lib/api-client";
+import { IngestModal, type UploadRequest } from "@/components/ingest-modal";
 
 interface SourcePanelProps {
   selectedSourceIds: string[];
@@ -28,6 +29,14 @@ export function SourcePanel({
   const [sources, setSources] = useState<SourceInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showIngestModal, setShowIngestModal] = useState(false);
+  const [highlightSourceId, setHighlightSourceId] = useState<string | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<
+    | null
+    | { stage: "uploading"; fileName: string; sourceId: string }
+    | { stage: "error"; fileName: string; message: string }
+  >(null);
+  const uploadDismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchSources = useCallback(async () => {
     setIsLoading(true);
@@ -50,6 +59,33 @@ export function SourcePanel({
     fetchSources();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /** Start background upload after modal closes. */
+  const handleStartUpload = useCallback(
+    async (req: UploadRequest) => {
+      setShowIngestModal(false);
+      setUploadStatus({ stage: "uploading", fileName: req.file.name, sourceId: req.sourceId });
+      try {
+        await sourceApi.uploadDocument(req.file, req.sourceId, req.summarize);
+        setUploadStatus(null);
+        // Refresh the source list
+        const data = await sourceApi.listSources();
+        setSources(data);
+        onSelectedSourceIdsChange(data.map((s) => s.source_id));
+        // Briefly highlight the new source
+        setHighlightSourceId(req.sourceId);
+        if (uploadDismissTimer.current) clearTimeout(uploadDismissTimer.current);
+        uploadDismissTimer.current = setTimeout(() => setHighlightSourceId(null), 3000);
+      } catch (err) {
+        setUploadStatus({
+          stage: "error",
+          fileName: req.file.name,
+          message: err instanceof Error ? err.message : "Upload failed",
+        });
+      }
+    },
+    [onSelectedSourceIdsChange]
+  );
 
   const allSelected =
     sources.length > 0 &&
@@ -143,11 +179,7 @@ export function SourcePanel({
       {/* Add sources button */}
       <div className="px-4 pt-3 pb-2">
         <button
-          onClick={() =>
-            alert(
-              "Use the CLI to ingest documents:\n\npython -m src.cli ingest <file_path>"
-            )
-          }
+          onClick={() => setShowIngestModal(true)}
           className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 rounded-xl text-sm text-gray-300 hover:text-gray-100 transition-colors"
         >
           <svg
@@ -202,18 +234,63 @@ export function SourcePanel({
           <div className="px-4 py-8 text-center text-sm text-gray-500">
             <p>No sources ingested yet.</p>
             <p className="mt-2 text-xs text-gray-600">
-              Use the CLI to ingest documents
+              Click &ldquo;Add sources&rdquo; to upload a document
             </p>
           </div>
         )}
 
         <div className="px-3 py-1 space-y-1">
+          {/* Inline upload status */}
+          {uploadStatus?.stage === "uploading" && (
+            <div className="flex items-center gap-3 px-3 py-3 bg-blue-900/20 border border-blue-800/30 rounded-xl animate-pulse">
+              <svg className="w-5 h-5 text-blue-400 animate-spin shrink-0" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-blue-300 truncate">
+                  Ingesting {uploadStatus.fileName}...
+                </p>
+                <p className="text-xs text-blue-400/70 mt-0.5">
+                  Chunking, embedding &amp; summarizing
+                </p>
+              </div>
+            </div>
+          )}
+
+          {uploadStatus?.stage === "error" && (
+            <div className="flex items-start gap-3 px-3 py-3 bg-red-900/20 border border-red-800/40 rounded-xl">
+              <svg className="w-5 h-5 text-red-400 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-red-300 truncate">
+                  Failed to ingest {uploadStatus.fileName}
+                </p>
+                <p className="text-xs text-red-400/80 mt-0.5">
+                  {uploadStatus.message}
+                </p>
+              </div>
+              <button
+                onClick={() => setUploadStatus(null)}
+                className="shrink-0 p-0.5 text-red-400/60 hover:text-red-300 transition-colors"
+                title="Dismiss"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          )}
           {sources.map((source) => {
             const isChecked = selectedSourceIds.includes(source.source_id);
+            const isHighlighted = highlightSourceId === source.source_id;
             return (
               <div
                 key={source.source_id}
-                className="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-gray-800/60 transition-colors group cursor-pointer"
+                className={`flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-gray-800/60 transition-colors group cursor-pointer ${
+                  isHighlighted ? "ring-2 ring-blue-500/60 bg-blue-900/20" : ""
+                }`}
                 onClick={() => handleToggleSource(source.source_id)}
                 role="button"
                 tabIndex={0}
@@ -291,6 +368,14 @@ export function SourcePanel({
         {sources.length} source{sources.length !== 1 ? "s" : ""} &middot;{" "}
         {selectedSourceIds.length} selected
       </div>
+
+      {/* Ingest modal */}
+      {showIngestModal && (
+        <IngestModal
+          onClose={() => setShowIngestModal(false)}
+          onStartUpload={handleStartUpload}
+        />
+      )}
     </div>
   );
 }

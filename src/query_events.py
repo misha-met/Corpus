@@ -50,6 +50,18 @@ class ErrorEvent:
 
 
 @dataclass(frozen=True)
+class CitationListEvent:
+    """Ordered list of citation entries built from packed retrieval results.
+
+    Emitted once after budget packing when citations are enabled, before
+    "Generating answer...".  Each entry maps a numbered citation index to
+    a chunk with its metadata so the frontend can resolve [1], [2], etc.
+    """
+
+    citations: list[dict[str, object]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class FinishEvent:
     """Pipeline execution complete."""
 
@@ -59,4 +71,12 @@ class FinishEvent:
 
 
 # Union type for type checking
-QueryEvent = StatusEvent | IntentEvent | SourcesEvent | TextTokenEvent | ErrorEvent | FinishEvent
+QueryEvent = (
+    StatusEvent
+    | IntentEvent
+    | SourcesEvent
+    | TextTokenEvent
+    | CitationListEvent
+    | ErrorEvent
+    | FinishEvent
+)

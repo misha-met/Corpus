@@ -209,6 +209,30 @@ class SourceContentResponse(BaseModel):
         description="Where the content was resolved from: 'original', 'snapshot', or 'summary'.",
         examples=["original", "snapshot", "summary"],
     )
+    format: str = Field(
+        default="text",
+        description="Content format derived from source file extension: 'pdf', 'markdown', or 'text'.",
+        examples=["pdf", "markdown", "text"],
+    )
+
+
+class ChunkDetailResponse(BaseModel):
+    """Response body for ``GET /api/sources/{source_id}/chunk/{chunk_id}``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str
+    chunk_id: str
+    chunk_text: str
+    parent_text: Optional[str] = None
+    page_number: Optional[int] = None
+    display_page: Optional[str] = None
+    header_path: str = ""
+    format: str = Field(
+        default="text",
+        description="Content format: 'pdf', 'markdown', or 'text'.",
+    )
+    source_path: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

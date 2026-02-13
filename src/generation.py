@@ -166,14 +166,14 @@ _SYSTEM_MESSAGE = """You are a research assistant. Follow these rules strictly:
 6. Do NOT end with speculative hedges, "future possibilities," or softening statements not grounded in the context."""
 
 _CITATION_RULES = """
-CITATION REQUIREMENTS:
-- Context chunks are marked with [CHUNK START | SOURCE: SourceID | PAGE: X] or [CHUNK START | SOURCE: SourceID] (when page is unavailable)
-- Extract the SourceID and PAGE (if present) from these markers
-- When PAGE is present, cite as [SourceID, p. X]
-- When PAGE is absent, cite as [SourceID]
-- Example with page: [Chomsky_Skinner_Review, p. 1]
-- Example without page: [Chomsky_Skinner_Review]
-- REQUIRED: Every claim must have a citation"""
+CITATION REQUIREMENTS (MANDATORY):
+- Context chunks are numbered [CHUNK 1 | SOURCE: ...], [CHUNK 2 | SOURCE: ...], etc.
+- You MUST cite every factual claim using the chunk number: [1], [2], [3], etc.
+- Place the citation immediately after the sentence it supports, before the period when possible.
+- Example: "The unemployment rate rose to 5.2% [1]. Housing starts declined by 12% [2]."
+- If you are unsure which chunk supports a claim, cite the most relevant one.
+- Do NOT omit citations. Every statement derived from the context MUST have at least one [N] marker.
+- When multiple chunks support one claim, cite all of them: [1][3]."""
 
 
 def _build_system_block(cfg: dict[str, str], citation_block: str, extra_block: str) -> str:
@@ -188,7 +188,7 @@ def _prepare_config(intent: Optional[Intent], citations_enabled: bool, extra_ins
     citation_block = ""
     if citations_enabled:
         citation_block = f"\n{_CITATION_RULES}"
-        cfg["format"] += " Include inline citations [SourceID, p. X] or [SourceID] for factual claims."
+        cfg["format"] += " Include numbered inline citations [1], [2], etc. after every factual claim."
     return cfg, citation_block, extra_block
 
 

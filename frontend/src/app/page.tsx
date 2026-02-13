@@ -5,6 +5,7 @@ import { ChatPanel } from "@/components/chat-panel";
 import { SourcePanel } from "@/components/source-panel";
 import { CitationViewerModal } from "@/components/citation-viewer-modal";
 import { AppProvider } from "@/context/app-context";
+import type { CitationPayload } from "@/lib/api-client";
 
 /**
  * Two-panel layout:
@@ -23,15 +24,15 @@ function AppContent() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [citationModal, setCitationModal] = useState<{
     open: boolean;
-    sourceId: string;
-  }>({ open: false, sourceId: "" });
+    payload: CitationPayload;
+  }>({ open: false, payload: { source_id: "" } });
 
-  const handleCitationClick = useCallback((sourceId: string) => {
-    setCitationModal({ open: true, sourceId });
+  const handleCitationClick = useCallback((payload: CitationPayload) => {
+    setCitationModal({ open: true, payload });
   }, []);
 
   const handleCloseCitationModal = useCallback(() => {
-    setCitationModal({ open: false, sourceId: "" });
+    setCitationModal({ open: false, payload: { source_id: "" } });
   }, []);
 
   return (
@@ -47,7 +48,7 @@ function AppContent() {
           {/* Citation modal renders over sources panel */}
           {citationModal.open && (
             <CitationViewerModal
-              sourceId={citationModal.sourceId}
+              payload={citationModal.payload}
               onClose={handleCloseCitationModal}
             />
           )}

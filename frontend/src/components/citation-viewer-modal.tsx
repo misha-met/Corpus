@@ -1,53 +1,88 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { sourceApi, type SourceContentResponse } from "@/lib/api-client";
+import {
+  sourceApi,
+  type CitationPayload,
+  type SourceContentResponse,
+  type ChunkDetailResponse,
+} from "@/lib/api-client";
+import { DocumentRenderer, type HighlightPayload } from "@/components/document-renderer";
 
 interface CitationViewerModalProps {
-  sourceId: string;
+  payload: CitationPayload;
   onClose: () => void;
 }
 
 /**
  * Modal that renders over the sources panel showing document content
- * for a clicked citation. Loads content via the existing
- * GET /api/sources/{source_id}/content endpoint.
+ * for a clicked citation.  Accepts a full CitationPayload with optional
+ * chunk_id, page_number, header_path, and chunk_text so it can:
+ *
+ * 1. Fetch chunk detail (if chunk_id present) for format/text.
+ * 2. Fetch document content via GET /api/sources/{source_id}/content.
+ * 3. Pass highlight payload to DocumentRenderer for auto-scroll + highlight.
  */
 export function CitationViewerModal({
-  sourceId,
+  payload,
   onClose,
 }: CitationViewerModalProps) {
   const [content, setContent] = useState<SourceContentResponse | null>(null);
+  const [chunkDetail, setChunkDetail] = useState<ChunkDetailResponse | null>(
+    null
+  );
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const modalRef = useRef<HTMLDivElement>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
 
-  // Load content
+  // Load content (and optionally chunk detail)
   useEffect(() => {
     let cancelled = false;
     setIsLoading(true);
     setError(null);
+    setContent(null);
+    setChunkDetail(null);
 
-    sourceApi
-      .getContent(sourceId)
-      .then((data) => {
-        if (!cancelled) setContent(data);
-      })
-      .catch((err) => {
-        if (!cancelled)
-          setError(
-            err instanceof Error ? err.message : "Failed to load content"
-          );
-      })
-      .finally(() => {
-        if (!cancelled) setIsLoading(false);
-      });
+    const promises: Promise<void>[] = [];
+
+    // Always fetch document content
+    promises.push(
+      sourceApi
+        .getContent(payload.source_id)
+        .then((data) => {
+          if (!cancelled) setContent(data);
+        })
+        .catch((err) => {
+          if (!cancelled)
+            setError(
+              err instanceof Error ? err.message : "Failed to load content"
+            );
+        })
+    );
+
+    // Optionally fetch chunk detail for extra metadata / format
+    if (payload.chunk_id) {
+      promises.push(
+        sourceApi
+          .getChunk(payload.source_id, payload.chunk_id)
+          .then((data) => {
+            if (!cancelled) setChunkDetail(data);
+          })
+          .catch(() => {
+            /* non-critical: we still have content */
+          })
+      );
+    }
+
+    Promise.all(promises).finally(() => {
+      if (!cancelled) setIsLoading(false);
+    });
 
     return () => {
       cancelled = true;
     };
-  }, [sourceId]);
+  }, [payload.source_id, payload.chunk_id]);
 
   // Focus trap & Escape to close
   useEffect(() => {
@@ -79,10 +114,32 @@ export function CitationViewerModal({
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
 
+  // Derive format and highlight payload
+  const format: "pdf" | "markdown" | "text" =
+    chunkDetail?.format ?? content?.format ?? "text";
+
+  const highlightPayload: HighlightPayload = {
+    page_number: payload.page_number ?? chunkDetail?.page_number,
+    header_path: payload.header_path ?? chunkDetail?.header_path,
+    chunk_text: payload.chunk_text ?? chunkDetail?.chunk_text,
+  };
+
+  const hasHighlightData = !!(
+    highlightPayload.chunk_text ||
+    highlightPayload.header_path ||
+    highlightPayload.page_number
+  );
+
   const sourceBadgeColors: Record<string, string> = {
     original: "bg-green-900/50 text-green-300 border-green-800",
     snapshot: "bg-yellow-900/50 text-yellow-300 border-yellow-800",
     summary: "bg-blue-900/50 text-blue-300 border-blue-800",
+  };
+
+  const formatBadgeColors: Record<string, string> = {
+    pdf: "bg-red-900/50 text-red-300 border-red-800",
+    markdown: "bg-purple-900/50 text-purple-300 border-purple-800",
+    text: "bg-gray-800 text-gray-400 border-gray-700",
   };
 
   return (
@@ -90,7 +147,7 @@ export function CitationViewerModal({
       className="absolute inset-0 z-50 flex flex-col bg-gray-950/95 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
-      aria-label={`Document viewer: ${sourceId}`}
+      aria-label={`Document viewer: ${payload.source_id}`}
       ref={modalRef}
     >
       {/* Header */}
@@ -111,7 +168,7 @@ export function CitationViewerModal({
             />
           </svg>
           <h2 className="text-sm font-medium text-gray-200 truncate">
-            {sourceId}
+            {payload.source_id}
           </h2>
           {content && (
             <span
@@ -121,6 +178,18 @@ export function CitationViewerModal({
               }`}
             >
               {content.content_source}
+            </span>
+          )}
+          <span
+            className={`shrink-0 px-2 py-0.5 text-xs rounded border ${
+              formatBadgeColors[format] || formatBadgeColors.text
+            }`}
+          >
+            {format.toUpperCase()}
+          </span>
+          {payload.page_number != null && (
+            <span className="shrink-0 px-2 py-0.5 text-xs rounded border bg-gray-800 text-gray-400 border-gray-700">
+              p. {payload.display_page ?? payload.page_number}
             </span>
           )}
         </div>
@@ -166,7 +235,7 @@ export function CitationViewerModal({
                   setError(null);
                   setIsLoading(true);
                   sourceApi
-                    .getContent(sourceId)
+                    .getContent(payload.source_id)
                     .then(setContent)
                     .catch((err) =>
                       setError(
@@ -184,9 +253,25 @@ export function CitationViewerModal({
         )}
 
         {content && !isLoading && !error && (
-          <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-gray-300 bg-transparent p-0 m-0">
-            {content.content}
-          </pre>
+          <>
+            <DocumentRenderer
+              content={content.content}
+              format={format}
+              highlight={hasHighlightData ? highlightPayload : undefined}
+            />
+
+            {/* Fallback: show "Source text:" box when we have chunk_text */}
+            {highlightPayload.chunk_text && (
+              <div className="mt-6 p-3 rounded-lg border border-gray-700 bg-gray-800/50">
+                <p className="text-xs text-gray-400 mb-1 font-medium">
+                  Source text:
+                </p>
+                <p className="text-sm text-gray-300 whitespace-pre-wrap leading-relaxed">
+                  {highlightPayload.chunk_text}
+                </p>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

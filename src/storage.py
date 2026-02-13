@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 import lancedb
+import pyarrow as pa
 
 from .models import ChildChunk, ParentChunk
 
@@ -62,11 +63,39 @@ class StorageEngine:
         self._summaries: Optional[lancedb.table.Table] = None
         try:
             self._summaries = self._db.open_table(self._SUMMARIES_TABLE)
+            self._migrate_summaries_schema()
         except ValueError:
             pass  # Table does not exist yet
 
     def close(self) -> None:
         pass  # LanceDB connections do not require explicit close
+
+    # ------------------------------------------------------------------
+    # Schema migrations
+    # ------------------------------------------------------------------
+
+    _SUMMARIES_V2_COLUMNS = ("source_path", "snapshot_path")
+
+    def _migrate_summaries_schema(self) -> None:
+        """Add v2 columns to the source_summaries table if missing."""
+        if self._summaries is None:
+            return
+        existing = set(self._summaries.schema.names)
+        missing = [
+            pa.field(col, pa.utf8())
+            for col in self._SUMMARIES_V2_COLUMNS
+            if col not in existing
+        ]
+        if not missing:
+            return
+        self._summaries.add_columns(missing)
+        # Re-open so the cached schema is up to date
+        self._summaries = self._db.open_table(self._SUMMARIES_TABLE)
+        logger.info(
+            "Migrated '%s' table: added columns %s",
+            self._SUMMARIES_TABLE,
+            [f.name for f in missing],
+        )
 
     @staticmethod
     def _escape_sql_literal(value: str) -> str:

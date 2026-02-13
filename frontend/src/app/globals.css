@@ -35,3 +35,26 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #4b5563;
 }
+
+/* Citation highlight in document viewer */
+mark.citation-highlight {
+  background-color: rgba(250, 204, 21, 0.35);
+  color: inherit;
+  border-radius: 2px;
+  padding: 1px 0;
+  scroll-margin: 120px;
+}
+
+/* Markdown content prose overrides for dark theme */
+.markdown-content {
+  line-height: 1.75;
+}
+
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4,
+.markdown-content h5,
+.markdown-content h6 {
+  scroll-margin-top: 80px;
+}
