@@ -18,3 +18,4 @@ fastapi
 uvicorn
 httpx
 python-multipart
+sse-starlette

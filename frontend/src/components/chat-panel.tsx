@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiFetch, LockBusyError } from "@/lib/api-fetch";
+import { queryStreaming } from "@/lib/api-client";
 import { useAppDispatch, useAppState } from "@/context/app-context";
 import type { CitationEntry, CitationPayload } from "@/lib/api-client";
 
@@ -157,6 +157,8 @@ export function ChatPanel({
   const [isStreaming, setIsStreaming] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const streamingTextRef = useRef("");
+  const updateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Holds citations parsed from current stream, attached to assistant message on finish */
   const pendingCitationsRef = useRef<CitationEntry[] | null>(null);
 
@@ -201,12 +203,16 @@ export function ChatPanel({
         parts: [{ type: "text", text }],
         timestamp: Date.now(),
       };
+      const assistantId = generateId();
       const assistantMessage: ChatMessage = {
-        id: generateId(),
+        id: assistantId,
         role: "assistant",
         parts: [{ type: "text", text: "" }],
         timestamp: Date.now(),
       };
+
+      pendingCitationsRef.current = null;
+      streamingTextRef.current = "";
       setMessages((prev) => [...prev, userMessage, assistantMessage]);
       setIsStreaming(true);
       dispatch({ type: "CHAT_START" });
@@ -215,186 +221,145 @@ export function ChatPanel({
       const controller = new AbortController();
       abortRef.current = controller;
 
-      const body = {
-        messages: [
-          ...messages.map((m) => ({
-            role: m.role,
-            parts: m.parts,
-          })),
-          { role: "user" as const, parts: [{ type: "text" as const, text }] },
-        ],
-        data: {
-          source_ids: selectedSourceIds.length > 0 ? selectedSourceIds : undefined,
-          citations_enabled: true,
-        },
+      const scheduleAssistantUpdate = () => {
+        if (updateTimerRef.current) return;
+        updateTimerRef.current = setTimeout(() => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId
+                ? {
+                    ...m,
+                    parts: [{ type: "text", text: streamingTextRef.current }],
+                    timestamp: Date.now(),
+                  }
+                : m
+            )
+          );
+          updateTimerRef.current = null;
+        }, 50);
       };
 
-      const chatUrl =
-        typeof process.env.NEXT_PUBLIC_BACKEND_URL === "string" &&
-        process.env.NEXT_PUBLIC_BACKEND_URL
-          ? `${process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/$/, "")}/api/chat`
-          : "/api/chat";
-
       try {
-        const response = await apiFetch(chatUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
+        for await (const event of queryStreaming(text, {
+          sourceIds: selectedSourceIds.length > 0 ? selectedSourceIds : undefined,
+          citationsEnabled: true,
           signal: controller.signal,
-        });
-
-        if (!response.ok) {
-          const msg = response.statusText || "Request failed";
-          try {
-            const j = await response.json();
-            if (j?.error?.message)
-              dispatch({ type: "SET_ERROR", message: j.error.message });
-            else dispatch({ type: "SET_ERROR", message: msg });
-          } catch {
-            dispatch({ type: "SET_ERROR", message: msg });
-          }
-          setIsStreaming(false);
-          setMessages((prev) => prev.slice(0, -1));
-          dispatch({ type: "CHAT_FINISH" });
-          return;
-        }
-
-        const processBuffer = (
-          buffer: string,
-          messageMode: { current: boolean },
-          flushMessageContent: (chunk: string) => void
-        ) => {
-          let newlineIdx: number;
-          while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
-            const line = buffer.slice(0, newlineIdx);
-            buffer = buffer.slice(newlineIdx + 1);
-
-            // Parse CITATIONS: line (emitted before "Generating answer...")
-            if (line.startsWith("CITATIONS:")) {
-              try {
-                const json = line.slice("CITATIONS:".length);
-                pendingCitationsRef.current = JSON.parse(json) as CitationEntry[];
-              } catch {
-                /* ignore malformed citations line */
+        })) {
+          switch (event.event) {
+            case "status": {
+              const message =
+                typeof event.data?.message === "string"
+                  ? event.data.message
+                  : "Working...";
+              dispatch({ type: "SET_STATUS", status: message });
+              break;
+            }
+            case "intent": {
+              if (typeof event.data?.intent === "string") {
+                dispatch({
+                  type: "SET_INTENT",
+                  intent: event.data.intent,
+                  confidence:
+                    typeof event.data?.confidence === "number"
+                      ? event.data.confidence
+                      : 0,
+                  method:
+                    typeof event.data?.method === "string"
+                      ? event.data.method
+                      : "unknown",
+                });
               }
-              continue;
+              break;
             }
-
-            if (!messageMode.current) {
-              if (line.trim()) dispatch({ type: "SET_STATUS", status: line });
-              if (line === MESSAGE_START_STATUS) messageMode.current = true;
-              continue;
+            case "sources": {
+              const sourceIds = Array.isArray(event.data?.source_ids)
+                ? event.data.source_ids.filter((x: unknown) => typeof x === "string")
+                : [];
+              dispatch({ type: "SET_SOURCES", sourceIds });
+              break;
             }
-            if (line === "" || line === " ") continue;
-            if (line.startsWith("Error: ")) {
-              dispatch({ type: "SET_ERROR", message: line.slice(7).trim() });
-              return { done: true as const, buffer: "" };
+            case "citations": {
+              const citations = Array.isArray(event.data?.citations)
+                ? (event.data.citations as CitationEntry[])
+                : [];
+              pendingCitationsRef.current = citations;
+              setMessages((prev) =>
+                prev.map((m) => (m.id === assistantId ? { ...m, citations } : m))
+              );
+              break;
             }
-            flushMessageContent(line + "\n");
+            case "token": {
+              const token =
+                typeof event.data?.text === "string" ? event.data.text : "";
+              if (!token) break;
+              streamingTextRef.current += token;
+              scheduleAssistantUpdate();
+              break;
+            }
+            case "error": {
+              const errorMessage =
+                typeof event.data?.error === "string"
+                  ? event.data.error
+                  : "Streaming error";
+              dispatch({ type: "SET_ERROR", message: errorMessage });
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId
+                    ? {
+                        ...m,
+                        parts: [{ type: "text", text: `Error: ${errorMessage}` }],
+                        citations: [],
+                      }
+                    : m
+                )
+              );
+              break;
+            }
+            case "complete": {
+              if (updateTimerRef.current) {
+                clearTimeout(updateTimerRef.current);
+                updateTimerRef.current = null;
+              }
+              const finalText = streamingTextRef.current;
+              const finalCitations = pendingCitationsRef.current ?? [];
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId
+                    ? {
+                        ...m,
+                        parts: [{ type: "text", text: finalText }],
+                        citations: finalCitations,
+                        timestamp: Date.now(),
+                      }
+                    : m
+                )
+              );
+              break;
+            }
           }
-          return { done: false as const, buffer };
-        };
-
-        const flushChunk = (chunk: string) => {
-          setMessages((prev) => {
-            const next = [...prev];
-            const last = next[next.length - 1];
-            if (last?.role === "assistant" && last.parts[0]) {
-              next[next.length - 1] = {
-                ...last,
-                parts: [
-                  { type: "text" as const, text: last.parts[0].text + chunk },
-                ],
-                timestamp: Date.now(),
-              };
-            }
-            return next;
-          });
-        };
-
-        const messageMode = { current: false };
-        let buffer = "";
-
-        if (response.body) {
-          const reader = response.body.getReader();
-          const decoder = new TextDecoder();
-
-          streamLoop: while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-
-            const result = processBuffer(buffer, messageMode, flushChunk);
-            buffer = result.buffer;
-            if (result.done) break streamLoop;
-
-            if (
-              messageMode.current &&
-              buffer &&
-              !buffer.startsWith("Error:")
-            ) {
-              flushChunk(buffer);
-              buffer = "";
-            }
-          }
-        } else {
-          const fullText = await response.text();
-          buffer = fullText;
-          const result = processBuffer(buffer, messageMode, flushChunk);
-          buffer = result.buffer;
-          if (
-            !result.done &&
-            messageMode.current &&
-            buffer &&
-            !buffer.startsWith("Error:")
-          ) {
-            flushChunk(buffer);
-          }
-        }
-
-        if (
-          messageMode.current &&
-          buffer.trim() &&
-          !buffer.startsWith("Error:")
-        ) {
-          flushChunk(buffer);
         }
       } catch (err) {
-        if (err instanceof LockBusyError) {
-          dispatch({
-            type: "SET_ERROR",
-            message: err.message,
-            isLockBusy: true,
-          });
-        } else if (err instanceof Error && err.name !== "AbortError") {
+        if (err instanceof Error && err.name !== "AbortError") {
           dispatch({
             type: "SET_ERROR",
             message: err.message || "An unexpected error occurred",
           });
         }
         if ((err as Error)?.name === "AbortError") {
-          setMessages((prev) => prev.slice(0, -1));
+          setMessages((prev) => prev.filter((m) => m.id !== assistantId));
         }
       } finally {
-        // Attach parsed citations to the last assistant message
-        if (pendingCitationsRef.current) {
-          const cits = pendingCitationsRef.current;
-          setMessages((prev) => {
-            const next = [...prev];
-            const last = next[next.length - 1];
-            if (last?.role === "assistant") {
-              next[next.length - 1] = { ...last, citations: cits };
-            }
-            return next;
-          });
-          pendingCitationsRef.current = null;
+        if (updateTimerRef.current) {
+          clearTimeout(updateTimerRef.current);
+          updateTimerRef.current = null;
         }
+        pendingCitationsRef.current = null;
         abortRef.current = null;
         setIsStreaming(false);
         dispatch({ type: "CHAT_FINISH" });
       }
     },
-    [messages, dispatch, selectedSourceIds]
+    [dispatch, selectedSourceIds]
   );
 
   function onSubmit(e: React.FormEvent) {
@@ -534,7 +499,9 @@ export function ChatPanel({
                   {/* Message text */}
                   <div className="whitespace-pre-wrap text-sm leading-relaxed min-h-[1.5em]">
                     {isAssistantPlaceholder ? (
-                      <span className="text-gray-500 animate-pulse">...</span>
+                      <span className="text-gray-500 animate-pulse">
+                        {statusMessage || MESSAGE_START_STATUS}
+                      </span>
                     ) : isUser ? (
                       text
                     ) : (

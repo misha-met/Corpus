@@ -16,6 +16,7 @@ Architecture
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 from contextlib import asynccontextmanager
@@ -25,6 +26,7 @@ from typing import AsyncGenerator, Optional
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from sse_starlette.sse import EventSourceResponse
 
 from .api_schemas import (
     ChatRequest,
@@ -33,6 +35,8 @@ from .api_schemas import (
     HealthResponse,
     IngestRequest,
     IngestResponse,
+    QueryRequest,
+    QueryResponse,
     SourceContentResponse,
     SourceDeleteResponse,
     SourceInfo,
@@ -388,6 +392,163 @@ async def chat(request: Request, chat_request: ChatRequest):
     return StreamingResponse(
         guarded_stream(),
         headers=TEXT_STREAM_HEADERS,
+    )
+
+
+async def _query_sse_event_generator(
+    request: Request,
+    query_request: QueryRequest,
+    stop_event: threading.Event,
+) -> AsyncGenerator[dict[str, str], None]:
+    """Generate SSE events from ``RagEngine.query_events()``."""
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    source_id = None
+    if query_request.source_ids and len(query_request.source_ids) == 1:
+        source_id = query_request.source_ids[0]
+
+    def _producer() -> None:
+        try:
+            engine = _get_engine()
+            for event in engine.query_events(
+                query_request.query,
+                source_id=source_id,
+                citations_enabled=query_request.citations_enabled,
+                should_stop=stop_event.is_set,
+            ):
+                loop.call_soon_threadsafe(queue.put_nowait, event)
+        except Exception as exc:
+            logger.exception("query sse producer error: %s", exc)
+            error_event = ErrorEvent(
+                code="INTERNAL", message=f"{type(exc).__name__}: {exc}"
+            )
+            finish_event = FinishEvent(finish_reason="error")
+            loop.call_soon_threadsafe(queue.put_nowait, error_event)
+            loop.call_soon_threadsafe(queue.put_nowait, finish_event)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
+
+    producer_task = loop.run_in_executor(None, _producer)
+
+    try:
+        while True:
+            if await request.is_disconnected():
+                stop_event.set()
+                return
+
+            event = await queue.get()
+            if event is _SENTINEL:
+                return
+
+            if isinstance(event, StatusEvent):
+                yield {
+                    "event": "status",
+                    "data": json.dumps({"message": event.status}),
+                }
+            elif isinstance(event, IntentEvent):
+                yield {
+                    "event": "intent",
+                    "data": json.dumps(
+                        {
+                            "intent": event.intent,
+                            "confidence": event.confidence,
+                            "method": event.method,
+                        }
+                    ),
+                }
+            elif isinstance(event, SourcesEvent):
+                yield {
+                    "event": "sources",
+                    "data": json.dumps({"source_ids": event.source_ids}),
+                }
+            elif isinstance(event, CitationListEvent):
+                yield {
+                    "event": "citations",
+                    "data": json.dumps({"citations": event.citations}),
+                }
+            elif isinstance(event, TextTokenEvent):
+                yield {
+                    "event": "token",
+                    "data": json.dumps({"text": event.token}),
+                }
+            elif isinstance(event, ErrorEvent):
+                yield {
+                    "event": "error",
+                    "data": json.dumps({"code": event.code, "error": event.message}),
+                }
+            elif isinstance(event, FinishEvent):
+                yield {
+                    "event": "complete",
+                    "data": json.dumps(
+                        {
+                            "finish_reason": event.finish_reason,
+                            "completion_tokens": event.completion_tokens,
+                            "prompt_tokens": event.prompt_tokens,
+                        }
+                    ),
+                }
+    finally:
+        stop_event.set()
+        try:
+            await asyncio.wait_for(producer_task, timeout=5.0)
+        except (asyncio.TimeoutError, Exception):
+            pass
+
+
+@app.post("/api/query", response_model=QueryResponse)
+async def query_endpoint(request: Request, query_request: QueryRequest):
+    """Query endpoint with optional SSE streaming.
+
+    When ``stream=true``, returns text/event-stream events for status + tokens.
+    Otherwise returns a single JSON payload.
+    """
+    if _chat_lock.locked():
+        return JSONResponse(
+            status_code=429,
+            content=http_error_body(
+                "LOCK_BUSY", "Another query is already in progress"
+            ),
+        )
+
+    source_id = None
+    if query_request.source_ids and len(query_request.source_ids) == 1:
+        source_id = query_request.source_ids[0]
+
+    if not query_request.stream:
+        async with _chat_lock:
+            result = await asyncio.to_thread(
+                _get_engine().query,
+                query_request.query,
+                source_id=source_id,
+                citations_enabled=query_request.citations_enabled,
+            )
+            return QueryResponse(
+                answer=result.answer,
+                citations=[],
+                source_ids=result.source_ids,
+                metrics={
+                    "completion_tokens": 0,
+                    "finish_reason": "stop",
+                },
+            )
+
+    stop_event = threading.Event()
+
+    async def guarded_event_stream() -> AsyncGenerator[dict[str, str], None]:
+        async with _chat_lock:
+            async for event in _query_sse_event_generator(
+                request, query_request, stop_event
+            ):
+                yield event
+
+    return EventSourceResponse(
+        guarded_event_stream(),
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+        media_type="text/event-stream",
     )
 
 

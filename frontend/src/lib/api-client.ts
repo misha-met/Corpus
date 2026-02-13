@@ -75,6 +75,119 @@ export interface ApiError {
   };
 }
 
+export interface StreamEvent {
+  event:
+    | "status"
+    | "intent"
+    | "sources"
+    | "citations"
+    | "token"
+    | "complete"
+    | "error";
+  data: unknown;
+}
+
+function getBackendApiBase(): string {
+  const env =
+    typeof process !== "undefined" &&
+    typeof process.env?.NEXT_PUBLIC_BACKEND_URL === "string"
+      ? process.env.NEXT_PUBLIC_BACKEND_URL
+      : "";
+  const base = env || "http://127.0.0.1:8000";
+  return `${base.replace(/\/$/, "")}/api`;
+}
+
+export async function* queryStreaming(
+  query: string,
+  options?: {
+    mode?: string;
+    sourceIds?: string[];
+    citationsEnabled?: boolean;
+    signal?: AbortSignal;
+  }
+): AsyncGenerator<StreamEvent, void, unknown> {
+  const apiBase = getBackendApiBase();
+  const response = await fetch(`${apiBase}/query`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      query,
+      mode: options?.mode,
+      source_ids: options?.sourceIds,
+      citations_enabled: options?.citationsEnabled ?? true,
+      stream: true,
+    }),
+    signal: options?.signal,
+  });
+
+  if (!response.ok) {
+    let message = `Query failed: HTTP ${response.status}`;
+    try {
+      const body = await response.json();
+      message = body?.error?.message ?? message;
+    } catch {
+      // fall through
+    }
+    throw new Error(message);
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("No response body");
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  const parseEventBlock = (eventText: string): StreamEvent | null => {
+    const lines = eventText.split(/\r?\n/);
+    let eventType = "message";
+    const dataLines: string[] = [];
+
+    for (const line of lines) {
+      if (line.startsWith("event:")) {
+        eventType = line.slice(6).trim();
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).trimStart());
+      }
+    }
+
+    if (dataLines.length === 0) return null;
+    const rawData = dataLines.join("\n");
+
+    try {
+      const parsed = JSON.parse(rawData);
+      return { event: eventType as StreamEvent["event"], data: parsed };
+    } catch {
+      return { event: eventType as StreamEvent["event"], data: { raw: rawData } };
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+
+    const events = buffer.split(/\r?\n\r?\n/);
+    buffer = events.pop() || "";
+
+    for (const eventText of events) {
+      if (!eventText.trim()) continue;
+      const evt = parseEventBlock(eventText);
+      if (evt) {
+        yield evt;
+      }
+    }
+  }
+
+  const finalBlock = buffer.trim();
+  if (finalBlock) {
+    const evt = parseEventBlock(finalBlock);
+    if (evt) {
+      yield evt;
+    }
+  }
+}
+
 class SourceApiClient {
   private baseUrl: string;
 

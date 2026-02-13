@@ -123,6 +123,35 @@ class ChatRequest(BaseModel):
     )
 
 
+class QueryRequest(BaseModel):
+    """Request body for ``POST /api/query`` endpoint."""
+
+    model_config = ConfigDict(extra="allow")
+
+    query: str = Field(..., min_length=1, description="User query text")
+    mode: Optional[str] = Field(default=None, description="Optional mode override")
+    source_ids: Optional[list[str]] = Field(
+        default=None,
+        description="Optional selected source IDs (single source filter supported by backend)",
+    )
+    citations_enabled: bool = Field(
+        default=True,
+        description="Whether to include citation mapping events",
+    )
+    stream: bool = Field(default=False, description="Enable SSE streaming response")
+
+
+class QueryResponse(BaseModel):
+    """Non-streaming response for ``POST /api/query``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    answer: str
+    citations: list[dict[str, object]] = Field(default_factory=list)
+    source_ids: list[str] = Field(default_factory=list)
+    metrics: dict[str, object] = Field(default_factory=dict)
+
+
 # ---------------------------------------------------------------------------
 # Source management
 # ---------------------------------------------------------------------------
