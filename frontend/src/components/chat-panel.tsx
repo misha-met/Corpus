@@ -11,7 +11,79 @@ type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   parts: Array<{ type: "text"; text: string }>;
+  timestamp: number;
+  /** Source IDs referenced in this message (populated from stream annotations) */
+  sourceIds?: string[];
 };
+
+/** Parse citation references like [source_id] or [N] from text */
+function parseCitations(
+  text: string
+): Array<{ index: number; label: string; sourceId: string }> {
+  const citations: Array<{
+    index: number;
+    label: string;
+    sourceId: string;
+  }> = [];
+  const regex = /\[([^\]]+)\]/g;
+  let match;
+  let citationNum = 1;
+  while ((match = regex.exec(text)) !== null) {
+    citations.push({
+      index: citationNum++,
+      label: match[1],
+      sourceId: match[1],
+    });
+  }
+  return citations;
+}
+
+/** Render text with citation numbers as superscript */
+function renderTextWithCitations(
+  text: string,
+  onCitationClick: (sourceId: string) => void
+): React.ReactNode[] {
+  const parts: React.ReactNode[] = [];
+  const regex = /\[([^\]]+)\]/g;
+  let lastIndex = 0;
+  let match;
+  let citationCounter = 1;
+
+  while ((match = regex.exec(text)) !== null) {
+    // Text before citation
+    if (match.index > lastIndex) {
+      parts.push(
+        <span key={`text-${lastIndex}`}>
+          {text.slice(lastIndex, match.index)}
+        </span>
+      );
+    }
+    // Citation superscript
+    const sourceId = match[1];
+    const num = citationCounter++;
+    parts.push(
+      <button
+        key={`cite-${match.index}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          onCitationClick(sourceId);
+        }}
+        className="inline-flex items-center justify-center w-4 h-4 text-[10px] font-bold text-blue-400 hover:text-blue-300 bg-blue-500/20 hover:bg-blue-500/30 rounded-full align-super ml-0.5 mr-0.5 cursor-pointer transition-colors"
+        title={`View source: ${sourceId}`}
+      >
+        {num}
+      </button>
+    );
+    lastIndex = match.index + match[0].length;
+  }
+
+  // Remaining text
+  if (lastIndex < text.length) {
+    parts.push(<span key={`text-${lastIndex}`}>{text.slice(lastIndex)}</span>);
+  }
+
+  return parts.length > 0 ? parts : [<span key="full">{text}</span>];
+}
 
 function getMessageText(message: ChatMessage): string {
   return message.parts
@@ -24,12 +96,32 @@ function generateId(): string {
   return Math.random().toString(36).slice(2, 12);
 }
 
+function formatTimestamp(ts: number): string {
+  const d = new Date(ts);
+  const now = new Date();
+  const isToday =
+    d.getDate() === now.getDate() &&
+    d.getMonth() === now.getMonth() &&
+    d.getFullYear() === now.getFullYear();
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return isToday ? `Today \u2022 ${time}` : `${d.toLocaleDateString()} \u2022 ${time}`;
+}
+
+interface ChatPanelProps {
+  selectedSourceIds: string[];
+  sourceCount: number;
+  onCitationClick: (sourceId: string) => void;
+}
+
 /**
- * Chat panel with custom stream parsing: status lines go to the status
- * indicator, only the assistant reply is shown in the bubble, and the
- * reply is streamed token-by-token.
+ * Chat panel with custom stream parsing, citation rendering,
+ * action buttons, timestamps, and source count in input.
  */
-export function ChatPanel() {
+export function ChatPanel({
+  selectedSourceIds,
+  sourceCount,
+  onCitationClick,
+}: ChatPanelProps) {
   const dispatch = useAppDispatch();
   const { statusMessage, errorMessage, isLockBusy } = useAppState();
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -38,8 +130,9 @@ export function ChatPanel() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  // Sync status when not streaming (e.g. clear when idle)
+  // Sync status when not streaming
   useEffect(() => {
     if (!isStreaming && statusMessage) {
       dispatch({ type: "SET_STATUS", status: "" });
@@ -61,6 +154,16 @@ export function ChatPanel() {
     abortRef.current?.abort();
   }, []);
 
+  async function copyToClipboard(messageId: string, text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedId(messageId);
+      setTimeout(() => setCopiedId(null), 2000);
+    } catch {
+      /* clipboard not available */
+    }
+  }
+
   const sendMessage = useCallback(
     async (text: string) => {
       dispatch({ type: "CLEAR_ERROR" });
@@ -68,11 +171,13 @@ export function ChatPanel() {
         id: generateId(),
         role: "user",
         parts: [{ type: "text", text }],
+        timestamp: Date.now(),
       };
       const assistantMessage: ChatMessage = {
         id: generateId(),
         role: "assistant",
         parts: [{ type: "text", text: "" }],
+        timestamp: Date.now(),
       };
       setMessages((prev) => [...prev, userMessage, assistantMessage]);
       setIsStreaming(true);
@@ -90,9 +195,11 @@ export function ChatPanel() {
           })),
           { role: "user" as const, parts: [{ type: "text" as const, text }] },
         ],
+        data: {
+          source_ids: selectedSourceIds.length > 0 ? selectedSourceIds : undefined,
+        },
       };
 
-      // Use direct backend URL when set (bypasses Next.js proxy for proper streaming)
       const chatUrl =
         typeof process.env.NEXT_PUBLIC_BACKEND_URL === "string" &&
         process.env.NEXT_PUBLIC_BACKEND_URL
@@ -111,7 +218,8 @@ export function ChatPanel() {
           const msg = response.statusText || "Request failed";
           try {
             const j = await response.json();
-            if (j?.error?.message) dispatch({ type: "SET_ERROR", message: j.error.message });
+            if (j?.error?.message)
+              dispatch({ type: "SET_ERROR", message: j.error.message });
             else dispatch({ type: "SET_ERROR", message: msg });
           } catch {
             dispatch({ type: "SET_ERROR", message: msg });
@@ -122,8 +230,6 @@ export function ChatPanel() {
           return;
         }
 
-        // Parse stream: status lines → status indicator, rest → assistant message.
-        // Next.js rewrites can buffer the response, so we support both streaming (body) and full text fallback.
         const processBuffer = (
           buffer: string,
           messageMode: { current: boolean },
@@ -156,7 +262,10 @@ export function ChatPanel() {
             if (last?.role === "assistant" && last.parts[0]) {
               next[next.length - 1] = {
                 ...last,
-                parts: [{ type: "text" as const, text: last.parts[0].text + chunk }],
+                parts: [
+                  { type: "text" as const, text: last.parts[0].text + chunk },
+                ],
+                timestamp: Date.now(),
               };
             }
             return next;
@@ -179,24 +288,35 @@ export function ChatPanel() {
             buffer = result.buffer;
             if (result.done) break streamLoop;
 
-            if (messageMode.current && buffer && !buffer.startsWith("Error:")) {
+            if (
+              messageMode.current &&
+              buffer &&
+              !buffer.startsWith("Error:")
+            ) {
               flushChunk(buffer);
               buffer = "";
             }
           }
         } else {
-          // Fallback when body is null (e.g. some proxies buffer the response)
           const fullText = await response.text();
           buffer = fullText;
           const result = processBuffer(buffer, messageMode, flushChunk);
           buffer = result.buffer;
-          if (!result.done && messageMode.current && buffer && !buffer.startsWith("Error:")) {
+          if (
+            !result.done &&
+            messageMode.current &&
+            buffer &&
+            !buffer.startsWith("Error:")
+          ) {
             flushChunk(buffer);
           }
         }
 
-        // Flush any remaining buffer as message content
-        if (messageMode.current && buffer.trim() && !buffer.startsWith("Error:")) {
+        if (
+          messageMode.current &&
+          buffer.trim() &&
+          !buffer.startsWith("Error:")
+        ) {
           flushChunk(buffer);
         }
       } catch (err) {
@@ -221,7 +341,7 @@ export function ChatPanel() {
         dispatch({ type: "CHAT_FINISH" });
       }
     },
-    [messages, dispatch]
+    [messages, dispatch, selectedSourceIds]
   );
 
   function onSubmit(e: React.FormEvent) {
@@ -241,7 +361,55 @@ export function ChatPanel() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+      {/* Chat header */}
+      <div className="flex items-center justify-between px-5 py-3 border-b border-gray-800 shrink-0">
+        <h2 className="text-sm font-semibold text-gray-200 tracking-wide">
+          Chat
+        </h2>
+        <div className="flex items-center gap-1">
+          {/* Grid view icon (placeholder) */}
+          <button
+            className="p-1.5 text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded transition-colors"
+            title="Grid view"
+          >
+            <svg
+              className="w-4 h-4"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"
+              />
+            </svg>
+          </button>
+          {/* Menu icon (placeholder) */}
+          <button
+            className="p-1.5 text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded transition-colors"
+            title="More options"
+          >
+            <svg
+              className="w-4 h-4"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"
+              />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      {/* Messages area */}
+      <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
         {messages.length === 0 && (
           <div className="flex items-center justify-center h-full text-gray-500">
             <div className="text-center space-y-2">
@@ -255,33 +423,179 @@ export function ChatPanel() {
           </div>
         )}
 
-        {messages.map((message) => {
+        {messages.map((message, idx) => {
           const text = getMessageText(message);
           const isAssistantPlaceholder =
             message.role === "assistant" && !text && isStreaming;
           if (!text && message.role === "assistant" && !isStreaming) return null;
+
+          const isUser = message.role === "user";
+          const citations = !isUser ? parseCitations(text) : [];
+
+          // Show timestamp between user/assistant pairs or at certain intervals
+          const showTimestamp =
+            idx === messages.length - 1 ||
+            (idx < messages.length - 1 &&
+              messages[idx + 1].role === "user" &&
+              message.role === "assistant");
+
           return (
-            <div
-              key={message.id}
-              className={`flex ${
-                message.role === "user" ? "justify-end" : "justify-start"
-              }`}
-            >
+            <div key={message.id} className="space-y-1">
+              {/* Message bubble */}
               <div
-                className={`max-w-[80%] rounded-xl px-4 py-3 ${
-                  message.role === "user"
-                    ? "bg-blue-600 text-white"
-                    : "bg-gray-800 text-gray-100 border border-gray-700"
-                }`}
+                className={`flex ${isUser ? "justify-end" : "justify-start"}`}
               >
-                <div className="whitespace-pre-wrap text-sm leading-relaxed min-h-[1.5em]">
-                  {isAssistantPlaceholder ? (
-                    <span className="text-gray-500 animate-pulse">...</span>
-                  ) : (
-                    text
+                <div
+                  className={`max-w-[85%] rounded-2xl px-4 py-3 ${
+                    isUser
+                      ? "bg-blue-600 text-white"
+                      : "bg-gray-800/80 text-gray-100 border border-gray-700/50"
+                  }`}
+                >
+                  {/* Citation strip for assistant */}
+                  {!isUser && citations.length > 0 && (
+                    <div className="flex items-center gap-1.5 mb-2 pb-2 border-b border-gray-700/50">
+                      <span className="text-xs text-gray-400">Sources:</span>
+                      <div className="flex items-center gap-1 flex-wrap">
+                        {citations.map((c) => (
+                          <button
+                            key={c.index}
+                            onClick={() => onCitationClick(c.sourceId)}
+                            className="inline-flex items-center justify-center min-w-5 h-5 px-1.5 text-[10px] font-bold text-blue-400 hover:text-blue-300 bg-blue-500/20 hover:bg-blue-500/30 rounded-full cursor-pointer transition-colors"
+                            title={`View: ${c.sourceId}`}
+                          >
+                            {c.index}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   )}
+
+                  {/* Message text */}
+                  <div className="whitespace-pre-wrap text-sm leading-relaxed min-h-[1.5em]">
+                    {isAssistantPlaceholder ? (
+                      <span className="text-gray-500 animate-pulse">...</span>
+                    ) : isUser ? (
+                      text
+                    ) : (
+                      renderTextWithCitations(text, onCitationClick)
+                    )}
+                  </div>
                 </div>
               </div>
+
+              {/* Action buttons for assistant messages */}
+              {!isUser && text && !isAssistantPlaceholder && (
+                <div className="flex items-center gap-0.5 pl-1">
+                  {/* Save to note */}
+                  <button
+                    className="flex items-center gap-1 px-2 py-1 text-xs text-gray-500 hover:text-gray-300 hover:bg-gray-800/50 rounded transition-colors"
+                    title="Save to note"
+                  >
+                    <svg
+                      className="w-3.5 h-3.5"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      strokeWidth={2}
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z"
+                      />
+                    </svg>
+                    <span>Save</span>
+                  </button>
+
+                  {/* Copy */}
+                  <button
+                    onClick={() => copyToClipboard(message.id, text)}
+                    className="flex items-center gap-1 px-2 py-1 text-xs text-gray-500 hover:text-gray-300 hover:bg-gray-800/50 rounded transition-colors"
+                    title="Copy message"
+                  >
+                    {copiedId === message.id ? (
+                      <svg
+                        className="w-3.5 h-3.5 text-green-400"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        strokeWidth={2}
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M5 13l4 4L19 7"
+                        />
+                      </svg>
+                    ) : (
+                      <svg
+                        className="w-3.5 h-3.5"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        strokeWidth={2}
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                        />
+                      </svg>
+                    )}
+                    <span>{copiedId === message.id ? "Copied" : "Copy"}</span>
+                  </button>
+
+                  {/* Thumbs up */}
+                  <button
+                    className="p-1 text-gray-500 hover:text-gray-300 hover:bg-gray-800/50 rounded transition-colors"
+                    title="Good response"
+                  >
+                    <svg
+                      className="w-3.5 h-3.5"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      strokeWidth={2}
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d="M14 9V5a3 3 0 00-3-3l-4 9v11h11.28a2 2 0 002-1.7l1.38-9a2 2 0 00-2-2.3H14zm-9 11H4a2 2 0 01-2-2v-7a2 2 0 012-2h1"
+                      />
+                    </svg>
+                  </button>
+
+                  {/* Thumbs down */}
+                  <button
+                    className="p-1 text-gray-500 hover:text-gray-300 hover:bg-gray-800/50 rounded transition-colors"
+                    title="Bad response"
+                  >
+                    <svg
+                      className="w-3.5 h-3.5"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      strokeWidth={2}
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d="M10 15v4a3 3 0 003 3l4-9V2H5.72a2 2 0 00-2 1.7l-1.38 9a2 2 0 002 2.3H10zm9-13h1a2 2 0 012 2v7a2 2 0 01-2 2h-1"
+                      />
+                    </svg>
+                  </button>
+                </div>
+              )}
+
+              {/* Timestamp */}
+              {showTimestamp && (
+                <div className="text-center">
+                  <span className="text-[10px] text-gray-600">
+                    {formatTimestamp(message.timestamp)}
+                  </span>
+                </div>
+              )}
             </div>
           );
         })}
@@ -315,36 +629,65 @@ export function ChatPanel() {
         <div ref={messagesEndRef} />
       </div>
 
-      <div className="border-t border-gray-800 px-4 py-3">
-        <form onSubmit={onSubmit} className="flex gap-2">
-          <input
-            ref={inputRef}
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyDown={onKeyDown}
-            placeholder={
-              isActive
-                ? "Waiting for response..."
-                : "Ask a question about your documents..."
-            }
-            disabled={isActive}
-            className="flex-1 rounded-lg bg-gray-800 border border-gray-700 px-4 py-2.5 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed"
-          />
+      {/* Input area */}
+      <div className="border-t border-gray-800 px-5 py-3">
+        <form onSubmit={onSubmit} className="relative flex items-center gap-2">
+          <div className="flex-1 relative">
+            <input
+              ref={inputRef}
+              value={inputValue}
+              onChange={(e) => setInputValue(e.target.value)}
+              onKeyDown={onKeyDown}
+              placeholder={
+                isActive ? "Waiting for response..." : "Start typing..."
+              }
+              disabled={isActive}
+              className="w-full rounded-xl bg-gray-800 border border-gray-700 pl-4 pr-24 py-2.5 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed"
+            />
+            {/* Source count badge inside input */}
+            <div className="absolute right-12 top-1/2 -translate-y-1/2 flex items-center">
+              <span className="text-xs text-gray-500 bg-gray-700/50 px-2 py-0.5 rounded-full">
+                {sourceCount} source{sourceCount !== 1 ? "s" : ""}
+              </span>
+            </div>
+          </div>
+
+          {/* Circular send / stop button */}
           {isActive ? (
             <button
               type="button"
               onClick={stop}
-              className="px-4 py-2.5 bg-red-600 hover:bg-red-700 rounded-lg text-sm font-medium text-white transition-colors"
+              className="w-10 h-10 flex items-center justify-center bg-red-600 hover:bg-red-700 rounded-full text-white transition-colors shrink-0"
+              title="Stop"
             >
-              Stop
+              <svg
+                className="w-4 h-4"
+                fill="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <rect x="6" y="6" width="12" height="12" rx="2" />
+              </svg>
             </button>
           ) : (
             <button
               type="submit"
               disabled={isSubmitDisabled}
-              className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:cursor-not-allowed rounded-lg text-sm font-medium text-white transition-colors"
+              className="w-10 h-10 flex items-center justify-center bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:cursor-not-allowed rounded-full text-white transition-colors shrink-0"
+              title="Send"
             >
-              Send
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M5 12h14M12 5l7 7-7 7"
+                />
+              </svg>
             </button>
           )}
         </form>

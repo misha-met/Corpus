@@ -262,7 +262,14 @@ async def _chat_stream_generator(
     source_id = None
     citations_enabled = None
     if chat_request.data:
-        source_id = chat_request.data.get("source_id")
+        # Support both source_ids (plural, from frontend) and source_id (singular, legacy).
+        # The engine only supports single source_id filtering; if exactly one source
+        # is selected, pass it through.  Otherwise pass None (use all sources).
+        source_ids = chat_request.data.get("source_ids")
+        if isinstance(source_ids, list) and len(source_ids) == 1:
+            source_id = source_ids[0]
+        elif not source_ids:
+            source_id = chat_request.data.get("source_id")
         if "citations_enabled" in chat_request.data:
             citations_enabled = bool(chat_request.data["citations_enabled"])
 
