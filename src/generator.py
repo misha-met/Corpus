@@ -328,6 +328,193 @@ class MlxGenerator:
         output = self.generate(prompt, config=config)
         return self._strip_thinking_blocks(output)
 
+    def generate_chat_stream(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        config: Optional[GenerationConfig] = None,
+        should_stop: Optional[callable] = None,
+    ):
+        """Streaming version of generate_chat that yields individual tokens.
+
+        Parameters
+        ----------
+        messages : list[dict[str, str]]
+            Chat messages (same format as generate_chat).
+        config : GenerationConfig | None
+            Generation parameters.
+        should_stop : callable | None
+            If provided, called periodically; returning True aborts generation.
+
+        Yields
+        ------
+        str
+            Individual text tokens as they are generated.
+
+        Note
+        ----
+        Output sanitisation (stop-token truncation, thinking-block removal)
+        is applied incrementally.  The caller receives clean tokens and does
+        NOT need to post-process.
+        """
+        if not messages:
+            raise ValueError("messages must be a non-empty list of role/content dicts.")
+
+        prompt = self._apply_chat_template(messages)
+
+        cfg = config or GenerationConfig()
+        model_size = self._infer_model_size_b(self._model_id)
+        max_tokens = cfg.max_tokens
+        repetition_penalty = cfg.repetition_penalty
+        temperature = cfg.temperature
+        top_p = cfg.top_p
+
+        if model_size is not None:
+            if model_size < 30:
+                max_tokens = max_tokens or 140
+                repetition_penalty = repetition_penalty or 1.25
+                temperature = temperature or 0.05
+                top_p = top_p or 0.7
+            elif model_size >= 70:
+                repetition_penalty = repetition_penalty or 1.15
+                temperature = temperature or 0.2
+                top_p = top_p or 0.9
+            else:
+                max_tokens = max_tokens or 400
+                repetition_penalty = repetition_penalty or 1.15
+                temperature = temperature or 0.15
+                top_p = top_p or 0.9
+        else:
+            temperature = temperature or 0.2
+            top_p = top_p or 0.9
+
+        stop_tokens = cfg.stop_tokens if cfg.stop_tokens is not None else DEFAULT_STOP_TOKENS
+        final_max_tokens = max_tokens if max_tokens is not None else 1200
+        prompt_tokens = count_tokens(prompt, self._tokenizer)
+
+        ctx_limit = cfg.context_window
+        if ctx_limit and prompt_tokens > int(ctx_limit * 0.8):
+            logger.warning(
+                "High prompt token count: %d tokens (%.0f%% of %dk context window). "
+                "Consider reducing context.",
+                prompt_tokens,
+                100 * prompt_tokens / ctx_limit,
+                ctx_limit // 1000,
+            )
+
+        try:
+            from mlx_lm.generate import stream_generate, make_sampler
+
+            yield from self._stream_tokens(
+                prompt, final_max_tokens, temperature, top_p,
+                repetition_penalty, stop_tokens, prompt_tokens,
+                should_stop=should_stop,
+            )
+        except ImportError:
+            # Fallback: generate full output, yield as single token
+            output = self._generate_legacy(
+                prompt, final_max_tokens, temperature, top_p,
+                repetition_penalty, stop_tokens, prompt_tokens,
+            )
+            output = self._strip_thinking_blocks(output)
+            if output:
+                yield output
+
+    def _stream_tokens(
+        self, prompt: str, max_tokens: int, temperature: float, top_p: float,
+        repetition_penalty: Optional[float], stop_tokens: list[str],
+        prompt_tokens: int,
+        *,
+        should_stop: Optional[callable] = None,
+    ):
+        """Yield individual tokens from mlx-lm stream_generate.
+
+        Handles stop-token detection and thinking-block removal on the fly.
+        """
+        from mlx_lm.generate import stream_generate, make_sampler
+
+        sampler = make_sampler(temp=temperature, top_p=top_p)
+        logits_processors = []
+        if repetition_penalty is not None:
+            processor = self._build_repetition_penalty_processor(repetition_penalty)
+            if processor is not None:
+                logits_processors.append(processor)
+
+        generate_kwargs: dict = dict(
+            sampler=sampler,
+            logits_processors=logits_processors or None,
+        )
+        if self._make_prompt_cache is not None:
+            try:
+                cache = self._make_prompt_cache(self._model)
+                generate_kwargs["prompt_cache"] = cache
+            except (ImportError, AttributeError, TypeError):
+                pass
+
+        start_time = time.perf_counter()
+        accumulated = ""
+        in_thinking_block = False
+        token_count = 0
+
+        for response in stream_generate(
+            model=self._model,
+            tokenizer=self._tokenizer,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            **generate_kwargs,
+        ):
+            # Check cooperative cancellation
+            if should_stop is not None and should_stop():
+                logger.info("Generation stopped by should_stop callback")
+                break
+
+            token = response.text
+            accumulated += token
+            token_count += 1
+
+            # Handle <think>...</think> blocks — suppress tokens inside
+            if "<think>" in accumulated and not in_thinking_block:
+                in_thinking_block = True
+                # Don't yield anything inside thinking blocks
+                continue
+            if in_thinking_block:
+                if "</think>" in accumulated:
+                    # Remove the entire thinking block from accumulated
+                    import re
+                    accumulated = re.sub(r"<think>.*?</think>", "", accumulated, flags=re.DOTALL).strip()
+                    in_thinking_block = False
+                    # If there's remaining text after removing the block, yield it
+                    if accumulated:
+                        yield accumulated
+                        accumulated = ""
+                continue
+
+            # Check for stop tokens in accumulated text
+            hit_stop = False
+            for stop in stop_tokens:
+                pos = accumulated.find(stop)
+                if pos != -1:
+                    # Yield text up to stop token, then abort
+                    before_stop = accumulated[:pos]
+                    if before_stop:
+                        yield token  # yield just this token's portion
+                    hit_stop = True
+                    break
+
+            if hit_stop:
+                break
+
+            # Yield the token
+            if token:
+                yield token
+
+        elapsed_s = time.perf_counter() - start_time
+        logger.info(
+            "LLM streaming generation | model=%s prompt_tokens=%d output_tokens=%d "
+            "time_s=%.2f",
+            self._model_id, prompt_tokens, token_count, elapsed_s,
+        )
+
     def _apply_chat_template(self, messages: list[dict[str, str]]) -> str:
         if hasattr(self._tokenizer, "apply_chat_template"):
             try:

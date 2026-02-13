@@ -43,6 +43,15 @@ from .retrieval import (
     build_source_legend,
     format_context_with_citations,
 )
+from .query_events import (
+    ErrorEvent,
+    FinishEvent,
+    IntentEvent,
+    QueryEvent,
+    SourcesEvent,
+    StatusEvent,
+    TextTokenEvent,
+)
 from .storage import StorageConfig, StorageEngine
 
 logger = logging.getLogger(__name__)
@@ -382,6 +391,7 @@ class RagEngine:
     def _ensure_embedding_model(self) -> Any:
         if self._embedding_model is not None:
             return self._embedding_model
+        logger.info("_ensure_embedding_model: loading...")
         self._on_status("Loading embedding model...")
         from sentence_transformers import SentenceTransformer
 
@@ -389,21 +399,25 @@ class RagEngine:
             self._model_config.embedding_model,
             device=self._model_config.embedding_device,
         )
+        logger.info("_ensure_embedding_model: done")
         return self._embedding_model
 
     def _ensure_reranker(self) -> Any:
         if self._reranker is not None:
             return self._reranker
+        logger.info("_ensure_reranker: loading...")
         self._on_status("Loading reranker model...")
         from .reranker import JinaRerankerMLX
 
         self._reranker = JinaRerankerMLX(model_id=self._model_config.reranker_model)
+        logger.info("_ensure_reranker: done")
         return self._reranker
 
     def _ensure_generator(self) -> MlxGenerator:
         if self._generator is not None:
             return self._generator
         model_id = self._cfg.model or self._model_config.llm_model
+        logger.info("_ensure_generator: loading LLM %s...", model_id.split("/")[-1])
         self._on_status(f"Loading LLM ({model_id.split('/')[-1]})...")
         try:
             import mlx.core as mx
@@ -412,6 +426,7 @@ class RagEngine:
         except Exception:
             pass
         self._generator = MlxGenerator(model_id)
+        logger.info("_ensure_generator: done")
         return self._generator
 
     def load_retrieval_models(self) -> None:
@@ -815,6 +830,314 @@ class RagEngine:
             context=context,
             config=config,
             raw_answer=raw_answer,
+        )
+
+    # -- streaming query (event generator) ----------------------------------
+
+    def query_events(
+        self,
+        query_text: str,
+        *,
+        source_id: Optional[str] = None,
+        intent_override: Optional[str] = None,
+        citations_enabled: Optional[bool] = None,
+        enable_query_expansion: Optional[bool] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> Iterable[QueryEvent]:
+        """Execute the RAG pipeline yielding structured events.
+
+        This is the streaming counterpart of :meth:`query`.  It yields
+        :class:`QueryEvent` objects at each pipeline stage, enabling the
+        API layer to stream status updates and text tokens to the client.
+
+        The existing :meth:`query` method is unchanged.
+
+        Parameters
+        ----------
+        query_text : str
+            The user's question.
+        source_id : str | None
+            Restrict retrieval to a specific source document.
+        intent_override : str | None
+            Force a specific intent.
+        citations_enabled : bool | None
+            Override citation mode.
+        enable_query_expansion : bool | None
+            Override query expansion setting.
+        should_stop : callable | None
+            Called periodically; if it returns True, generation is
+            aborted and a ``STREAM_CANCELLED`` error event is yielded.
+        """
+        _stop = should_stop or (lambda: False)
+
+        try:
+            yield from self._query_events_impl(
+                query_text,
+                source_id=source_id,
+                intent_override=intent_override,
+                citations_enabled=citations_enabled,
+                enable_query_expansion=enable_query_expansion,
+                should_stop=_stop,
+            )
+        except Exception as exc:
+            logger.exception("query_events error: %s", exc)
+            yield ErrorEvent(code="INTERNAL", message=f"{type(exc).__name__}: {exc}")
+            yield FinishEvent(finish_reason="error")
+
+    def _query_events_impl(
+        self,
+        query_text: str,
+        *,
+        source_id: Optional[str],
+        intent_override: Optional[str],
+        citations_enabled: Optional[bool],
+        enable_query_expansion: Optional[bool],
+        should_stop: Callable[[], bool],
+    ) -> Iterable[QueryEvent]:
+        """Internal implementation of query_events (unwrapped from error handling)."""
+        logger.info("query_events_impl: started")
+        config = self._model_config
+        model_id = self._cfg.model or config.llm_model
+
+        # -- resolve citation mode -----------------------------------------
+        if citations_enabled is not None:
+            cite = citations_enabled
+        elif self._cfg.citations_enabled is not None:
+            cite = self._cfg.citations_enabled
+        else:
+            cite = CITATIONS_ENABLED_DEFAULT
+
+        expansion = (
+            enable_query_expansion
+            if enable_query_expansion is not None
+            else self._cfg.enable_query_expansion
+        )
+
+        # -- load retrieval models -----------------------------------------
+        logger.info("query_events_impl: yielding 'Preparing retrieval models', then loading embedding")
+        yield StatusEvent(status="Preparing retrieval models...")
+        embedding_model = self._ensure_embedding_model()
+        logger.info("query_events_impl: embedding ready, loading reranker")
+        reranker = self._ensure_reranker()
+        logger.info("query_events_impl: reranker ready")
+
+        if should_stop():
+            yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled")
+            yield FinishEvent(finish_reason="error")
+            return
+
+        retrieval_engine = RetrievalEngine(
+            storage=self._storage,
+            embedding_model=embedding_model,
+            reranker=reranker,
+            config=config,
+        )
+
+        # -- intent classification -----------------------------------------
+        yield StatusEvent(status="Classifying intent...")
+        intent_result: Optional[IntentResult] = None
+        if intent_override:
+            intent_map = {
+                "overview": Intent.OVERVIEW,
+                "summarize": Intent.SUMMARIZE,
+                "explain": Intent.EXPLAIN,
+                "analyze": Intent.ANALYZE,
+                "compare": Intent.COMPARE,
+                "critique": Intent.CRITIQUE,
+                "factual": Intent.FACTUAL,
+                "collection": Intent.COLLECTION,
+            }
+            intent_result = IntentResult(
+                intent=intent_map[intent_override], confidence=1.0, method="manual"
+            )
+        else:
+            llm_fallback_enabled = self._cfg.llm_fallback
+            llm_model_id = self._cfg.intent_model if llm_fallback_enabled else None
+            classifier = IntentClassifier(
+                confidence_threshold=self._cfg.intent_confidence_threshold,
+                llm_model_id=llm_model_id,
+                llm_fallback_threshold=self._cfg.llm_fallback_threshold,
+                eager_load_llm=False,
+            )
+            intent_result = classifier.classify(query_text)
+            del classifier
+            gc.collect()
+            _release_mlx_cache()
+
+        yield IntentEvent(
+            intent=intent_result.intent.value,
+            confidence=intent_result.confidence,
+            method=intent_result.method,
+        )
+
+        if should_stop():
+            yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled")
+            yield FinishEvent(finish_reason="error")
+            return
+
+        # -- query expansion -----------------------------------------------
+        search_query = query_text
+        if expansion:
+            search_query = _expand_query(query_text, intent_result.intent)
+
+        extra_instructions: Optional[str] = None
+        bypass_retrieval = is_low_information_query(query_text)
+
+        # -- retrieval paths -----------------------------------------------
+        context = ""
+        results: list[RetrievalResult] = []
+        source_ids: list[str] = []
+        parent_texts: list[str] = []
+
+        if bypass_retrieval:
+            yield StatusEvent(status="Query is unclear — asking for clarification...")
+            if cite:
+                cite = False
+            extra_instructions = (
+                "The user query is unclear or nonsensical. Ask a concise clarifying "
+                "question first, and optionally suggest 2-3 concrete ways they can rephrase it."
+            )
+
+        elif intent_result.intent == Intent.COLLECTION:
+            yield StatusEvent(status="Fetching collection summaries...")
+            context, source_ids, cite = self._handle_collection(
+                config=config,
+                model_id=model_id,
+                no_generate=False,
+                citations_enabled=cite,
+            )
+            if context is None:
+                yield TextTokenEvent(token="No documents found in the database.")
+                yield FinishEvent(finish_reason="stop")
+                return
+
+        elif intent_result.intent == Intent.SUMMARIZE and not source_id:
+            yield StatusEvent(status="Checking multi-document summarise path...")
+            profiler = LatencyProfiler(enabled=False)
+            multi_result = self._handle_multi_doc_summarize(
+                config=config,
+                model_id=model_id,
+                no_generate=False,
+                citations_enabled=cite,
+                profiler=profiler,
+                retrieval_engine=retrieval_engine,
+                search_query=search_query,
+                source_id=source_id,
+            )
+            context = multi_result["context"]
+            results = multi_result["results"]
+            source_ids = multi_result["source_ids"]
+            parent_texts = multi_result["parent_texts"]
+            cite = multi_result["citations_enabled"]
+            extra_instructions = multi_result.get("extra_instructions")
+
+        else:
+            yield StatusEvent(status="Searching knowledge base...")
+            results = retrieval_engine.search(search_query, source_id=source_id)
+            source_ids = sorted(
+                {
+                    r.metadata.get("source_id")
+                    for r in results
+                    if r.metadata.get("source_id")
+                }
+            )
+            parent_texts = [r.parent_text for r in results if r.parent_text]
+
+        # Emit sources
+        if source_ids:
+            yield SourcesEvent(source_ids=source_ids)
+
+        if should_stop():
+            yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled")
+            yield FinishEvent(finish_reason="error")
+            return
+
+        # -- release retrieval models for LLM headroom ---------------------
+        self._release_retrieval_models()
+
+        # -- token budget packing ------------------------------------------
+        source_legend: Optional[str] = None
+        result_metadatas: list[dict] = (
+            [r.metadata for r in results if r.parent_text]
+            if parent_texts and results
+            else []
+        )
+        generator: Optional[MlxGenerator] = None
+
+        if parent_texts:
+            generator = self._ensure_generator()
+
+            yield StatusEvent(status="Packing token budget...")
+            pack_result = enforce_token_budget(
+                docs=parent_texts,
+                max_tokens=config.retrieval_budget,
+                tokenizer=generator.tokenizer,
+                consecutive_fail_threshold=3,
+                allow_truncation=True,
+                log=logger,
+            )
+
+            packed_metadatas = [
+                result_metadatas[i]
+                for i in pack_result.packed_indices
+                if i < len(result_metadatas)
+            ]
+
+            if cite and packed_metadatas:
+                context, source_mapping = format_context_with_citations(
+                    texts=pack_result.packed_docs, metadatas=packed_metadatas
+                )
+                source_legend = build_source_legend(source_mapping)
+            elif cite:
+                cite = False
+            else:
+                context = "\n\n".join(pack_result.packed_docs)
+
+        elif not context and not bypass_retrieval and intent_result.intent != Intent.COLLECTION:
+            # No context retrieved and not bypassing — try with existing context
+            pass
+
+        # -- build prompt ---------------------------------------------------
+        yield StatusEvent(status="Building prompt...")
+        messages = build_messages(
+            context,
+            query_text,
+            intent=intent_result.intent,
+            extra_instructions=extra_instructions,
+            citations_enabled=cite,
+            source_legend=source_legend,
+            mode=config.mode,
+        )
+
+        # -- generate with streaming tokens --------------------------------
+        if generator is None:
+            generator = self._ensure_generator()
+
+        gen_config = GenerationConfig(
+            max_tokens=600 if cite else 1200,
+            context_window=config.context_window,
+        )
+
+        yield StatusEvent(status="Generating answer...")
+
+        token_count = 0
+        accumulated_answer = []
+
+        for token in generator.generate_chat_stream(
+            messages, config=gen_config, should_stop=should_stop
+        ):
+            if should_stop():
+                yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled during generation")
+                yield FinishEvent(finish_reason="error")
+                return
+            token_count += 1
+            accumulated_answer.append(token)
+            yield TextTokenEvent(token=token)
+
+        # -- finish ---------------------------------------------------------
+        yield FinishEvent(
+            finish_reason="stop",
+            completion_tokens=token_count,
         )
 
     # -- internal pipeline helpers -----------------------------------------
