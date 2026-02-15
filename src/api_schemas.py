@@ -207,6 +207,14 @@ class SourceInfo(BaseModel):
         default=None,
         description="Path to cached text snapshot.",
     )
+    source_size_bytes: Optional[int] = Field(
+        default=None,
+        description="Size of the original source file in bytes, if available.",
+    )
+    content_size_bytes: Optional[int] = Field(
+        default=None,
+        description="Best-available text/content size in bytes for UI display.",
+    )
 
 
 class SourceListResponse(BaseModel):

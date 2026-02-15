@@ -29,7 +29,13 @@ from .generator import (
     enforce_token_budget,
 )
 from .ingest import ingest_file_to_storage
-from .intent import Intent, IntentClassifier, IntentResult, is_low_information_query
+from .intent import (
+    Intent,
+    IntentClassifier,
+    IntentResult,
+    is_low_information_query,
+    is_source_selection_query,
+)
 from .latency import LatencyProfiler
 from .metrics import (
     BudgetMetrics,
@@ -613,6 +619,23 @@ class RagEngine:
             intent_result.method,
         )
 
+        force_collection = (
+            source_id is None
+            and not intent_override
+            and len(self._storage.list_source_ids()) > 1
+            and is_source_selection_query(query_text)
+        )
+        if force_collection and intent_result.intent != Intent.COLLECTION:
+            logger.info(
+                "Forcing COLLECTION summary routing for source-selection query: %s",
+                query_text,
+            )
+            intent_result = IntentResult(
+                intent=Intent.COLLECTION,
+                confidence=max(intent_result.confidence, 0.85),
+                method=f"{intent_result.method}+collection_guard",
+            )
+
         # -- query expansion -----------------------------------------------
         search_query = query_text
         if expansion:
@@ -651,6 +674,12 @@ class RagEngine:
                 no_generate=no_generate,
                 citations_enabled=cite,
             )
+            if force_collection:
+                extra_instructions = (
+                    "If the question asks which source/document matches a criterion, "
+                    "name the matching source IDs explicitly in the first sentence, "
+                    "then justify briefly from the summaries. If none match, say that clearly."
+                )
             if context is None:
                 # No docs — return early
                 return QueryResult(
@@ -971,6 +1000,27 @@ class RagEngine:
             method=intent_result.method,
         )
 
+        force_collection = (
+            source_id is None
+            and not intent_override
+            and len(self._storage.list_source_ids()) > 1
+            and is_source_selection_query(query_text)
+        )
+        if force_collection and intent_result.intent != Intent.COLLECTION:
+            logger.info(
+                "query_events_impl: forcing COLLECTION summary routing for source-selection query"
+            )
+            intent_result = IntentResult(
+                intent=Intent.COLLECTION,
+                confidence=max(intent_result.confidence, 0.85),
+                method=f"{intent_result.method}+collection_guard",
+            )
+            yield IntentEvent(
+                intent=intent_result.intent.value,
+                confidence=intent_result.confidence,
+                method=intent_result.method,
+            )
+
         if should_stop():
             yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled")
             yield FinishEvent(finish_reason="error")
@@ -1007,6 +1057,12 @@ class RagEngine:
                 no_generate=False,
                 citations_enabled=cite,
             )
+            if force_collection:
+                extra_instructions = (
+                    "If the question asks which source/document matches a criterion, "
+                    "name the matching source IDs explicitly in the first sentence, "
+                    "then justify briefly from the summaries. If none match, say that clearly."
+                )
             if context is None:
                 yield TextTokenEvent(token="No documents found in the database.")
                 yield FinishEvent(finish_reason="stop")

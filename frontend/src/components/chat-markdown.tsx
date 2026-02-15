@@ -15,7 +15,15 @@ interface ChatMarkdownProps {
 function addCitationLinks(content: string, citations?: CitationEntry[]): string {
   if (!citations || citations.length === 0) return content;
 
-  return content.replace(/\[(\d+)\](?!\()/g, (fullMatch, numberText) => {
+  const withChunkMarkersLinked = content.replace(/\[CHUNK\s+(\d+)\](?!\()/gi, (fullMatch, numberText) => {
+    const index = Number.parseInt(numberText, 10) - 1;
+    if (!Number.isInteger(index) || index < 0 || index >= citations.length) {
+      return fullMatch;
+    }
+    return `[${numberText}](citation:${numberText})`;
+  });
+
+  return withChunkMarkersLinked.replace(/\[(\d+)\](?!\()/g, (fullMatch, numberText) => {
     const index = Number.parseInt(numberText, 10) - 1;
     if (!Number.isInteger(index) || index < 0 || index >= citations.length) {
       return fullMatch;

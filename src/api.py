@@ -86,6 +86,7 @@ logger = logging.getLogger(__name__)
 
 _engine: Optional[object] = None  # Will be RagEngine once loaded
 _chat_lock: asyncio.Lock = asyncio.Lock()
+_ingest_lock: asyncio.Lock = asyncio.Lock()
 _engine_loaded: bool = False
 
 
@@ -574,11 +575,17 @@ async def list_sources():
     for detail in details:
         sid = detail["source_id"]
         seen_ids.add(sid)
+        source_path = detail.get("source_path") or None
+        snapshot_path = detail.get("snapshot_path") or None
+        source_size_bytes = _safe_file_size(source_path)
+        snapshot_size_bytes = _safe_file_size(snapshot_path)
         sources.append(SourceInfo(
             source_id=sid,
             summary=detail.get("summary") or None,
-            source_path=detail.get("source_path") or None,
-            snapshot_path=detail.get("snapshot_path") or None,
+            source_path=source_path,
+            snapshot_path=snapshot_path,
+            source_size_bytes=source_size_bytes,
+            content_size_bytes=source_size_bytes or snapshot_size_bytes,
         ))
 
     # Add any source IDs that have chunks but no summary
@@ -610,44 +617,45 @@ async def ingest_source(request: IngestRequest):
         )
 
     try:
-        engine = await asyncio.to_thread(_get_engine)
+        async with _ingest_lock:
+            engine = await asyncio.to_thread(_get_engine)
 
-        # Run ingest in thread (blocking operation)
-        result = await asyncio.to_thread(
-            engine.ingest,  # type: ignore[union-attr]
-            file_path,
-            source_id=source_id,
-            summarize=request.summarize,
-        )
+            # Run ingest in thread (blocking operation)
+            result = await asyncio.to_thread(
+                engine.ingest,  # type: ignore[union-attr]
+                file_path,
+                source_id=source_id,
+                summarize=request.summarize,
+            )
 
-        # Create text snapshot for /content endpoint
-        snapshot_path = ""
-        try:
-            # Collect parent texts for the snapshot
-            storage = engine.storage  # type: ignore[union-attr]
-            parent_texts = storage.get_parent_texts_by_source(source_id=source_id)
-            if parent_texts:
-                full_text = "\n\n".join(parent_texts)
-                snapshot_path = await asyncio.to_thread(
-                    save_snapshot, source_id, full_text
-                )
-        except Exception as snap_exc:
-            logger.warning("Failed to create snapshot for %s: %s", source_id, snap_exc)
+            # Create text snapshot for /content endpoint
+            snapshot_path = ""
+            try:
+                # Collect parent texts for the snapshot
+                storage = engine.storage  # type: ignore[union-attr]
+                parent_texts = storage.get_parent_texts_by_source(source_id=source_id)
+                if parent_texts:
+                    full_text = "\n\n".join(parent_texts)
+                    snapshot_path = await asyncio.to_thread(
+                        save_snapshot, source_id, full_text
+                    )
+            except Exception as snap_exc:
+                logger.warning("Failed to create snapshot for %s: %s", source_id, snap_exc)
 
-        # Update the summary record with file paths (schema v2)
-        try:
-            storage = engine.storage  # type: ignore[union-attr]
-            summaries = storage.get_source_summaries()
-            summary_text = summaries.get(source_id, "")
-            if summary_text:
-                storage.upsert_source_summary(
-                    source_id=source_id,
-                    summary=summary_text,
-                    source_path=str(Path(file_path).resolve()),
-                    snapshot_path=snapshot_path,
-                )
-        except Exception as path_exc:
-            logger.warning("Failed to update source paths for %s: %s", source_id, path_exc)
+            # Update the summary record with file paths (schema v2)
+            try:
+                storage = engine.storage  # type: ignore[union-attr]
+                summaries = storage.get_source_summaries()
+                summary_text = summaries.get(source_id, "")
+                if summary_text:
+                    storage.upsert_source_summary(
+                        source_id=source_id,
+                        summary=summary_text,
+                        source_path=str(Path(file_path).resolve()),
+                        snapshot_path=snapshot_path,
+                    )
+            except Exception as path_exc:
+                logger.warning("Failed to update source paths for %s: %s", source_id, path_exc)
 
         return IngestResponse(
             source_id=result.source_id,
@@ -739,43 +747,44 @@ async def upload_source(
     logger.info("Saved upload to %s (%d bytes)", dest, len(contents))
 
     try:
-        engine = await asyncio.to_thread(_get_engine)
+        async with _ingest_lock:
+            engine = await asyncio.to_thread(_get_engine)
 
-        # Run ingest in thread (blocking operation)
-        result = await asyncio.to_thread(
-            engine.ingest,  # type: ignore[union-attr]
-            str(dest),
-            source_id=sid,
-            summarize=summarize,
-        )
+            # Run ingest in thread (blocking operation)
+            result = await asyncio.to_thread(
+                engine.ingest,  # type: ignore[union-attr]
+                str(dest),
+                source_id=sid,
+                summarize=summarize,
+            )
 
-        # Create text snapshot for /content endpoint
-        snapshot_path = ""
-        try:
-            storage = engine.storage  # type: ignore[union-attr]
-            parent_texts = storage.get_parent_texts_by_source(source_id=sid)
-            if parent_texts:
-                full_text = "\n\n".join(parent_texts)
-                snapshot_path = await asyncio.to_thread(
-                    save_snapshot, sid, full_text
-                )
-        except Exception as snap_exc:
-            logger.warning("Failed to create snapshot for %s: %s", sid, snap_exc)
+            # Create text snapshot for /content endpoint
+            snapshot_path = ""
+            try:
+                storage = engine.storage  # type: ignore[union-attr]
+                parent_texts = storage.get_parent_texts_by_source(source_id=sid)
+                if parent_texts:
+                    full_text = "\n\n".join(parent_texts)
+                    snapshot_path = await asyncio.to_thread(
+                        save_snapshot, sid, full_text
+                    )
+            except Exception as snap_exc:
+                logger.warning("Failed to create snapshot for %s: %s", sid, snap_exc)
 
-        # Update the summary record with file paths (schema v2)
-        try:
-            storage = engine.storage  # type: ignore[union-attr]
-            summaries = storage.get_source_summaries()
-            summary_text = summaries.get(sid, "")
-            if summary_text:
-                storage.upsert_source_summary(
-                    source_id=sid,
-                    summary=summary_text,
-                    source_path=str(dest.resolve()),
-                    snapshot_path=snapshot_path,
-                )
-        except Exception as path_exc:
-            logger.warning("Failed to update source paths for %s: %s", sid, path_exc)
+            # Update the summary record with file paths (schema v2)
+            try:
+                storage = engine.storage  # type: ignore[union-attr]
+                summaries = storage.get_source_summaries()
+                summary_text = summaries.get(sid, "")
+                if summary_text:
+                    storage.upsert_source_summary(
+                        source_id=sid,
+                        summary=summary_text,
+                        source_path=str(dest.resolve()),
+                        snapshot_path=snapshot_path,
+                    )
+            except Exception as path_exc:
+                logger.warning("Failed to update source paths for %s: %s", sid, path_exc)
 
         return IngestResponse(
             source_id=result.source_id,
@@ -841,6 +850,18 @@ def _detect_format(source_path: Optional[str]) -> str:
     if ext in {".md", ".markdown", ".mdx"}:
         return "markdown"
     return "text"
+
+
+def _safe_file_size(path: Optional[str]) -> Optional[int]:
+    if not path:
+        return None
+    try:
+        p = Path(path)
+        if not p.is_file():
+            return None
+        return p.stat().st_size
+    except Exception:
+        return None
 
 
 @app.get("/api/sources/{source_id}/content", response_model=SourceContentResponse)

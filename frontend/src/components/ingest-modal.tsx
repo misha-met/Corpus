@@ -11,7 +11,7 @@ export interface UploadRequest {
 interface IngestModalProps {
   onClose: () => void;
   /** Called when the user confirms upload. Modal closes immediately after. */
-  onStartUpload: (req: UploadRequest) => void;
+  onStartUpload: (reqs: UploadRequest[]) => void;
 }
 
 const ALLOWED_EXTENSIONS = [".pdf", ".md", ".markdown"];
@@ -27,8 +27,8 @@ function sanitizeSourceId(filename: string): string {
 }
 
 export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
-  const [file, setFile] = useState<File | null>(null);
-  const [sourceId, setSourceId] = useState("");
+  const [files, setFiles] = useState<File[]>([]);
+  const [sourceIds, setSourceIds] = useState<string[]>([]);
   const [summarize, setSummarize] = useState(true);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -60,14 +60,22 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
   }, []);
 
   const handleFileSelect = useCallback(
-    (f: File) => {
-      const error = validateFile(f);
-      if (error) {
-        setValidationError(error);
-        return;
+    (selected: FileList | File[]) => {
+      const incoming = Array.from(selected);
+      if (incoming.length === 0) return;
+
+      const valid: File[] = [];
+      for (const f of incoming) {
+        const error = validateFile(f);
+        if (error) {
+          setValidationError(`${f.name}: ${error}`);
+          return;
+        }
+        valid.push(f);
       }
-      setFile(f);
-      setSourceId(sanitizeSourceId(f.name));
+
+      setFiles(valid);
+      setSourceIds(valid.map((f) => sanitizeSourceId(f.name)));
       setValidationError(null);
     },
     [validateFile]
@@ -77,17 +85,40 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
     (e: React.DragEvent) => {
       e.preventDefault();
       setDragOver(false);
-      const f = e.dataTransfer.files[0];
-      if (f) handleFileSelect(f);
+      const dropped = e.dataTransfer.files;
+      if (dropped.length > 0) handleFileSelect(dropped);
     },
     [handleFileSelect]
   );
 
   const handleUpload = useCallback(() => {
-    if (!file || !sourceId.trim()) return;
-    onStartUpload({ file, sourceId: sourceId.trim(), summarize });
+    if (files.length === 0) return;
+
+    const normalizedSourceIds = files.map((file, idx) => {
+      const fromInput = sourceIds[idx]?.trim() ?? "";
+      return fromInput || sanitizeSourceId(file.name);
+    });
+
+    if (normalizedSourceIds.some((sid) => !sid)) {
+      setValidationError("Each file must have a non-empty Source ID.");
+      return;
+    }
+
+    const uniqueIds = new Set(normalizedSourceIds);
+    if (uniqueIds.size !== normalizedSourceIds.length) {
+      setValidationError("Source IDs must be unique across selected files.");
+      return;
+    }
+
+    const reqs: UploadRequest[] = files.map((file, idx) => ({
+      file,
+      sourceId: normalizedSourceIds[idx],
+      summarize,
+    }));
+
+    onStartUpload(reqs);
     onClose();
-  }, [file, sourceId, summarize, onStartUpload, onClose]);
+  }, [files, sourceIds, summarize, onStartUpload, onClose]);
 
   return (
     <div
@@ -128,7 +159,7 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
             className={`flex flex-col items-center justify-center gap-2 px-4 py-8 border-2 border-dashed rounded-xl cursor-pointer transition-colors ${
               dragOver
                 ? "border-blue-500 bg-blue-500/10"
-                : file
+                : files.length > 0
                 ? "border-green-600/50 bg-green-900/10"
                 : "border-gray-700 hover:border-gray-600 bg-gray-800/30"
             }`}
@@ -136,26 +167,31 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
             <input
               ref={fileInputRef}
               type="file"
+              multiple
               accept=".pdf,.md,.markdown"
               className="hidden"
               onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) handleFileSelect(f);
+                if (e.target.files && e.target.files.length > 0) {
+                  handleFileSelect(e.target.files);
+                }
                 // Reset so same file can be re-selected
                 e.target.value = "";
               }}
             />
 
-            {file ? (
+            {files.length > 0 ? (
               <>
                 <svg className="w-8 h-8 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
                 <p className="text-sm text-gray-200 font-medium truncate max-w-full">
-                  {file.name}
+                  {files.length === 1 ? files[0].name : `${files.length} files selected`}
                 </p>
                 <p className="text-xs text-gray-500">
-                  {(file.size / 1024).toFixed(0)} KB &middot; Click to change
+                  {files.length === 1
+                    ? `${(files[0].size / 1024).toFixed(0)} KB`
+                    : `${(files.reduce((total, f) => total + f.size, 0) / (1024 * 1024)).toFixed(1)} MB total`}
+                  {" "}&middot; Click to change
                 </p>
               </>
             ) : (
@@ -173,22 +209,55 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
             )}
           </div>
 
-          {/* Source ID input */}
-          <div>
-            <label className="block text-xs text-gray-400 mb-1.5">
-              Source ID
-            </label>
-            <input
-              type="text"
-              value={sourceId}
-              onChange={(e) => setSourceId(e.target.value)}
-              placeholder="Auto-generated from filename"
-              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50"
-            />
-            <p className="mt-1 text-[11px] text-gray-600">
-              Unique identifier. Letters, numbers, hyphens, underscores.
-            </p>
-          </div>
+          {/* Source ID input(s) */}
+          {files.length <= 1 ? (
+            <div>
+              <label className="block text-xs text-gray-400 mb-1.5">
+                Source ID
+              </label>
+              <input
+                type="text"
+                value={sourceIds[0] ?? ""}
+                onChange={(e) =>
+                  setSourceIds((prev) => {
+                    const next = [...prev];
+                    next[0] = e.target.value;
+                    return next;
+                  })
+                }
+                placeholder="Auto-generated from filename"
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50"
+              />
+              <p className="mt-1 text-[11px] text-gray-600">
+                Unique identifier. Letters, numbers, hyphens, underscores.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <p className="text-xs text-gray-400">Source IDs</p>
+              <div className="max-h-40 overflow-y-auto space-y-2 pr-1">
+                {files.map((file, idx) => (
+                  <div key={`${file.name}-${file.size}-${idx}`}>
+                    <label className="block text-[11px] text-gray-500 mb-1 truncate" title={file.name}>
+                      {file.name}
+                    </label>
+                    <input
+                      type="text"
+                      value={sourceIds[idx] ?? ""}
+                      onChange={(e) =>
+                        setSourceIds((prev) => {
+                          const next = [...prev];
+                          next[idx] = e.target.value;
+                          return next;
+                        })
+                      }
+                      className="w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Summarize checkbox */}
           <label className="flex items-center gap-2.5 cursor-pointer">
@@ -221,10 +290,13 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
           </button>
           <button
             onClick={handleUpload}
-            disabled={!file || !sourceId.trim()}
+            disabled={
+              files.length === 0 ||
+              sourceIds.some((sid) => !(sid ?? "").trim())
+            }
             className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium rounded-lg transition-colors disabled:cursor-not-allowed"
           >
-            Upload &amp; Ingest
+            {files.length > 1 ? `Upload & Ingest ${files.length} Files` : "Upload & Ingest"}
           </button>
         </div>
       </div>

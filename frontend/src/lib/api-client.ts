@@ -9,6 +9,8 @@ export interface SourceInfo {
   summary: string | null;
   source_path: string | null;
   snapshot_path: string | null;
+  source_size_bytes?: number | null;
+  content_size_bytes?: number | null;
 }
 
 export interface SourceListResponse {

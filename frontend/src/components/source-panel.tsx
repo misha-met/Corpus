@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { sourceApi, type SourceInfo } from "@/lib/api-client";
 import { IngestModal, type UploadRequest } from "@/components/ingest-modal";
 
@@ -26,14 +26,23 @@ export function SourcePanel({
   onSelectedSourceIdsChange,
   onCollapse,
 }: SourcePanelProps) {
+  type IngestState = "ingesting" | "queued";
+  type DisplaySource = SourceInfo & { ingestState?: IngestState };
+
   const [sources, setSources] = useState<SourceInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showIngestModal, setShowIngestModal] = useState(false);
   const [highlightSourceId, setHighlightSourceId] = useState<string | null>(null);
+  const [activeSourceId, setActiveSourceId] = useState<string | null>(null);
+  const [uploadQueue, setUploadQueue] = useState<UploadRequest[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
+  const [sourceContent, setSourceContent] = useState<Record<string, string>>({});
+  const [loadingContentId, setLoadingContentId] = useState<string | null>(null);
+  const [contentError, setContentError] = useState<string | null>(null);
   const [uploadStatus, setUploadStatus] = useState<
     | null
-    | { stage: "uploading"; fileName: string; sourceId: string }
+    | { stage: "uploading"; fileName: string; sourceId: string; queued: number }
     | { stage: "error"; fileName: string; message: string }
   >(null);
   const uploadDismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -60,32 +69,101 @@ export function SourcePanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** Start background upload after modal closes. */
+  function formatBytes(bytes?: number | null): string | null {
+    if (!bytes || bytes <= 0) return null;
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  /** Queue uploads; processing runs sequentially in an effect. */
   const handleStartUpload = useCallback(
-    async (req: UploadRequest) => {
+    (reqs: UploadRequest[]) => {
       setShowIngestModal(false);
-      setUploadStatus({ stage: "uploading", fileName: req.file.name, sourceId: req.sourceId });
+      if (reqs.length === 0) return;
+      setUploadQueue((prev) => [...prev, ...reqs]);
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (isUploading || uploadQueue.length === 0) return;
+
+    const current = uploadQueue[0];
+    const remaining = uploadQueue.length - 1;
+    setUploadQueue((prev) => prev.slice(1));
+    setIsUploading(true);
+    setUploadStatus({
+      stage: "uploading",
+      fileName: current.file.name,
+      sourceId: current.sourceId,
+      queued: remaining,
+    });
+
+    (async () => {
       try {
-        await sourceApi.uploadDocument(req.file, req.sourceId, req.summarize);
-        setUploadStatus(null);
-        // Refresh the source list
+        await sourceApi.uploadDocument(current.file, current.sourceId, current.summarize);
+        // Refresh the source list after each successful ingest
         const data = await sourceApi.listSources();
         setSources(data);
         onSelectedSourceIdsChange(data.map((s) => s.source_id));
-        // Briefly highlight the new source
-        setHighlightSourceId(req.sourceId);
+        // Briefly highlight + open the new source
+        setHighlightSourceId(current.sourceId);
+        setActiveSourceId(current.sourceId);
         if (uploadDismissTimer.current) clearTimeout(uploadDismissTimer.current);
         uploadDismissTimer.current = setTimeout(() => setHighlightSourceId(null), 3000);
       } catch (err) {
         setUploadStatus({
           stage: "error",
-          fileName: req.file.name,
+          fileName: current.file.name,
           message: err instanceof Error ? err.message : "Upload failed",
         });
+      } finally {
+        setIsUploading(false);
       }
-    },
-    [onSelectedSourceIdsChange]
-  );
+    })();
+  }, [isUploading, onSelectedSourceIdsChange, uploadQueue]);
+
+  useEffect(() => {
+    if (!isUploading && uploadQueue.length === 0 && uploadStatus?.stage === "uploading") {
+      setUploadStatus(null);
+    }
+  }, [isUploading, uploadQueue.length, uploadStatus]);
+
+  const pendingStateById = useMemo(() => {
+    const map = new Map<string, IngestState>();
+    if (uploadStatus?.stage === "uploading") {
+      map.set(uploadStatus.sourceId, "ingesting");
+    }
+    for (const queued of uploadQueue) {
+      if (!map.has(queued.sourceId)) {
+        map.set(queued.sourceId, "queued");
+      }
+    }
+    return map;
+  }, [uploadQueue, uploadStatus]);
+
+  const displaySources = useMemo<DisplaySource[]>(() => {
+    const list: DisplaySource[] = sources.map((s) => ({
+      ...s,
+      ingestState: pendingStateById.get(s.source_id),
+    }));
+
+    const known = new Set(list.map((s) => s.source_id));
+    for (const [sourceId, ingestState] of pendingStateById.entries()) {
+      if (known.has(sourceId)) continue;
+      list.push({
+        source_id: sourceId,
+        summary: ingestState === "queued" ? "In Ingest Queue" : "Ingesting...",
+        source_path: null,
+        snapshot_path: null,
+        source_size_bytes: null,
+        content_size_bytes: null,
+        ingestState,
+      });
+    }
+    return list;
+  }, [pendingStateById, sources]);
 
   const allSelected =
     sources.length > 0 &&
@@ -116,6 +194,14 @@ export function SourcePanel({
     try {
       await sourceApi.deleteSource(sourceId);
       setSources((prev) => prev.filter((s) => s.source_id !== sourceId));
+      setSourceContent((prev) => {
+        const next = { ...prev };
+        delete next[sourceId];
+        return next;
+      });
+      if (activeSourceId === sourceId) {
+        setActiveSourceId(null);
+      }
       onSelectedSourceIdsChange(
         selectedSourceIds.filter((id) => id !== sourceId)
       );
@@ -123,6 +209,28 @@ export function SourcePanel({
       setError(
         err instanceof Error ? err.message : "Failed to delete source"
       );
+    }
+  }
+
+  async function handleViewFullText(sourceId: string, e: React.MouseEvent) {
+    e.stopPropagation();
+    if (sourceContent[sourceId]) {
+      setSourceContent((prev) => {
+        const next = { ...prev };
+        delete next[sourceId];
+        return next;
+      });
+      return;
+    }
+    setContentError(null);
+    setLoadingContentId(sourceId);
+    try {
+      const content = await sourceApi.getContent(sourceId);
+      setSourceContent((prev) => ({ ...prev, [sourceId]: content.content }));
+    } catch (err) {
+      setContentError(err instanceof Error ? err.message : "Failed to load content");
+    } finally {
+      setLoadingContentId(null);
     }
   }
 
@@ -200,7 +308,7 @@ export function SourcePanel({
       </div>
 
       {/* Select all */}
-      {sources.length > 0 && (
+      {displaySources.length > 0 && (
         <div className="px-4 py-2 border-b border-gray-800/50">
           <label className="flex items-center gap-2.5 cursor-pointer group">
             <input
@@ -224,13 +332,13 @@ export function SourcePanel({
           </div>
         )}
 
-        {isLoading && sources.length === 0 && (
+        {isLoading && displaySources.length === 0 && (
           <div className="px-4 py-8 text-center text-sm text-gray-500">
             Loading sources...
           </div>
         )}
 
-        {!isLoading && sources.length === 0 && (
+        {!isLoading && displaySources.length === 0 && (
           <div className="px-4 py-8 text-center text-sm text-gray-500">
             <p>No sources ingested yet.</p>
             <p className="mt-2 text-xs text-gray-600">
@@ -253,6 +361,7 @@ export function SourcePanel({
                 </p>
                 <p className="text-xs text-blue-400/70 mt-0.5">
                   Chunking, embedding &amp; summarizing
+                  {uploadStatus.queued > 0 ? ` · ${uploadStatus.queued} queued` : ""}
                 </p>
               </div>
             </div>
@@ -282,81 +391,135 @@ export function SourcePanel({
               </button>
             </div>
           )}
-          {sources.map((source) => {
+          {displaySources.map((source) => {
             const isChecked = selectedSourceIds.includes(source.source_id);
             const isHighlighted = highlightSourceId === source.source_id;
+            const isActive = activeSourceId === source.source_id;
+            const isPending = source.ingestState === "ingesting" || source.ingestState === "queued";
+            const sizeLabel = formatBytes(source.content_size_bytes ?? source.source_size_bytes);
+            const hasContent = Boolean(sourceContent[source.source_id]);
             return (
               <div
                 key={source.source_id}
-                className={`flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-gray-800/60 transition-colors group cursor-pointer ${
+                className={`px-3 py-2.5 rounded-lg hover:bg-gray-800/60 transition-colors group cursor-pointer ${
                   isHighlighted ? "ring-2 ring-blue-500/60 bg-blue-900/20" : ""
                 }`}
-                onClick={() => handleToggleSource(source.source_id)}
+                onClick={() =>
+                  setActiveSourceId((prev) =>
+                    prev === source.source_id ? null : source.source_id
+                  )
+                }
                 role="button"
                 tabIndex={0}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
-                    handleToggleSource(source.source_id);
+                    setActiveSourceId((prev) =>
+                      prev === source.source_id ? null : source.source_id
+                    );
                   }
                 }}
               >
-                {/* PDF icon */}
-                <svg
-                  className="w-8 h-8 text-red-400 shrink-0"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                  strokeWidth={1.5}
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"
-                  />
-                </svg>
-
-                {/* Title */}
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-gray-200 truncate">
-                    {source.source_id}
-                  </p>
-                  {source.summary && (
-                    <p className="mt-0.5 text-xs text-gray-500 truncate">
-                      {source.summary}
-                    </p>
-                  )}
-                </div>
-
-                {/* Delete (hover) */}
-                <button
-                  onClick={(e) => handleDelete(source.source_id, e)}
-                  className="shrink-0 p-1 text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all"
-                  title="Delete source"
-                >
+                <div className="flex items-center gap-3">
+                  {/* PDF icon */}
                   <svg
-                    className="w-3.5 h-3.5"
+                    className="w-8 h-8 text-red-400 shrink-0"
                     fill="none"
                     viewBox="0 0 24 24"
                     stroke="currentColor"
-                    strokeWidth={2}
+                    strokeWidth={1.5}
                   >
                     <path
                       strokeLinecap="round"
                       strokeLinejoin="round"
-                      d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                      d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"
                     />
                   </svg>
-                </button>
 
-                {/* Checkbox */}
-                <input
-                  type="checkbox"
-                  checked={isChecked}
-                  onChange={() => handleToggleSource(source.source_id)}
-                  onClick={(e) => e.stopPropagation()}
-                  className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500 focus:ring-offset-0 focus:ring-1 cursor-pointer shrink-0"
-                />
+                  {/* Title */}
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-200 truncate">
+                      {source.source_id}
+                    </p>
+                    <p className="mt-0.5 text-xs text-gray-500 truncate">
+                      {isPending
+                        ? source.ingestState === "queued"
+                          ? "In Ingest Queue"
+                          : "Ingesting..."
+                        : sizeLabel ?? "Size unavailable"}
+                    </p>
+                  </div>
+
+                  {/* Delete (hover) */}
+                  {!isPending && (
+                    <button
+                      onClick={(e) => handleDelete(source.source_id, e)}
+                      className="shrink-0 p-1 text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all"
+                      title="Delete source"
+                    >
+                      <svg
+                        className="w-3.5 h-3.5"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        strokeWidth={2}
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                        />
+                      </svg>
+                    </button>
+                  )}
+
+                  {/* Checkbox */}
+                  <input
+                    type="checkbox"
+                    checked={isChecked}
+                    onChange={() => handleToggleSource(source.source_id)}
+                    onClick={(e) => e.stopPropagation()}
+                    disabled={isPending}
+                    className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500 focus:ring-offset-0 focus:ring-1 cursor-pointer shrink-0"
+                  />
+                </div>
+
+                {isActive && (
+                  <div className="mt-3 pl-11 pr-1 space-y-2">
+                    <div className="text-xs text-gray-300 whitespace-pre-wrap leading-relaxed max-h-28 overflow-y-auto rounded-md bg-gray-900/60 border border-gray-800 px-2 py-2">
+                      {source.ingestState === "queued"
+                        ? "In Ingest Queue"
+                        : source.ingestState === "ingesting"
+                        ? "Ingesting..."
+                        : source.summary?.trim() || "No summary available for this source."}
+                    </div>
+                    {!isPending && (
+                      <div className="flex items-center justify-between gap-2">
+                        <button
+                          onClick={(e) => handleViewFullText(source.source_id, e)}
+                          disabled={loadingContentId === source.source_id}
+                          className="px-2.5 py-1.5 text-xs rounded-md bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-200 disabled:opacity-60 disabled:cursor-not-allowed"
+                        >
+                          {hasContent
+                            ? "Hide full text"
+                            : loadingContentId === source.source_id
+                            ? "Loading..."
+                            : "View full text"}
+                        </button>
+                      </div>
+                    )}
+
+                    {contentError && loadingContentId !== source.source_id && (
+                      <p className="text-xs text-red-400">{contentError}</p>
+                    )}
+
+                    {!isPending && hasContent && (
+                      <pre className="text-xs text-gray-300 whitespace-pre-wrap max-h-48 overflow-y-auto rounded-md bg-gray-950 border border-gray-800 px-2 py-2">
+                        {sourceContent[source.source_id]}
+                      </pre>
+                    )}
+                  </div>
+                )}
               </div>
             );
           })}
@@ -365,7 +528,7 @@ export function SourcePanel({
 
       {/* Footer */}
       <div className="px-4 py-2 border-t border-gray-800 text-xs text-gray-600">
-        {sources.length} source{sources.length !== 1 ? "s" : ""} &middot;{" "}
+        {displaySources.length} source{displaySources.length !== 1 ? "s" : ""} &middot;{" "}
         {selectedSourceIds.length} selected
       </div>
 

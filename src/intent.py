@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from difflib import get_close_matches
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -85,6 +86,10 @@ _INTENT_PATTERNS: dict[Intent, list[re.Pattern]] = {
         re.compile(r"\bwhat\s+(do|can)\s+(we|i|you)\s+(have|see|access|read)\b", re.IGNORECASE),
         re.compile(r"\bwhat('s| is)\s+available\b", re.IGNORECASE),
         re.compile(r"\bwhat('s| is)\s+in\s+(the\s+)?(database|index|system)\b", re.IGNORECASE),
+        # Source/document selection across the corpus
+        re.compile(r"\bwhich\s+(of\s+)?(these|the)\s+(documents?|docs?|files?|sources?)\s+(is|are)\b", re.IGNORECASE),
+        re.compile(r"\bwhich\s+(documents?|docs?|files?|sources?)\s+(is|are)\b", re.IGNORECASE),
+        re.compile(r"\bwhich\s+(documents?|docs?|files?|sources?)\b.*\b(about|on|regarding|discuss(?:es|ing)|criti(?:que|ques|quing)|critic(?:ism|ize|izes|ized|izing))\b", re.IGNORECASE),
     ],
     # ---- FACTUAL: direct fact extraction (who/what/when/where/which) ----
     Intent.FACTUAL: [
@@ -202,6 +207,60 @@ _LOW_INFO_COMMON_WORDS = {
     "compare", "analyze", "critique", "document", "docs", "paper", "text", "about",
     "mean", "help", "understand", "list", "show", "tell", "overview", "details",
 }
+
+_INTENT_NORMALIZATION_LEXICON = {
+    "which", "what", "document", "documents", "doc", "docs", "source", "sources", "file", "files",
+    "about", "covers", "cover", "discuss", "discusses", "mention", "mentions", "regarding",
+    "critique", "criticism", "review", "overview", "summarize", "summarise",
+}
+
+
+def _normalize_for_intent(query: str) -> str:
+    """Lightweight typo-tolerant normalization for intent/routing decisions."""
+    if not query:
+        return ""
+
+    parts = re.split(r"(\W+)", query.lower())
+    normalized_parts: list[str] = []
+    for part in parts:
+        if not part or not part.isalpha() or len(part) < 3:
+            normalized_parts.append(part)
+            continue
+        if part in _INTENT_NORMALIZATION_LEXICON:
+            normalized_parts.append(part)
+            continue
+        match = get_close_matches(part, _INTENT_NORMALIZATION_LEXICON, n=1, cutoff=0.82)
+        normalized_parts.append(match[0] if match else part)
+    return "".join(normalized_parts)
+
+
+def is_source_selection_query(query: str) -> bool:
+    """Return True when the user asks which source/document matches a topic.
+
+    Uses typo-tolerant normalization first, then robust structural matching.
+    """
+    normalized = _normalize_for_intent(query).strip().lower()
+    if not normalized:
+        return False
+
+    has_doc_term = bool(
+        re.search(r"\b(doc|docs|document|documents|source|sources|file|files)\b", normalized)
+    )
+    if not has_doc_term:
+        return False
+
+    has_selector = bool(
+        re.search(r"\bwhich\b", normalized)
+        or re.search(r"\bwhich\s+(one|ones|of\s+these|of\s+the)\b", normalized)
+        or re.search(r"\bwhat\s+(doc|docs|document|documents|source|sources|file|files)\b", normalized)
+    )
+    has_topic_relation = bool(
+        re.search(
+            r"\b(cover|covers|covered|about|regarding|mention|mentions|discuss|discusses|review|reviews|critique|criticism|criticize|criticises|criticizes)\b",
+            normalized,
+        )
+    )
+    return has_selector or has_topic_relation
 
 
 # ── Structural signal patterns ────────────────────────────────────────────────
@@ -325,13 +384,14 @@ def _is_definition_style_query(query: str) -> bool:
 
 def _classify_heuristic(query: str) -> IntentResult:
     """Classify intent using regex pattern matching + structural signals."""
+    normalized_query = _normalize_for_intent(query)
     scores: dict[Intent, int] = {intent: 0 for intent in Intent}
     for intent, patterns in _INTENT_PATTERNS.items():
         for pattern in patterns:
-            if pattern.search(query):
+            if pattern.search(normalized_query):
                 scores[intent] += 1
 
-    _apply_structural_intent_signals(query, scores)
+    _apply_structural_intent_signals(normalized_query, scores)
 
     # ---- noun-phrase de-boost ----
     # "Chomsky's critique", "the critique of X" → the word "critique" is a
@@ -339,7 +399,7 @@ def _classify_heuristic(query: str) -> IntentResult:
     if scores[Intent.CRITIQUE] > 0:
         noun_critique = re.search(
             r"(?:\b\w+(?:'s|s)\s+|(?:the|a|an|this|that|his|her|their|its)\s+)critique\b",
-            query, re.IGNORECASE,
+            normalized_query, re.IGNORECASE,
         )
         if noun_critique:
             scores[Intent.CRITIQUE] = max(0, scores[Intent.CRITIQUE] - 1)
@@ -348,7 +408,7 @@ def _classify_heuristic(query: str) -> IntentResult:
                 noun_critique.group(),
             )
 
-    analyze_bias = _is_technical_how_why(query)
+    analyze_bias = _is_technical_how_why(normalized_query)
     if analyze_bias:
         analytical = [Intent.COMPARE, Intent.CRITIQUE, Intent.ANALYZE]
         best_analytical = max(analytical, key=lambda k: scores[k])
@@ -413,7 +473,7 @@ def _classify_heuristic(query: str) -> IntentResult:
 
 def is_low_information_query(query: str) -> bool:
     """Return True when query is likely underspecified or gibberish-like."""
-    normalized = query.strip().lower()
+    normalized = _normalize_for_intent(query).strip().lower()
     if not normalized:
         return True
 
@@ -608,7 +668,7 @@ class IntentClassifier:
             self._llm_tokenizer,
             prompt=formatted,
             max_tokens=60,
-            temp=0.0,
+            temperature=0.0,
         )
 
         parsed = _parse_llm_response(response)

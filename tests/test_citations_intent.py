@@ -12,6 +12,7 @@ from src.intent import (
     _classify_heuristic,
     _parse_llm_response,
     is_low_information_query,
+    is_source_selection_query,
 )
 from src.retrieval import (
     build_source_legend,
@@ -204,11 +205,13 @@ class TestIntentClassification:
             ("Show me all the sources", Intent.COLLECTION),
             ("What topics do the documents cover?", Intent.COLLECTION),
             ("Give me an overview of everything", Intent.COLLECTION),
+            ("Which of these docs is a critique of ChatGPT?", Intent.COLLECTION),
             # Structural comparative / analysis
             ("Differences between Skinner and Chomsky", Intent.COMPARE),
             ("Critique of Skinner in light of modern LLMs", Intent.COMPARE),
             ("Trace the chain Skinner -> Chomsky -> modern LLM criticism", Intent.ANALYZE),
             ("What is chomskys critique of skinner", Intent.ANALYZE),
+            ("whic document is abiut connectioism", Intent.COLLECTION),
         ],
     )
     def test_heuristic_classification(self, query: str, expected: Intent):
@@ -577,6 +580,7 @@ class TestCollectionIntent:
             "Describe all the sources",
             "What is in here?",
             "Overview of all documents",
+            "Which of these docs is a critique of ChatGPT?",
         ],
     )
     def test_collection_classification(self, query: str):
@@ -730,3 +734,18 @@ class TestLowInformationQueryDetection:
     )
     def test_low_information_detector(self, query: str, expected: bool):
         assert is_low_information_query(query) is expected
+
+
+class TestSourceSelectionRoutingGuard:
+    @pytest.mark.parametrize(
+        "query,expected",
+        [
+            ("Which of these docs covers a critique of ChatGPT?", True),
+            ("which of thse docs covers aa crituqe of chatgpt", True),
+            ("What source discusses reinforcement learning risks?", True),
+            ("Summarize the key points of this paper", False),
+            ("Explain this in simple terms", False),
+        ],
+    )
+    def test_source_selection_query_detector(self, query: str, expected: bool):
+        assert is_source_selection_query(query) is expected
