@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator, Optional
@@ -57,10 +58,14 @@ from .stream_protocol import (
     annotation_intent,
     annotation_sources,
     annotation_status,
+    encode_done,
     encode_error,
     encode_finish_message,
     encode_finish_step,
-    encode_text,
+    encode_message_start,
+    encode_text_delta,
+    encode_text_end,
+    encode_text_start,
     http_error_body,
     STREAM_HEADERS,
 )
@@ -192,10 +197,12 @@ async def health():
 
 
 def _encode_event(event: QueryEvent) -> Optional[str]:
-    """Convert a QueryEvent to an AI SDK UI message stream line.
+    """Convert a non-text QueryEvent to an AI SDK UI message stream line.
 
-    Returns None for events that don't need a protocol line (shouldn't happen,
-    but handles unexpected event types gracefully).
+    ``TextTokenEvent`` is handled separately in the stream generator to manage
+    the ``text-start`` / ``text-delta`` / ``text-end`` lifecycle.
+
+    Returns None for events that don't produce a protocol line.
     """
     if isinstance(event, StatusEvent):
         return annotation_status(event.status)
@@ -206,7 +213,8 @@ def _encode_event(event: QueryEvent) -> Optional[str]:
     elif isinstance(event, CitationListEvent):
         return annotation_citations(event.citations)
     elif isinstance(event, TextTokenEvent):
-        return encode_text(event.token)
+        # Should not reach here — handled statefully in the consumer loop.
+        return None
     elif isinstance(event, ErrorEvent):
         if event.metadata:
             return (
@@ -254,10 +262,17 @@ async def _chat_stream_generator(
     query_text = last_message.get_text().strip()
 
     if not query_text:
+        yield encode_message_start(f"msg-{uuid.uuid4()}")
         yield encode_error("Empty query")
         yield encode_finish_step("error")
         yield encode_finish_message("error")
+        yield encode_done()
         return
+
+    # AI SDK v6: message-start must precede all message content including annotations.
+    # A unique ID is required — a hardcoded constant causes a collision on the second message.
+    msg_id = f"msg-{uuid.uuid4()}"
+    yield encode_message_start(msg_id)
 
     # Send an immediate chunk so the client gets a first byte before model loading.
     # _get_engine() in the producer can take 30–60+ seconds on first request.
@@ -309,6 +324,11 @@ async def _chat_stream_generator(
     # Use a timeout so we can yield keepalive bytes during long model loads and avoid client timeout
     first_event = True
     keepalive_interval = 8.0
+
+    # Track the text block state (AI SDK v6 text-start / text-delta / text-end lifecycle)
+    text_id = "text-0"
+    in_text_block = False
+
     try:
         while True:
             try:
@@ -322,15 +342,29 @@ async def _chat_stream_generator(
                 logger.info("Chat consumer: first event from producer (stream connected)")
                 first_event = False
 
-            chunk = _encode_event(event)
-            if chunk:
-                yield chunk
+            if isinstance(event, TextTokenEvent):
+                # Open the text block on the first token
+                if not in_text_block:
+                    yield encode_text_start(text_id)
+                    in_text_block = True
+                yield encode_text_delta(event.token, text_id)
+            else:
+                # Close the text block before any non-text event (citations, finish, etc.)
+                if in_text_block:
+                    yield encode_text_end(text_id)
+                    in_text_block = False
+                chunk = _encode_event(event)
+                if chunk:
+                    yield chunk
 
     except asyncio.CancelledError:
         stop_event.set()
         logger.info("Chat stream consumer cancelled")
     except Exception as exc:
         logger.exception("Chat stream consumer error: %s", exc)
+        if in_text_block:
+            yield encode_text_end(text_id)
+            in_text_block = False
         yield annotation_error("INTERNAL", str(exc))
         yield encode_error(str(exc))
         yield encode_finish_step("error")
@@ -342,6 +376,9 @@ async def _chat_stream_generator(
             await asyncio.wait_for(producer_task, timeout=5.0)
         except (asyncio.TimeoutError, Exception):
             pass
+
+    # Terminal frame required by AI SDK v6
+    yield encode_done()
 
 
 @app.post("/api/chat")
@@ -411,6 +448,12 @@ async def _query_stream_generator(
 
     producer_task = loop.run_in_executor(None, _producer)
 
+    text_id = "text-0"
+    in_text_block = False
+
+    # Unique ID per response — a hardcoded constant causes a collision on the second message.
+    yield encode_message_start(f"msg-{uuid.uuid4()}")
+
     try:
         while True:
             if await request.is_disconnected():
@@ -419,17 +462,31 @@ async def _query_stream_generator(
 
             event = await queue.get()
             if event is _SENTINEL:
-                return
+                # Close any open text block before ending
+                if in_text_block:
+                    yield encode_text_end(text_id)
+                break
 
-            chunk = _encode_event(event)
-            if chunk:
-                yield chunk
+            if isinstance(event, TextTokenEvent):
+                if not in_text_block:
+                    yield encode_text_start(text_id)
+                    in_text_block = True
+                yield encode_text_delta(event.token, text_id)
+            else:
+                if in_text_block:
+                    yield encode_text_end(text_id)
+                    in_text_block = False
+                chunk = _encode_event(event)
+                if chunk:
+                    yield chunk
     finally:
         stop_event.set()
         try:
             await asyncio.wait_for(producer_task, timeout=5.0)
         except (asyncio.TimeoutError, Exception):
             pass
+
+    yield encode_done()
 
 
 @app.post("/api/query", response_model=QueryResponse)

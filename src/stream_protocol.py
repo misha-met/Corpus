@@ -37,13 +37,57 @@ def _encode_sse_payload(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
-def encode_text(token: str) -> str:
-    """Encode a text chunk.
+def encode_message_start(message_id: str = "msg-0") -> str:
+    """Emit the mandatory message-start frame required by AI SDK v6 UI message streams.
 
-    >>> encode_text("Hello")
-    'data: {"type": "text", "value": "Hello"}\\n\\n'
+    Must be the first frame sent on a new response (after any pre-stream annotations).
+
+    >>> encode_message_start("msg-123")
+    'data: {"type": "start", "messageId": "msg-123"}\\n\\n'
     """
-    return _encode_sse_payload({"type": "text", "value": token})
+    return _encode_sse_payload({"type": "start", "messageId": message_id})
+
+
+def encode_text_start(text_id: str = "text-0") -> str:
+    """Emit the text-start frame that opens a streaming text block.
+
+    Must precede any ``encode_text_delta`` calls with the same *text_id*.
+
+    >>> encode_text_start("text-0")
+    'data: {"type": "text-start", "id": "text-0"}\\n\\n'
+    """
+    return _encode_sse_payload({"type": "text-start", "id": text_id})
+
+
+def encode_text_delta(delta: str, text_id: str = "text-0") -> str:
+    """Emit one streaming text token.
+
+    >>> encode_text_delta("Hello", "text-0")
+    'data: {"type": "text-delta", "id": "text-0", "delta": "Hello"}\\n\\n'
+    """
+    return _encode_sse_payload({"type": "text-delta", "id": text_id, "delta": delta})
+
+
+def encode_text_end(text_id: str = "text-0") -> str:
+    """Emit the text-end frame that closes a streaming text block.
+
+    Must follow all ``encode_text_delta`` calls with the same *text_id*.
+
+    >>> encode_text_end("text-0")
+    'data: {"type": "text-end", "id": "text-0"}\\n\\n'
+    """
+    return _encode_sse_payload({"type": "text-end", "id": text_id})
+
+
+# Legacy alias kept for any code still calling encode_text directly.
+# Emits all three frames inline — only safe for single-token responses.
+def encode_text(token: str) -> str:  # noqa: D401
+    """Deprecated: emit text-start + text-delta + text-end as a single call.
+
+    Prefer the stateful encode_text_start / encode_text_delta / encode_text_end
+    helpers in streaming contexts.
+    """
+    return encode_text_start() + encode_text_delta(token) + encode_text_end()
 
 
 def encode_data(payload: list[dict[str, Any]]) -> str:
@@ -79,16 +123,18 @@ def encode_finish_message(
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
 ) -> str:
-    """Encode stream finish with optional usage stats."""
-    payload = {
-        "type": "finish",
-        "finishReason": finish_reason,
-        "usage": {
-            "promptTokens": prompt_tokens,
-            "completionTokens": completion_tokens,
-        },
-    }
-    return _encode_sse_payload(payload)
+    """Encode stream finish.
+
+    AI SDK v6 UI message stream spec mandates ``{"type": "finish"}`` with no
+    extra fields. ``finishReason`` and ``usage`` are kept as parameters so
+    callers remain unchanged, but they are not included in the wire payload
+    (the SDK rejects any additional top-level fields on the finish frame).
+
+    >>> encode_finish_message()
+    'data: {"type": "finish"}\\n\\n'
+    """
+    # Usage is available in server logs via FinishEvent; not sent on wire.
+    return _encode_sse_payload({"type": "finish"})
 
 
 def encode_finish_step(
@@ -182,6 +228,17 @@ def annotation_citations(citations: list[dict[str, Any]]) -> str:
 # ---------------------------------------------------------------------------
 # HTTP error body helper (for non-streaming error responses)
 # ---------------------------------------------------------------------------
+
+
+def encode_done() -> str:
+    """Emit the terminal ``[DONE]`` SSE frame required by AI SDK v6.
+
+    Must be the very last line of the stream.
+
+    >>> encode_done()
+    'data: [DONE]\\n\\n'
+    """
+    return "data: [DONE]\n\n"
 
 
 def http_error_body(code: str, message: str) -> dict[str, Any]:

@@ -3,6 +3,8 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { sourceApi, type SourceInfo } from "@/lib/api-client";
 import { IngestModal, type UploadRequest } from "@/components/ingest-modal";
+import { CitationPanelReader } from "@/components/citation-viewer-modal";
+import { useAppState, useAppDispatch } from "@/context/app-context";
 
 interface SourcePanelProps {
   selectedSourceIds: string[];
@@ -28,6 +30,9 @@ export function SourcePanel({
 }: SourcePanelProps) {
   type IngestState = "ingesting" | "queued";
   type DisplaySource = SourceInfo & { ingestState?: IngestState };
+
+  const { activeCitation } = useAppState();
+  const dispatch = useAppDispatch();
 
   const [sources, setSources] = useState<SourceInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -234,18 +239,27 @@ export function SourcePanel({
     }
   }
 
+  /* ── Citation reader mode — slides in over the file list ── */
+  if (activeCitation !== null) {
+    return (
+      <div className="flex flex-col h-full overflow-hidden">
+        <CitationPanelReader />
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
-        <h2 className="text-sm font-semibold text-gray-200 tracking-wide">
+      <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: "rgba(255,255,255,0.08)" }}>
+        <h2 className="text-sm font-semibold text-foreground tracking-wide">
           Sources
         </h2>
         <div className="flex items-center gap-1">
           <button
             onClick={fetchSources}
             disabled={isLoading}
-            className="p-1.5 text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded transition-colors disabled:opacity-50"
+            className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-white/5 rounded transition-colors disabled:opacity-50"
             title="Refresh sources"
           >
             <svg
@@ -264,7 +278,7 @@ export function SourcePanel({
           </button>
           <button
             onClick={onCollapse}
-            className="p-1.5 text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded transition-colors"
+            className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-white/5 rounded transition-colors"
             title="Collapse sidebar"
           >
             <svg
@@ -288,7 +302,7 @@ export function SourcePanel({
       <div className="px-4 pt-3 pb-2">
         <button
           onClick={() => setShowIngestModal(true)}
-          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 rounded-xl text-sm text-gray-300 hover:text-gray-100 transition-colors"
+          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 rounded-xl text-sm text-muted-foreground hover:text-foreground font-medium transition-colors"
         >
           <svg
             className="w-4 h-4"
@@ -309,15 +323,15 @@ export function SourcePanel({
 
       {/* Select all */}
       {displaySources.length > 0 && (
-        <div className="px-4 py-2 border-b border-gray-800/50">
+        <div className="px-4 py-2 border-b" style={{ borderColor: "rgba(255,255,255,0.08)" }}>
           <label className="flex items-center gap-2.5 cursor-pointer group">
             <input
               type="checkbox"
               checked={allSelected}
               onChange={handleSelectAll}
-              className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500 focus:ring-offset-0 focus:ring-1 cursor-pointer"
+              className="w-4 h-4 rounded border-white/20 bg-white/5 accent-indigo-500 cursor-pointer"
             />
-            <span className="text-xs text-gray-400 group-hover:text-gray-300 transition-colors">
+            <span className="text-xs text-muted-foreground group-hover:text-foreground transition-colors">
               Select all sources
             </span>
           </label>
@@ -401,7 +415,7 @@ export function SourcePanel({
             return (
               <div
                 key={source.source_id}
-                className={`px-3 py-2.5 rounded-lg hover:bg-gray-800/60 transition-colors group cursor-pointer ${
+                className={`px-3 py-2.5 rounded-lg hover:bg-white/5 transition-colors group cursor-pointer ${
                   isHighlighted ? "ring-2 ring-blue-500/60 bg-blue-900/20" : ""
                 }`}
                 onClick={() =>
@@ -438,10 +452,10 @@ export function SourcePanel({
 
                   {/* Title */}
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-gray-200 truncate">
+                    <p className="text-sm font-medium text-foreground truncate">
                       {source.source_id}
                     </p>
-                    <p className="mt-0.5 text-xs text-gray-500 truncate">
+                    <p className="mt-0.5 text-xs text-muted-foreground/70 truncate">
                       {isPending
                         ? source.ingestState === "queued"
                           ? "In Ingest Queue"
@@ -454,7 +468,7 @@ export function SourcePanel({
                   {!isPending && (
                     <button
                       onClick={(e) => handleDelete(source.source_id, e)}
-                      className="shrink-0 p-1 text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all"
+                      className="shrink-0 p-1 text-muted-foreground/40 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all"
                       title="Delete source"
                     >
                       <svg
@@ -480,7 +494,7 @@ export function SourcePanel({
                     onChange={() => handleToggleSource(source.source_id)}
                     onClick={(e) => e.stopPropagation()}
                     disabled={isPending}
-                    className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500 focus:ring-offset-0 focus:ring-1 cursor-pointer shrink-0"
+                    className="w-4 h-4 rounded border-white/20 bg-white/5 accent-indigo-500 cursor-pointer shrink-0 disabled:opacity-50"
                   />
                 </div>
 
@@ -527,7 +541,7 @@ export function SourcePanel({
       </div>
 
       {/* Footer */}
-      <div className="px-4 py-2 border-t border-gray-800 text-xs text-gray-600">
+      <div className="px-4 py-2 border-t text-xs text-muted-foreground/50" style={{ borderColor: "rgba(255,255,255,0.08)" }}>
         {displaySources.length} source{displaySources.length !== 1 ? "s" : ""} &middot;{" "}
         {selectedSourceIds.length} selected
       </div>

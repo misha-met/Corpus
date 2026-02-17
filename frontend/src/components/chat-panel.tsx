@@ -129,7 +129,7 @@ export function ChatPanel({
       streamingTextRef.current = "";
       setMessages((prev) => [...prev, userMessage, assistantMessage]);
       setIsStreaming(true);
-      dispatch({ type: "CHAT_START" });
+      dispatch({ type: "QUERY_STARTED" });
       dispatch({ type: "SET_STATUS", status: "Sending query..." });
 
       const controller = new AbortController();
@@ -270,7 +270,7 @@ export function ChatPanel({
         pendingCitationsRef.current = null;
         abortRef.current = null;
         setIsStreaming(false);
-        dispatch({ type: "CHAT_FINISH" });
+        dispatch({ type: "QUERY_FINISHED" });
       }
     },
     [dispatch, selectedSourceIds]
@@ -420,8 +420,6 @@ export function ChatPanel({
                     ) : (
                       <ChatMarkdown
                         content={text}
-                        citations={isUser ? undefined : message.citations}
-                        onCitationClick={isUser ? undefined : onCitationClick}
                         className={isUser ? "text-white" : "text-gray-100"}
                       />
                     )}

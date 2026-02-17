@@ -3,16 +3,15 @@
 import ReactMarkdown from "react-markdown";
 import { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { CitationEntry, CitationPayload } from "@/lib/api-client";
+import type { Citation } from "@/lib/event-parser";
+import { useAppState, useAppDispatch } from "@/context/app-context";
 
 interface ChatMarkdownProps {
   content: string;
   className?: string;
-  citations?: CitationEntry[];
-  onCitationClick?: (payload: CitationPayload) => void;
 }
 
-function addCitationLinks(content: string, citations?: CitationEntry[]): string {
+function addCitationLinks(content: string, citations?: Citation[]): string {
   if (!citations || citations.length === 0) return content;
 
   const withChunkMarkersLinked = content.replace(/\[CHUNK\s+(\d+)\](?!\()/gi, (fullMatch, numberText) => {
@@ -55,13 +54,13 @@ function extractCitationIndex(href?: string): number | null {
 export function ChatMarkdown({
   content,
   className = "",
-  citations,
-  onCitationClick,
 }: ChatMarkdownProps) {
+  const { citations } = useAppState();
+  const dispatch = useAppDispatch();
   const markdownContent = addCitationLinks(content, citations);
 
   return (
-    <div className={`text-sm leading-relaxed min-h-[1.5em] break-words ${className}`}>
+    <div className={`text-base leading-[1.65] min-h-[1.5em] break-words ${className}`}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         urlTransform={(url) => {
@@ -69,7 +68,7 @@ export function ChatMarkdown({
           return defaultUrlTransform(url);
         }}
         components={{
-          p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+          p: ({ children }) => <p className="mb-[1em] last:mb-0">{children}</p>,
           ul: ({ children }) => <ul className="list-disc pl-5 mb-2 space-y-1">{children}</ul>,
           ol: ({ children }) => <ol className="list-decimal pl-5 mb-2 space-y-1">{children}</ol>,
           li: ({ children }) => <li>{children}</li>,
@@ -85,36 +84,36 @@ export function ChatMarkdown({
           a: ({ href, children }) => {
             const index = extractCitationIndex(href);
             if (index !== null) {
-              const citation =
-                citations && Number.isInteger(index) && index >= 0 && index < citations.length
-                  ? citations[index]
-                  : undefined;
-              const payload: CitationPayload | undefined = citation
-                ? {
-                    source_id: citation.source_id,
-                    chunk_id: citation.chunk_id,
-                    page_number: citation.page_number,
-                    display_page: citation.display_page,
-                    header_path: citation.header_path,
-                    chunk_text: citation.chunk_text,
-                    highlight_text: citation.highlight_text,
-                  }
-                : undefined;
+              // Look up citation by 1-based number (index is already 0-based, so add 1)
+              const citation: Citation | undefined = citations.find(
+                (c) => c.number === index + 1,
+              );
 
               return (
-                <button
-                  type="button"
-                  onClick={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    if (payload && onCitationClick) onCitationClick(payload);
-                  }}
-                  className="inline-flex items-center justify-center w-4 h-4 text-[10px] font-bold text-blue-400 hover:text-blue-300 bg-blue-500/20 hover:bg-blue-500/30 rounded-full align-super ml-0.5 mr-0.5 cursor-pointer transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-                  title={payload ? `View source: ${payload.source_id}` : "Source"}
-                  disabled={!payload || !onCitationClick}
-                >
-                  {children}
-                </button>
+                <sup className="inline-flex items-center ml-0.5 mr-0.5">
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      if (citation) {
+                        dispatch({ type: "SET_ACTIVE_CITATION", citation });
+                      }
+                    }}
+                    className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-semibold text-indigo-300 hover:text-indigo-100 rounded-full cursor-pointer transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+                    style={{
+                      background: "rgba(99,102,241,0.15)",
+                      border: "1px solid rgba(99,102,241,0.35)",
+                      lineHeight: 1,
+                    }}
+                    title={citation ? `View source: ${citation.source_id}` : "Source (no metadata)"}
+                    disabled={!citation}
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(99,102,241,0.28)"; }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(99,102,241,0.15)"; }}
+                  >
+                    {children}
+                  </button>
+                </sup>
               );
             }
 

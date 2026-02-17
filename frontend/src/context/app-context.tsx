@@ -1,3 +1,17 @@
+/**
+ * AppContext — custom application state for DH Notebook.
+ *
+ * What this context owns:
+ *   - Per-query transient state: statusMessage, lastIntent, lastSources, citations
+ *   - Persistent UI state: errorMessage, isLockBusy, activeCitation
+ *
+ * What this context deliberately does NOT own:
+ *   - Busy / running state: read `useThread((t) => t.isRunning)` from
+ *     @assistant-ui/react instead — it is the authoritative source of whether
+ *     the assistant is currently generating a response.
+ *   - Message history: owned and rendered entirely by the assistant-ui runtime.
+ *   - Abort control: managed by the useChatRuntime / useThreadRuntime APIs.
+ */
 "use client";
 
 import {
@@ -8,13 +22,16 @@ import {
   type ReactNode,
 } from "react";
 
+import type { Citation } from "@/lib/event-parser";
+
+// Re-export Citation so consumers can import it from this module if convenient
+export type { Citation };
+
 // ---------------------------------------------------------------------------
 // State shape
 // ---------------------------------------------------------------------------
 
 export interface AppState {
-  /** Whether a chat request is currently in-flight */
-  isBusy: boolean;
   /** Human-readable status from stream annotations */
   statusMessage: string;
   /** Error message to display (cleared on next send) */
@@ -25,15 +42,20 @@ export interface AppState {
   lastIntent: { intent: string; confidence: number; method: string } | null;
   /** Source IDs from latest query */
   lastSources: string[];
+  /** Citation list from the latest query's CitationListEvent */
+  citations: Citation[];
+  /** The citation the user most recently clicked — read by CitationViewerModal */
+  activeCitation: Citation | null;
 }
 
 const initialState: AppState = {
-  isBusy: false,
   statusMessage: "",
   errorMessage: "",
   isLockBusy: false,
   lastIntent: null,
   lastSources: [],
+  citations: [],
+  activeCitation: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -41,13 +63,27 @@ const initialState: AppState = {
 // ---------------------------------------------------------------------------
 
 export type AppAction =
-  | { type: "CHAT_START" }
-  | { type: "CHAT_FINISH" }
+  /**
+   * QUERY_STARTED — dispatched when a new query stream begins.
+   * Resets all per-query state (statusMessage, lastIntent, lastSources,
+   * citations, errorMessage, isLockBusy) so stale data from the previous
+   * query is cleared before new stream events arrive.
+   * Note: busy/running state is NOT tracked here — use
+   * `useThread((t) => t.isRunning)` from @assistant-ui/react instead.
+   */
+  | { type: "QUERY_STARTED" }
+  /**
+   * QUERY_FINISHED — dispatched when the stream completes.
+   * Clears the statusMessage left over from the last stream annotation.
+   */
+  | { type: "QUERY_FINISHED" }
   | { type: "SET_STATUS"; status: string }
   | { type: "SET_ERROR"; message: string; isLockBusy?: boolean }
   | { type: "CLEAR_ERROR" }
   | { type: "SET_INTENT"; intent: string; confidence: number; method: string }
-  | { type: "SET_SOURCES"; sourceIds: string[] };
+  | { type: "SET_SOURCES"; sourceIds: string[] }
+  | { type: "SET_CITATIONS"; citations: Citation[] }
+  | { type: "SET_ACTIVE_CITATION"; citation: Citation | null };
 
 // ---------------------------------------------------------------------------
 // Reducer
@@ -55,28 +91,27 @@ export type AppAction =
 
 function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
-    case "CHAT_START":
+    case "QUERY_STARTED":
       return {
         ...state,
-        isBusy: true,
         statusMessage: "Sending...",
         errorMessage: "",
         isLockBusy: false,
         lastIntent: null,
         lastSources: [],
+        citations: [],
       };
-    case "CHAT_FINISH":
+    case "QUERY_FINISHED":
       return {
         ...state,
-        isBusy: false,
         statusMessage: "",
       };
+
     case "SET_STATUS":
       return { ...state, statusMessage: action.status };
     case "SET_ERROR":
       return {
         ...state,
-        isBusy: false,
         statusMessage: "",
         errorMessage: action.message,
         isLockBusy: action.isLockBusy ?? false,
@@ -94,6 +129,10 @@ function appReducer(state: AppState, action: AppAction): AppState {
       };
     case "SET_SOURCES":
       return { ...state, lastSources: action.sourceIds };
+    case "SET_CITATIONS":
+      return { ...state, citations: action.citations };
+    case "SET_ACTIVE_CITATION":
+      return { ...state, activeCitation: action.citation };
     default:
       return state;
   }
