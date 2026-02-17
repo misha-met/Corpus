@@ -163,6 +163,41 @@ class StorageEngine:
             self._ensure_fts_index(force_rebuild=True)
             logger.info("Refreshed dirty FTS index before hybrid search")
 
+    def get_child_vector_dimension(self) -> Optional[int]:
+        """Return child vector dimension if available, otherwise None."""
+        if self._table is None:
+            return None
+        try:
+            field = self._table.schema.field("vector")
+        except Exception:
+            return None
+
+        field_type = field.type
+        list_size = getattr(field_type, "list_size", None)
+        if isinstance(list_size, int) and list_size > 0:
+            return int(list_size)
+
+        value_type = getattr(field_type, "value_type", None)
+        nested_list_size = getattr(value_type, "list_size", None)
+        if isinstance(nested_list_size, int) and nested_list_size > 0:
+            return int(nested_list_size)
+        return None
+
+    def reset_all_tables(self) -> None:
+        """Drop all managed tables and clear in-memory handles."""
+        for table_name in (self._table_name, self._PARENTS_TABLE, self._SUMMARIES_TABLE):
+            try:
+                self._db.drop_table(table_name)
+                logger.warning("Dropped LanceDB table '%s'", table_name)
+            except Exception:
+                pass
+
+        self._table = None
+        self._parents = None
+        self._summaries = None
+        self._fts_dirty = False
+        self._pending_fts_rows = 0
+
     def add_parents(self, parents: Iterable[ParentChunk]) -> None:
         records = [
             {

@@ -43,7 +43,7 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
             return ModelConfig(
                 mode="regular",
                 llm_model="mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
-                embedding_model="BAAI/bge-m3",
+                embedding_model="mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
                 reranker_model="jinaai/jina-reranker-v3-mlx",
                 embedding_device="cpu",
                 quantization="4-bit",
@@ -66,7 +66,7 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
             return ModelConfig(
                 mode="regular",
                 llm_model="mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
-                embedding_model="BAAI/bge-m3",
+                embedding_model="mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
                 reranker_model="jinaai/jina-reranker-v3-mlx",
                 embedding_device="cpu",
                 quantization="4-bit",
@@ -86,7 +86,7 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
             return ModelConfig(
                 mode="regular",
                 llm_model="mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
-                embedding_model="BAAI/bge-m3",
+                embedding_model="mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
                 reranker_model="jinaai/jina-reranker-v3-mlx",
                 embedding_device="cpu",
                 quantization="4-bit",
@@ -116,7 +116,7 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
         return ModelConfig(
             mode="power-deep-research",
             llm_model="mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit",
-            embedding_model="BAAI/bge-m3",
+            embedding_model="mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
             reranker_model="jinaai/jina-reranker-v3-mlx",
             embedding_device="cpu",
             quantization="4-bit",
@@ -138,7 +138,7 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
         return ModelConfig(
             mode="turbo",
             llm_model="mlx-community/Ministral-3-3B-Instruct-2512-4bit",
-            embedding_model="BAAI/bge-m3",
+            embedding_model="mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
             reranker_model="jinaai/jina-reranker-v3-mlx",
             embedding_device="cpu",
             quantization="4-bit",

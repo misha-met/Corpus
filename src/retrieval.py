@@ -264,6 +264,10 @@ class RetrievalEngine:
         timing = TimingMetrics()
         total_start = time.perf_counter()
 
+        t0 = time.perf_counter()
+        _ = self._get_query_embedding(query)
+        timing.query_embedding_ms = (time.perf_counter() - t0) * 1000
+
         # Stage 1: LanceDB native hybrid search (replaces dense + sparse + RRF)
         t0 = time.perf_counter()
         fused = self._hybrid_search(query, k_fused, source_id=source_id)

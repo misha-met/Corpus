@@ -19,6 +19,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from .config import CITATIONS_ENABLED_DEFAULT, ModelConfig, select_mode_config
 from .generation import build_messages
+from .embeddings import MlxEmbeddingModel
 from .generator import (
     BudgetPackResult,
     GenerationConfig,
@@ -398,7 +399,6 @@ class RagEngine:
                 "huggingface_hub",
                 "lancedb",
                 "urllib3",
-                "sentence_transformers",
                 "filelock",
                 "fsspec",
             ):
@@ -444,14 +444,35 @@ class RagEngine:
             return self._embedding_model
         logger.info("_ensure_embedding_model: loading...")
         self._on_status("Loading embedding model...")
-        from sentence_transformers import SentenceTransformer
-
-        self._embedding_model = SentenceTransformer(
+        self._embedding_model = MlxEmbeddingModel(
             self._model_config.embedding_model,
-            device=self._model_config.embedding_device,
+            batch_size=16,
+            max_length=512,
         )
+        self._validate_embedding_storage_compatibility(self._embedding_model)
         logger.info("_ensure_embedding_model: done")
         return self._embedding_model
+
+    def _validate_embedding_storage_compatibility(self, embedding_model: Any) -> None:
+        existing_dim = self._storage.get_child_vector_dimension()
+        if existing_dim is None:
+            return
+        try:
+            sample = embedding_model.encode(["dimension probe"], normalize_embeddings=True)
+            model_dim = len(sample[0]) if sample else None
+        except Exception as exc:
+            logger.warning("Unable to probe embedding dimension: %s", exc)
+            return
+
+        if model_dim is None or model_dim == existing_dim:
+            return
+
+        logger.warning(
+            "Embedding dimension changed (existing=%d, new=%d). Existing LanceDB vectors are incompatible; resetting tables for re-ingest.",
+            existing_dim,
+            model_dim,
+        )
+        self._storage.reset_all_tables()
 
     def _ensure_reranker(self) -> Any:
         if not self._model_config.reranker_enabled:
@@ -486,28 +507,27 @@ class RagEngine:
         """Pre-load embedding + reranker in parallel (call once at startup)."""
         if not self._model_config.reranker_enabled:
             self._on_status("Loading retrieval models (embedding only)...")
-            from sentence_transformers import SentenceTransformer
-
-            self._embedding_model = SentenceTransformer(
+            self._embedding_model = MlxEmbeddingModel(
                 self._model_config.embedding_model,
-                device=self._model_config.embedding_device,
+                batch_size=16,
+                max_length=512,
             )
+            self._validate_embedding_storage_compatibility(self._embedding_model)
             self._reranker = None
             self._on_status("Retrieval models loaded.")
             return
 
         self._on_status("Loading retrieval models (embedding + reranker)...")
-        from sentence_transformers import SentenceTransformer
-
         from .reranker import JinaRerankerMLX
 
         embed_result: list[Any] = [None]
         reranker_result: list[Any] = [None]
 
         def _load_embed() -> None:
-            embed_result[0] = SentenceTransformer(
+            embed_result[0] = MlxEmbeddingModel(
                 self._model_config.embedding_model,
-                device=self._model_config.embedding_device,
+                batch_size=16,
+                max_length=512,
             )
 
         def _load_reranker() -> None:
@@ -521,6 +541,7 @@ class RagEngine:
             pool.shutdown(wait=True)
 
         self._embedding_model = embed_result[0]
+        self._validate_embedding_storage_compatibility(self._embedding_model)
         self._reranker = reranker_result[0]
         self._on_status("Retrieval models loaded.")
 
