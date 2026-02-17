@@ -86,7 +86,7 @@ export interface StreamEvent {
     | "token"
     | "complete"
     | "error";
-  data: unknown;
+  data: Record<string, unknown>;
 }
 
 function getBackendApiBase(): string {
@@ -157,7 +157,8 @@ export async function* queryStreaming(
 
     try {
       const parsed = JSON.parse(rawData);
-      return { event: eventType as StreamEvent["event"], data: parsed };
+      const data = typeof parsed === "object" && parsed !== null ? parsed : { raw: parsed };
+      return { event: eventType as StreamEvent["event"], data };
     } catch {
       return { event: eventType as StreamEvent["event"], data: { raw: rawData } };
     }

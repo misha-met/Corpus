@@ -189,8 +189,8 @@ class StorageEngine:
             try:
                 self._db.drop_table(table_name)
                 logger.warning("Dropped LanceDB table '%s'", table_name)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Could not drop table '%s': %s", table_name, exc)
 
         self._table = None
         self._parents = None
@@ -270,6 +270,19 @@ class StorageEngine:
             for key, value in metadata.items()
             if value is not None and not (isinstance(value, str) and value == "")
         }
+
+    @staticmethod
+    def _row_to_metadata(row: dict[str, Any]) -> dict[str, Any]:
+        """Extract and clean standard metadata fields from a LanceDB row."""
+        meta = {
+            "source_id": row.get("source_id", ""),
+            "page_number": row.get("page_number"),
+            "page_label": row.get("page_label"),
+            "display_page": row.get("display_page"),
+            "header_path": row.get("header_path", ""),
+            "parent_id": row.get("parent_id", ""),
+        }
+        return StorageEngine._clean_metadata(meta)
 
     def add_children(
         self,
@@ -382,17 +395,10 @@ class StorageEngine:
                     child_id = row.get("id")
                     if not isinstance(child_id, str):
                         continue
-                    meta = {
-                        "source_id": row.get("source_id", ""),
-                        "page_number": row.get("page_number"),
-                        "page_label": row.get("page_label"),
-                        "display_page": row.get("display_page"),
-                        "header_path": row.get("header_path", ""),
-                        "parent_id": row.get("parent_id", ""),
-                    }
-                    meta = self._clean_metadata(meta)
+                    meta = self._row_to_metadata(row)
                     result[child_id] = {"text": row.get("text", ""), "metadata": meta}
-        except Exception:
+        except Exception as exc:
+            logger.error("Failed to fetch children by ids: %s", exc)
             return {}
         return result
 
@@ -468,15 +474,7 @@ class StorageEngine:
 
         results: list[dict[str, Any]] = []
         for rank, row in enumerate(rows, start=1):
-            meta = {
-                "source_id": row.get("source_id", ""),
-                "page_number": row.get("page_number"),
-                "page_label": row.get("page_label"),
-                "display_page": row.get("display_page"),
-                "header_path": row.get("header_path", ""),
-                "parent_id": row.get("parent_id", ""),
-            }
-            meta = self._clean_metadata(meta)
+            meta = self._row_to_metadata(row)
             results.append({
                 "id": row.get("id", ""),
                 "text": row.get("text", ""),

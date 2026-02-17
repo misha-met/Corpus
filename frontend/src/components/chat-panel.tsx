@@ -125,23 +125,6 @@ export function ChatPanel({
         timestamp: Date.now(),
       };
 
-      const historyMessages = [
-        ...messagesRef.current,
-        userMessage,
-      ]
-        .map((message) => {
-          const content = getMessageText(message).trim();
-          if (!content) return null;
-          return {
-            role: message.role,
-            content,
-          };
-        })
-        .filter(
-          (item): item is { role: "user" | "assistant"; content: string } =>
-            item !== null
-        );
-
       pendingCitationsRef.current = null;
       streamingTextRef.current = "";
       setMessages((prev) => [...prev, userMessage, assistantMessage]);
@@ -174,7 +157,6 @@ export function ChatPanel({
         for await (const event of queryStreaming(text, {
           sourceIds: selectedSourceIds.length > 0 ? selectedSourceIds : undefined,
           citationsEnabled: true,
-          messages: historyMessages,
           signal: controller.signal,
         })) {
           switch (event.event) {

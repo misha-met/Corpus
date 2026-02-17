@@ -2,138 +2,338 @@
 
 ## 1. Core Architecture Overview
 
-The application is now a **full-stack offline RAG system** composed of:
+The application is a **full-stack offline RAG system** designed for local-first document analysis on Apple Silicon. All inference runs on-device via MLX -- no cloud APIs, no internet required after initial model download.
 
-- **FastAPI backend** (`src/api.py`) exposing ingest, source management, and query endpoints
-- **Next.js frontend** (`frontend/`) with source panel, chat panel, and citation viewer
-- **Decoupled RAG engine** (`src/rag_engine.py`) reusable by CLI and API
-- **Hybrid retrieval pipeline** (LanceDB ANN + FTS with native RRF)
-- **Mode-aware retrieval pathing** (including a low-latency `turbo` path)
-- **Optional inline citations** for source-grounded responses
+**Components:**
+
+- **FastAPI backend** (`src/api.py`) -- REST + SSE streaming for ingest, source management, and query
+- **Next.js frontend** (`frontend/`) -- two-panel chat UI with source management, streaming responses, and citation viewer
+- **Decoupled RAG engine** (`src/rag_engine.py`) -- shared by CLI and API, orchestrates the full pipeline
+- **Hybrid retrieval pipeline** (`src/retrieval.py`) -- LanceDB ANN + BM25 FTS with RRF fusion, Jina v3 reranking
+- **MLX inference stack** -- generator (`src/generator.py`), embeddings (`src/embeddings.py`), reranker (`src/reranker.py`)
+- **Mode-aware configuration** (`src/config.py`) -- RAM-based auto-scaling across three operating modes
+- **Inline academic citations** -- source-grounded responses with chunk-level references
 
 ---
 
 ## 2. Technology Stack
 
-- **LLM Inference:** `mlx-lm` (Metal-optimized Apple Silicon inference)
-- **Embeddings:** `sentence-transformers` (CPU device to preserve VRAM)
-- **Re-ranking:** `jinaai/jina-reranker-v3-mlx` (MLX-native listwise reranker)
-- **Storage:** `lancedb` + `pyarrow` (vector + FTS hybrid retrieval, parent/source tables)
-- **Backend API:** `fastapi`, `uvicorn`, `sse-starlette`, `python-multipart`
-- **Frontend:** `next.js` (React/TypeScript app in `frontend/`)
-- **Tokenizer compatibility dependency:** `mistral-common`
+| Layer | Technology | Notes |
+|-------|-----------|-------|
+| LLM Inference | `mlx-lm` (Metal-native) | KVCache support, streaming, thinking-block filtering |
+| Embeddings | `mlx-lm` via `MlxEmbeddingModel` wrapper | Mean-pooled hidden states with L2 normalization |
+| Re-ranking | `jinaai/jina-reranker-v3-mlx` | Listwise MLX-native reranker (Qwen3-0.6B backbone) |
+| Storage | `lancedb` + `pyarrow` | Vector ANN + FTS hybrid search with native RRF |
+| Backend API | `fastapi`, `uvicorn`, `sse-starlette`, `python-multipart` | SSE streaming + multipart upload |
+| Frontend | `next.js 16` (App Router), React 19, TypeScript 5 | Tailwind CSS 4, react-markdown |
+| Tokenizer | `mistral-common` | Compatibility dependency for certain model families |
 
 ---
 
-## 3. Core Architecture Modules
+## 3. Module Map
 
-### Module A: Data Model
+### 3.1 Data Models (`src/models.py`)
 
 Hierarchical chunk structure for retrieval efficiency and context expansion:
 
-- **ParentChunk:** ~1000–1500 tokens, canonical context text in `parent_chunks`
-- **ChildChunk:** ~200–300 tokens, overlapping retrieval units in `child_chunks`
-- **Metadata:** `source_id`, `parent_id`, `page_number`, `display_page`, `header_path`, etc.
+- **`Metadata`** -- `source_id`, `parent_id`, `page_number`, `page_label`, `display_page`, `header_path`
+- **`ParentChunk`** -- ~1000-1500 tokens, full paragraph context; UUID-based `id`, `text`, `metadata`
+- **`ChildChunk`** -- ~200-300 tokens, overlapping retrieval units; references parent via `metadata.parent_id`
 
-### Module B: Storage Engine (LanceDB)
+All dataclasses are frozen (immutable) with UUID generation at creation.
 
-Unified LanceDB-backed storage with three core tables:
+### 3.2 Storage Engine (`src/storage.py`)
 
-- **`child_chunks`**: vectors + FTS, queried with native hybrid search + RRF
-- **`parent_chunks`**: parent text for post-retrieval context expansion
-- **`source_summaries`**: per-source summaries and source/snapshot paths
+Unified LanceDB-backed storage managing three table types:
 
-### Module C: Retrieval Pipeline
+| Table | Purpose | Key Columns |
+|-------|---------|-------------|
+| `child_chunks` | Vectors + FTS, hybrid-searched | `id`, `text`, `vector`, `source_id`, `parent_id`, `page_number`, `header_path` |
+| `parent_chunks` | Parent text for context expansion | `parent_id`, `source_id`, `text`, page metadata |
+| `source_summaries` | Per-source metadata (schema v2) | `source_id`, `summary`, `source_path`, `snapshot_path` |
 
-1. **Hybrid Search**: single LanceDB hybrid query (vector ANN + BM25 FTS + RRF)
-2. **Early Parent Dedup**: keep highest-scored child per `parent_id`
-3. **Conditional Rerank**:
-   - `regular` / `power-deep-research`: rerank top candidates with Jina v3
-   - `turbo`: reranker bypassed
-4. **Threshold Filtering + Safety Net**: keep scores above threshold, then enforce minimum docs
-5. **Final Dedup / Boilerplate Filter**
-6. **Conditional Context Expansion**:
-   - enabled modes: expand children to parents
-   - `turbo`: keep child text (no parent expansion)
-7. **Token Budget Packing** for generation context
+**Key capabilities:**
+- Native hybrid search (vector ANN + BM25 + RRF) via single LanceDB call
+- FTS index management with configurable rebuild policies (`immediate`, `deferred`, `batch`)
+- Automatic schema migration for v2 summary columns
+- SQL-safe literal escaping and chunked IN clauses (>256 values)
+- `_row_to_metadata()` helper for consistent metadata extraction across all query paths
 
-### Module D: RAG Engine Layer
+### 3.3 Document Ingestion (`src/ingest.py`)
 
-`RagEngine` centralizes ingest/query orchestration and exposes:
+**Chunking parameters:**
+- Parent chunks: 1000-1500 tokens (1200 target, 150 overlap)
+- Child chunks: 200-300 tokens (250 target, 50 overlap)
 
-- **Synchronous query path** returning structured `QueryResult`
-- **Streaming query event path** (`query_events`) for frontend token/status streams
-- **Latency reporting integration** (returned in `QueryResult.latency_report`)
+**Markdown ingestion:** Parses headers (H1-H6) into sections with hierarchical `header_path` (e.g., "Document > Chapter 1 > Section A"), then chunks each section into parent/child pairs.
 
-### Module E: Application Layer
+**PDF ingestion:** Four-strategy fallback chain, each producing `_PageData` tuples that feed into a shared `_chunk_pages()` helper:
 
-- **CLI** (`src/cli.py`): local query/ingest workflows (`--mode`, `--cite`, `--latency`)
-- **API** (`src/api.py`):
-  - `POST /api/query` (JSON or SSE stream)
-  - `POST /api/chat` (text stream for chat transport)
-  - source CRUD + upload/ingest endpoints
-- **Frontend** (`frontend/src`): two-panel UI (sources + chat), streaming tokens, citation modal
+1. **pypdf** -- per-page text extraction with page labels
+2. **pdfminer.six** -- whole-document fallback (no page boundaries)
+3. **PyMuPDF (fitz)** -- per-page alternative extraction
+4. **OCR (pytesseract + pdf2image)** -- rasterize-and-OCR, one page at a time to limit memory
+
+Text cleaning: `clean_ocr_artifacts()` merges hyphenated line breaks.
+
+**Summarization:** Optional LLM-generated summary (max 12,000 chars context), stored in `source_summaries` table.
+
+### 3.4 Embeddings (`src/embeddings.py`)
+
+`MlxEmbeddingModel` wraps MLX models as SentenceTransformer-compatible encoders:
+
+- Forward through backbone `model.model.hidden_states`
+- Mean pooling with attention mask: `sum(hidden * mask) / mask_sum`
+- L2 normalization on CPU for numerical stability
+- Batch processing (default batch_size=16, max_length=512)
+- LRU-cached query vectors (max 100 queries) in the retrieval engine
+
+### 3.5 Retrieval Pipeline (`src/retrieval.py`)
+
+Six-stage pipeline orchestrated by `RetrievalEngine`:
+
+```
+query_text
+  |
+  v
+[1. Query Embedding] -- MlxEmbeddingModel.encode()
+  |
+  v
+[2. LanceDB Hybrid Search] -- vector ANN + BM25 FTS + RRF fusion
+  |                           returns top_k_fused candidates
+  v
+[3. Parent Dedup] -- keep highest-scored child per parent_id
+  |
+  v
+[4. Rerank] -- Jina v3 listwise reranker (skipped in turbo mode)
+  |             replaces fusion score with cosine similarity score
+  v
+[5. Threshold Filter] -- score > threshold, safety net: min_docs guaranteed
+  |
+  v
+[6. Context Expansion] -- fetch parent text (skipped in turbo mode)
+  |
+  v
+List[RetrievalResult] with text, metadata, scores, optional parent_text
+```
+
+Boilerplate filtering removes known LLM-speak ("as an AI", "as a language model", etc.) from retrieved chunks.
+
+### 3.6 Reranker (`src/reranker.py`)
+
+`JinaRerankerMLX` -- drop-in FlagReranker replacement, MLX-native:
+
+- **Backbone:** Qwen3-0.6B (28 layers, 1024 hidden) loaded via `mlx_lm`
+- **Projector:** Linear(1024->512) -> ReLU -> Linear(512->512), loaded from `projector.safetensors`
+- **Scoring:** Listwise -- single forward pass for all query-doc pairs, cosine similarity between projected embeddings
+- **Budget enforcement:** Truncates docs to 384 tokens, binary-searches prompt budget (120K tokens max)
+- **Prompt format:** `<passage id="N">...doc<|embed_token|></passage>...<query>...query<|rerank_token|></query>`
+
+### 3.7 Generator (`src/generator.py`)
+
+`MlxGenerator` -- MLX-based text generation with streaming:
+
+- **Model loading:** `mlx_lm.load()` with tokenizer special-token handling
+- **KVCache:** Uses `make_prompt_cache` if available in mlx_lm, graceful degradation
+- **Streaming:** `generate_chat_stream()` yields tokens with:
+  - Incremental `<think>...</think>` block filtering
+  - On-the-fly stop-token detection (regex pattern matching with boundary guards)
+  - 500-char buffer limit to prevent unbounded accumulation
+- **Repetition penalty:** Native mlx-lm `make_logits_processors()` or fallback pure-MLX ops
+- **Adaptive defaults:** Temperature/top_p/repetition_penalty tuned by model size (<30B, 30-70B, 70B+)
+- **Token budget packing:** Greedy packing with early termination (3 consecutive failures), optional sentence-boundary truncation
+
+### 3.8 Intent Classification (`src/intent.py`)
+
+Two-stage classifier with heuristic-first design:
+
+**Stage 1 -- Heuristic (regex + structural signals):**
+- 8 intents: `OVERVIEW`, `SUMMARIZE`, `EXPLAIN`, `ANALYZE`, `COMPARE`, `CRITIQUE`, `FACTUAL`, `COLLECTION`
+- ~90 regex patterns across all intents
+- Structural signal boosting: corpus scope, command verbs, comparative structures, technical how/why
+- Typo tolerance via `difflib.get_close_matches(cutoff=0.82)`
+- Confidence levels: 0.85 (strong, 2+ hits), 0.70 (single hit), 0.50 (weak), 0.40 (fallback)
+
+**Stage 2 -- LLM fallback:**
+- Triggers when heuristic confidence < 0.70
+- Uses dedicated intent model (default: `mlx-community/LFM2-8B-A1B-4bit`)
+- JSON output: `{"intent": "...", "confidence": 0.0-1.0}`
+- Final gate: demotes to OVERVIEW if confidence < 0.60
+
+### 3.9 Prompt Construction (`src/generation.py`)
+
+Intent-aware message builder producing chat-format messages:
+
+- **System prompt:** Core rules (context-only, specific answers, paragraph formatting) + intent-specific instructions
+- **8 instruction profiles:** Each defines `task`, `format`, `tone` (e.g., ANALYZE = "6-8 focused paragraphs, 60-100 words each, analytical, objective, scholarly")
+- **Citation rules:** When enabled, adds mandatory `[N]` inline citation format
+- **Source legend:** Maps source IDs to display names when they differ
+- **Output:** `[{role: "system", content: ...}, {role: "user", content: context + question}]`
+
+### 3.10 RAG Engine (`src/rag_engine.py`)
+
+Central orchestrator consumed by both CLI and API:
+
+- **`RagEngine`**: Lazy-loads models on first query (embedding, reranker, generator, intent classifier)
+- **`query()`**: Synchronous path returning `QueryResult` (answer, intent, citations, metrics, latency)
+- **`query_events()`**: Streaming path yielding `QueryEvent` objects (status, intent, sources, citations, tokens, errors, finish)
+- **`ingest()`**: Ingests document, embeds chunks, optionally summarizes
+- **Output sanitization:** `_sanitize_output()` strips instruction leakage ("Important:", "Task:", "Format:", "Tone:"), filler phrases, and deduplicates repeated halves (>85% similarity)
+- **Heuristic query expansion:** `_expand_query()` appends intent-specific static terms (controlled by `enable_query_expansion` flag)
+- **Offline mode:** `_enable_offline_if_cached()` sets `HF_HUB_OFFLINE=1` when all models are cached locally
+- **Metal cache management:** Explicit `mx.clear_cache()` to release GPU memory between phases
+
+### 3.11 Event System (`src/query_events.py`, `src/stream_protocol.py`)
+
+**Query events** (frozen dataclasses):
+- `StatusEvent`, `IntentEvent`, `SourcesEvent`, `TextTokenEvent`, `CitationListEvent`, `ErrorEvent`, `FinishEvent`
+
+**Stream protocol** (AI SDK Data Stream Protocol v1):
+- Type codes: `0` (text), `2` (data), `3` (error), `8` (annotation), `d` (finish_message), `e` (finish_step)
+- Line format: `code:json_value\n`
+- Headers: `Content-Type: text/plain; charset=utf-8`, `X-Vercel-AI-Data-Stream: v1`
+
+### 3.12 API Layer (`src/api.py`)
+
+FastAPI application with streaming support:
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/health` | GET | Engine status check |
+| `/api/chat` | POST | Streaming chat (AI SDK text/plain format) |
+| `/api/query` | POST | Query with optional SSE stream (`stream=true`) |
+| `/api/sources` | GET | List ingested sources with metadata |
+| `/api/sources/ingest` | POST | Ingest document by file path |
+| `/api/sources/upload` | POST | Multipart file upload + ingest (50MB max, .pdf/.md) |
+| `/api/sources/{id}` | DELETE | Delete source + all chunks + cache |
+| `/api/sources/{id}/content` | GET | Full document text (original -> snapshot fallback) |
+| `/api/sources/{id}/chunk/{cid}` | GET | Chunk detail for citation viewer |
+
+**Concurrency model:** Single-user lock (`chat_lock`) for exclusive access. Background thread executor runs `query_events()`, pushes events to asyncio.Queue via `loop.call_soon_threadsafe()`. Client disconnect detection via `should_stop` callback.
+
+**File handling:** Uploads saved to `data/uploads/`, text snapshots cached in `data/source_cache/` for content fallback.
+
+### 3.13 Source Cache (`src/source_cache.py`)
+
+Caches full-text snapshots so `/content` endpoint works even if original files are moved/deleted:
+
+- `save_snapshot()` -- writes text to `data/source_cache/{sanitized_id}.txt`
+- `resolve_content()` -- resolution order: original file -> snapshot -> None
+- `read_original_file()` -- handles both text and PDF (via PyMuPDF extraction)
+
+### 3.14 CLI (`src/cli.py`)
+
+Thin wrapper around `RagEngine` for terminal workflows:
+
+- `ingest FILE --source-id ID [--summarize] [--mode MODE]`
+- `query TEXT [--source-id ID] [--cite|--no-cite] [--mode MODE] [--latency] [--intent INTENT]`
+- Prints: hardware config, retrieval metrics, answer with intent/confidence, optional latency breakdown
+
+### 3.15 Metrics & Latency (`src/metrics.py`, `src/latency.py`)
+
+**Retrieval metrics:** Budget utilization, per-stage timing, reranker score distributions, threshold/safety-net stats, deduplication reduction.
+
+**Latency profiler:** Context-manager based wall-clock profiler (`with profiler.span("stage"):`), outputs ASCII bar chart breakdown. Zero-cost when disabled.
 
 ---
 
-## 4. RAG Configuration and Modes
+## 4. Frontend Architecture
 
-### Operating Modes
+### 4.1 Technology & Routing
 
-The system supports **three user-selectable modes** (`turbo`, `regular`, `power-deep-research`).
-`regular` auto-scales internally by detected RAM tier.
+- **Framework:** Next.js 16 App Router (single route: `/`)
+- **Styling:** Tailwind CSS 4 with dark theme (`bg-gray-950`, blue accents)
+- **State management:** React Context + useReducer (dual-context pattern: state + dispatch)
+- **Streaming:** AsyncGenerator consuming SSE events from `/api/query`
 
-| Mode | LLM Model | Quantization | Context Window | Retrieval Budget | RAM Requirement |
-|------|-----------|--------------|----------------|------------------|-----------------|
-| `turbo` | Ministral-3-3B-Instruct-2512-4bit (MLX) | 4-bit | 8K | 4K | 16GB+ |
-| `regular` (32GB) | Qwen3-30B-A3B-Instruct-2507-4bit | 4-bit | 16K | 8K | 32GB |
-| `regular` (48-63GB) | Qwen3-30B-A3B-Instruct-2507-4bit | 4-bit | 64K | 32K | 48GB |
-| `regular` (64GB+) | Qwen3-30B-A3B-Instruct-2507-4bit | 4-bit | 64K | 48K | 64GB |
-| `power-deep-research` | Qwen3-Next-80B-A3B-Instruct-4bit | 4-bit | 48K | 40K | 64GB |
+### 4.2 Component Tree
 
-#### Mode Selection Precedence
+```
+Page (app/page.tsx)
+  AppProvider (context/app-context.tsx)
+    AppContent
+      SourcePanel (30% width)
+        Source list with select/expand/delete
+        IngestModal (drag-drop upload)
+        CitationViewerModal (overlay)
+          DocumentRenderer
+            MarkdownRenderer | PlainTextRenderer
+      ChatPanel (70% width)
+        Message list (user blue / assistant gray bubbles)
+          ChatMarkdown (citation-aware react-markdown)
+        Input bar with source count badge + send/stop toggle
+```
 
-1. **CLI flag**: `--mode turbo|regular|power-deep-research`
-2. **Environment variable**: `RAG_MODE=<mode>`
-3. **Auto-detection**: defaults to `regular` and RAM-aware parameter scaling
+### 4.3 State Shape (`AppState`)
 
-#### Retrieval Parameters by Mode
+```typescript
+{
+  isBusy: boolean;           // Request in-flight
+  statusMessage: string;     // Pipeline status from stream
+  errorMessage: string;      // Error display
+  isLockBusy: boolean;       // Server 429 status
+  lastIntent: { intent, confidence, method } | null;
+  lastSources: string[];     // Source IDs from latest query
+}
+```
 
-| Parameter | Turbo | Regular (32GB) | Regular (48-63GB) | Regular Plus (64GB+) | Deep-Research |
-|-----------|-------|----------------|-------------------|----------------------|---------------|
+### 4.4 API Client (`lib/api-client.ts`)
+
+- `sourceApi` singleton -- typed methods for all source CRUD operations
+- `queryStreaming()` -- AsyncGenerator yielding `StreamEvent` objects from SSE
+- Direct backend URL for uploads (bypasses Next.js dev proxy ~30s timeout)
+- `StreamEvent.data` typed as `Record<string, unknown>` with runtime guard for non-object JSON
+
+### 4.5 Key Frontend Patterns
+
+- **Sequential upload queue:** Processes uploads one at a time to avoid timeouts, with per-file status
+- **Citation linking:** `ChatMarkdown` converts `[CHUNK N]` / `[N]` patterns to clickable citation links
+- **Fuzzy text highlighting:** `text-highlighter.ts` uses progressive degradation (full -> prefix -> suffix matching) to find and `<mark>` cited text in documents
+- **50ms streaming throttle:** Token accumulation in ref, batched state updates via setTimeout
+- **AbortController:** Stop button cancels in-flight query stream
+
+---
+
+## 5. Configuration & Modes
+
+### 5.1 Operating Modes
+
+Three user-selectable modes with RAM-aware auto-scaling within `regular`:
+
+| Mode | LLM Model | Context Window | Retrieval Budget | RAM |
+|------|-----------|----------------|------------------|-----|
+| `turbo` | Ministral-3-3B-Instruct-4bit | 8K | 4K | 16GB+ |
+| `regular` (32GB) | Qwen3-30B-A3B-Instruct-4bit | 16K | 8K | 32GB |
+| `regular` (48-63GB) | Qwen3-30B-A3B-Instruct-4bit | 64K | 32K | 48GB |
+| `regular` (64GB+) | Qwen3-30B-A3B-Instruct-4bit | 64K | 48K | 64GB |
+| `power-deep-research` | Qwen3-Next-80B-A3B-Instruct-4bit | 48K | 40K | 64GB |
+
+All modes share: Qwen3-Embedding-0.6B-4bit-DWQ (embeddings) + jinaai/jina-reranker-v3-mlx (reranker).
+
+### 5.2 Mode Selection Precedence
+
+1. CLI flag: `--mode turbo|regular|power-deep-research`
+2. Environment variable: `RAG_MODE=<mode>`
+3. Auto-detection: defaults to `regular` with RAM-based parameter scaling
+
+Legacy mode names (`high`, `efficiency`, `power-fast`, etc.) are mapped to current modes with deprecation warning.
+
+### 5.3 Retrieval Parameters by Mode
+
+| Parameter | Turbo | Regular (32GB) | Regular (48-63GB) | Regular (64GB+) | Deep-Research |
+|-----------|-------|----------------|-------------------|-----------------|---------------|
+| `top_k_dense` | 40 | 100 | 100 | 200 | 400 |
 | `top_k_fused` | 20 | 50 | 50 | 100 | 200 |
-| `top_k_rerank` | Disabled in pipeline | 20 | 20 | 40 | 60 |
+| `top_k_rerank` | 20 (disabled) | 20 | 20 | 40 | 60 |
 | `top_k_final` | 3 | 5 | 5 | 8 | 8 |
+| `reranker_threshold` | 0.01 | 0.05 | 0.05 | 0.04 | 0.04 |
+| `reranker_min_docs` | 3 | 3 | 3 | 4 | 4 |
+| Reranker enabled | No | Yes | Yes | Yes | Yes |
+| Context expansion | No | Yes | Yes | Yes | Yes |
 
-#### Turbo Retrieval Path
+### 5.4 System Detection
 
-`turbo` mode is optimized for lowest latency:
-
-- reranker disabled
-- context expansion disabled
-- lower retrieval budget and context window
-- thresholds applied on fused retrieval score
-
-#### Threshold Filtering
-
-| Mode | Threshold Score | Minimum Documents |
-|------|----------------|-------------------|
-| `turbo` | 0.01 (fused score) | 3 |
-| `regular` (32-63GB) | 0.05 (rerank score) | 3 |
-| `regular` (64GB+) | 0.04 (rerank score) | 4 |
-| `power-deep-research` | 0.04 (rerank score) | 4 |
-
----
-
-## 5. Token Budget Packing
-
-The system uses greedy packing to maximize context utility within token limits:
-
-1. Priority-order packing (post-retrieval ranking order)
-2. Stop after 3 consecutive non-fitting documents
-3. Sentence-boundary truncation fallback for oversized docs
-4. MLX tokenizer-based token counting
-5. Index preservation for metadata/citation alignment
+RAM detection cascade: `psutil` -> macOS `sysctl -n hw.memsize` -> Linux `os.sysconf`. Result cached globally.
 
 ---
 
@@ -154,53 +354,123 @@ When citations are enabled, chunks are wrapped as:
 [CHUNK END]
 ```
 
-The system also builds a source legend when source IDs differ from display names.
+The system builds a source legend when source IDs differ from display names.
 
 ### Streaming Citation Events
 
-During streaming query execution, a structured citation list is emitted as a dedicated event so the frontend can bind numbered references to source/chunk metadata.
+During streaming query execution, a structured citation list is emitted as a `CitationListEvent` so the frontend can bind numbered references to source/chunk metadata. The frontend `ChatMarkdown` component converts `[CHUNK N]` and `[N]` patterns into clickable citation links that open the `CitationViewerModal` with fuzzy text highlighting.
 
 ---
 
-## 7. Streaming and Protocols
+## 7. Data Flows
 
-The backend supports two stream styles:
+### Query Flow (Streaming)
 
-1. **SSE query stream** (`/api/query` with `stream=true`) emitting typed events:
-   - `status`, `intent`, `sources`, `citations`, `token`, `error`, `complete`
-2. **Text stream chat endpoint** (`/api/chat`) for chat transport compatibility
+```
+Frontend POST /api/query {stream:true}
+  |
+  v
+api.py: background thread calls rag_engine.query_events()
+  |
+  +--> IntentClassifier.classify(query) -> IntentResult
+  |      yields: StatusEvent, IntentEvent
+  |
+  +--> RetrievalEngine.search(query) -> List[RetrievalResult]
+  |      yields: StatusEvent, SourcesEvent
+  |
+  +--> generation.build_messages(context, question, intent)
+  |
+  +--> MlxGenerator.generate_chat_stream(messages)
+  |      yields: TextTokenEvent (per token)
+  |
+  +--> Citation assembly
+  |      yields: CitationListEvent
+  |
+  +--> Output sanitization + finish
+         yields: FinishEvent
+  |
+  v
+api.py: encode events -> SSE lines -> StreamingResponse
+  |
+  v
+Frontend: queryStreaming() AsyncGenerator -> ChatPanel state updates
+```
 
-Internal stream events are typed dataclasses in `src/query_events.py` and encoded by `src/stream_protocol.py` utilities.
+### Ingestion Flow
+
+```
+Frontend POST /api/sources/upload (multipart)
+  |
+  v
+api.py: save to data/uploads/, call rag_engine.ingest()
+  |
+  v
+ingest.py: parse file (PDF fallback chain or markdown sections)
+  -> _chunk_pages() -> (parents, children)
+  |
+  v
+embeddings.encode(child_texts) -> vectors
+  |
+  v
+storage.add_parents(parents) + storage.add_children(children, embeddings)
+  |
+  v
+Optional: generator.generate_chat(summary prompt)
+  -> storage.upsert_source_summary()
+  |
+  v
+source_cache.save_snapshot() -> data/source_cache/
+```
 
 ---
 
-## 8. Metrics and Latency Instrumentation
+## 8. File Structure
 
-### Retrieval/Budget Metrics
+### Backend (`src/`)
 
-- token budget utilization and packed/skipped/truncated counts
-- per-stage timing (`hybrid_search_ms`, `dedup_ms`, `rerank_ms`, `budget_packing_ms`, `total_ms`)
-- reranker score distributions
-- threshold filtering and safety-net metrics
+| File | Lines | Purpose |
+|------|-------|---------|
+| `api.py` | ~980 | FastAPI endpoints, SSE streaming, file upload |
+| `api_schemas.py` | ~290 | Pydantic request/response models |
+| `rag_engine.py` | ~1200 | Core orchestrator, query/ingest, output sanitization |
+| `retrieval.py` | ~400 | 6-stage hybrid search pipeline |
+| `storage.py` | ~500 | LanceDB tables, hybrid search, FTS management |
+| `generator.py` | ~760 | MLX text generation, streaming, token budget packing |
+| `reranker.py` | ~425 | Jina v3 MLX listwise reranker |
+| `intent.py` | ~680 | Heuristic + LLM intent classification |
+| `generation.py` | ~280 | Intent-aware prompt/message building |
+| `embeddings.py` | ~150 | MLX embedding model wrapper |
+| `config.py` | ~260 | Mode configs, RAM detection, auto-scaling |
+| `ingest.py` | ~430 | PDF/Markdown parsing, chunking |
+| `models.py` | ~35 | ParentChunk, ChildChunk, Metadata |
+| `stream_protocol.py` | ~215 | AI SDK Data Stream Protocol encoder |
+| `query_events.py` | ~85 | Streaming event dataclasses |
+| `metrics.py` | ~170 | Retrieval/budget metrics collection |
+| `latency.py` | ~110 | Wall-clock latency profiler |
+| `source_cache.py` | ~175 | Text snapshot caching |
+| `cli.py` | ~355 | CLI entry point |
 
-### Latency Reporting
+### Frontend (`frontend/src/`)
 
-`RagEngine` records wall and stage spans via `LatencyProfiler`; CLI can print the formatted report with `--latency`.
+| File | Purpose |
+|------|---------|
+| `app/page.tsx` | Entry point, 2-panel layout, AppProvider wrapper |
+| `app/layout.tsx` | Root layout, metadata, fonts (Geist) |
+| `app/globals.css` | Theme colors, scrollbar styling, markdown prose |
+| `context/app-context.tsx` | Global state (useReducer + dual context) |
+| `lib/api-client.ts` | Typed API client, SSE streaming generator |
+| `lib/text-highlighter.ts` | Fuzzy text matching, DOM highlight injection |
+| `components/chat-panel.tsx` | Chat interface, streaming, citation handling |
+| `components/source-panel.tsx` | Source management, upload queue, view content |
+| `components/citation-viewer-modal.tsx` | Full document viewer with citation highlight |
+| `components/ingest-modal.tsx` | Drag-drop upload with validation |
+| `components/chat-markdown.tsx` | Citation-aware markdown rendering |
+| `components/markdown-renderer.tsx` | Markdown display with section scroll |
+| `components/document-renderer.tsx` | Format router (markdown vs plain text) |
 
 ---
 
-## 9. Intent Classification
-
-The system uses a two-stage intent classifier:
-
-1. **Heuristic regex classifier** for common intents
-2. **LLM fallback** when confidence is below threshold (default `0.70`)
-
-Default fallback model: `mlx-community/LFM2-8B-A1B-4bit`.
-
----
-
-## 10. Usage Examples
+## 9. Usage Examples
 
 ```bash
 # CLI query (auto mode)
@@ -223,15 +493,23 @@ curl -N -H "Content-Type: application/json" \
 
 ---
 
-## 11. Dependencies
+## 10. Dependencies
 
-### Required
+### Backend (Required)
 
-- `lancedb`, `pyarrow`, `pydantic`
-- `sentence-transformers`, `mlx-lm`, `mistral-common`, `safetensors`
-- `pypdf`, `pdfminer.six`, `PyMuPDF`, `pytesseract`, `pdf2image`
-- `fastapi`, `uvicorn`, `httpx`, `python-multipart`, `sse-starlette`
+- **Storage:** `lancedb`, `pyarrow`, `pydantic`
+- **ML:** `mlx`, `mlx-lm`, `safetensors`, `numpy`
+- **Tokenizer:** `mistral-common`, `transformers`, `huggingface-hub`
+- **PDF:** `pypdf`, `pdfminer.six`, `PyMuPDF` (fitz), `pytesseract`, `pdf2image`
+- **API:** `fastapi`, `uvicorn`, `httpx`, `python-multipart`, `sse-starlette`
 
-### Optional
+### Backend (Optional)
 
-- `psutil` for robust RAM detection and mode auto-scaling
+- `psutil` -- robust cross-platform RAM detection
+
+### Frontend
+
+- `next` 16, `react` 19, `react-dom` 19
+- `react-markdown`, `remark-gfm`
+- `tailwindcss` 4, `@tailwindcss/postcss`
+- `typescript` 5, `eslint` 9

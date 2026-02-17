@@ -37,39 +37,31 @@ class ModelConfig:
 
 def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
     """Get mode configuration with RAM-aware token budget adjustments."""
+
+    # Shared model stack per mode (fields identical across RAM tiers)
+    _REGULAR_MODELS = dict(
+        llm_model="mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
+        embedding_model="mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
+        reranker_model="jinaai/jina-reranker-v3-mlx",
+        embedding_device="cpu",
+        quantization="4-bit",
+    )
+
     if mode == "regular":
         if ram_gb < 48:
             # 32GB systems: reduced context to avoid swap thrashing
             return ModelConfig(
                 mode="regular",
-                llm_model="mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
-                embedding_model="mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
-                reranker_model="jinaai/jina-reranker-v3-mlx",
-                embedding_device="cpu",
-                quantization="4-bit",
+                **_REGULAR_MODELS,
                 context_window=16_000,
                 retrieval_budget=8_000,
-                top_k_dense=100,
-                top_k_sparse=100,
-                top_k_fused=50,
-                top_k_rerank=20,
-                top_k_final=5,
-                reranker_threshold=0.05,  # Cosine similarity threshold (Jina v3 scores in ~0..1)
-                reranker_min_docs=3,
                 system_ram_gb=ram_gb,
             )
         elif ram_gb >= 64:
-            # M4 Max 64GB "Regular Plus": deep retrieval exploiting 500GB/s+
-            # bandwidth and ~49GB headroom (30B-A3B 4-bit ≈ 15GB loaded).
-            # Wider retrieval net + deeper reranking while keeping 64K context
-            # at the Lost-in-the-Middle sweet spot.
+            # M4 Max 64GB: deep retrieval exploiting 500GB/s+ bandwidth
             return ModelConfig(
                 mode="regular",
-                llm_model="mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
-                embedding_model="mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
-                reranker_model="jinaai/jina-reranker-v3-mlx",
-                embedding_device="cpu",
-                quantization="4-bit",
+                **_REGULAR_MODELS,
                 context_window=64_000,
                 retrieval_budget=48_000,
                 top_k_dense=200,
@@ -85,34 +77,15 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
             # 48-63GB systems: standard context, moderate retrieval
             return ModelConfig(
                 mode="regular",
-                llm_model="mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
-                embedding_model="mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
-                reranker_model="jinaai/jina-reranker-v3-mlx",
-                embedding_device="cpu",
-                quantization="4-bit",
+                **_REGULAR_MODELS,
                 context_window=64_000,
                 retrieval_budget=32_000,
-                top_k_dense=100,
-                top_k_sparse=100,
-                top_k_fused=50,
-                top_k_rerank=20,
-                top_k_final=5,
-                reranker_threshold=0.05,
-                reranker_min_docs=3,
                 system_ram_gb=ram_gb,
             )
 
     elif mode == "power-deep-research":
         if ram_gb < 64:
             logger.warning(f"power-deep-research mode requires 64GB+ RAM. Detected {ram_gb:.0f}GB.")
-        # M4 Max 64GB calibration:
-        # 80B MoE 4-bit ≈ 48-52GB loaded → ~12GB headroom.
-        # KV cache at ~0.2MB/token → 48K ctx ≈ 9.6GB, leaving ~2.4GB OS buffer.
-        # Wide initial retrieval (400 dense+sparse) funneled through selective
-        # reranking (60) to 8 final docs — matches Regular mode's sweet spot
-        # for signal-to-noise ratio. Prior top_k_final=10 with threshold=0.015
-        # admitted low-scored docs (0.03-0.05) that diluted context without
-        # improving synthesis. Threshold=0.04 aligns with Regular mode.
         return ModelConfig(
             mode="power-deep-research",
             llm_model="mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit",

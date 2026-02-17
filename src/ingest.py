@@ -214,6 +214,37 @@ def ingest_markdown(
     return parents, children
 
 
+@dataclass
+class _PageData:
+    """Extracted text and metadata for a single PDF page (or whole-doc fallback)."""
+    text: str
+    page_number: Optional[int]
+    page_label: Optional[str]
+    display_page: Optional[str]
+
+
+def _chunk_pages(
+    pages: list[_PageData],
+    source_id: str,
+) -> tuple[list[ParentChunk], list[ChildChunk]]:
+    """Convert extracted page data into parent/child chunk pairs."""
+    parents: list[ParentChunk] = []
+    children: list[ChildChunk] = []
+    sid = source_id.strip()
+    for page in pages:
+        section = _Section(header_path="Document", text=page.text)
+        for parent in _split_parent_chunks(
+            section,
+            source_id=sid,
+            page_number=page.page_number,
+            page_label=page.page_label,
+            display_page=page.display_page,
+        ):
+            parents.append(parent)
+            children.extend(_split_child_chunks(parent))
+    return parents, children
+
+
 def ingest_pdf(
     file_path: str | Path,
     *,
@@ -239,6 +270,8 @@ def ingest_pdf(
     parents: list[ParentChunk] = []
     children: list[ChildChunk] = []
 
+    # ---------- Strategy 1: pypdf per-page extraction ----------
+    pages: list[_PageData] = []
     for index, page in enumerate(reader.pages, start=1):
         page_text = clean_ocr_artifacts((page.extract_text() or "").strip())
         if not page_text:
@@ -252,18 +285,12 @@ def ingest_pdf(
             pass
 
         display_page = page_label if page_label else str(index)
-        
-        section = _Section(header_path="Document", text=page_text)
-        for parent in _split_parent_chunks(
-            section,
-            source_id=source_id.strip(),
-            page_number=index,
-            page_label=page_label,
-            display_page=display_page,
-        ):
-            parents.append(parent)
-            children.extend(_split_child_chunks(parent))
+        pages.append(_PageData(page_text, index, page_label, display_page))
 
+    if pages:
+        parents, children = _chunk_pages(pages, source_id)
+
+    # ---------- Strategy 2: pdfminer whole-document fallback ----------
     if not parents:
         try:
             from pdfminer.high_level import extract_text
@@ -274,17 +301,10 @@ def ingest_pdf(
 
         fallback_text = clean_ocr_artifacts((extract_text(str(path)) or "").strip())
         if fallback_text:
-            section = _Section(header_path="Document", text=fallback_text)
-            for parent in _split_parent_chunks(
-                section,
-                source_id=source_id.strip(),
-                page_number=None,
-                page_label=None,
-                display_page=None,
-            ):
-                parents.append(parent)
-                children.extend(_split_child_chunks(parent))
+            pages = [_PageData(fallback_text, None, None, None)]
+            parents, children = _chunk_pages(pages, source_id)
 
+    # ---------- Strategy 3: PyMuPDF per-page fallback ----------
     if not parents:
         try:
             import fitz  # PyMuPDF
@@ -294,6 +314,7 @@ def ingest_pdf(
             ) from exc
 
         doc = fitz.open(str(path))
+        pages = []
         for index in range(doc.page_count):
             page = doc.load_page(index)
             page_text = clean_ocr_artifacts((page.get_text("text") or "").strip())
@@ -309,18 +330,12 @@ def ingest_pdf(
 
             page_number = index + 1
             display_page = page_label if page_label else str(page_number)
-            
-            section = _Section(header_path="Document", text=page_text)
-            for parent in _split_parent_chunks(
-                section,
-                source_id=source_id.strip(),
-                page_number=page_number,
-                page_label=page_label,
-                display_page=display_page,
-            ):
-                parents.append(parent)
-                children.extend(_split_child_chunks(parent))
+            pages.append(_PageData(page_text, page_number, page_label, display_page))
 
+        if pages:
+            parents, children = _chunk_pages(pages, source_id)
+
+    # ---------- Strategy 4: OCR fallback (pytesseract) ----------
     if not parents:
         try:
             from pdf2image import convert_from_path
@@ -334,6 +349,7 @@ def ingest_pdf(
         # images into memory simultaneously.  A 200-page PDF at 300 DPI
         # can consume 4-6 GB when fully rasterized, risking OOM on 32 GB
         # Apple Silicon machines.
+        pages = []
         page_count = len(reader.pages)
         for index in range(1, page_count + 1):
             page_images = convert_from_path(
@@ -347,16 +363,10 @@ def ingest_pdf(
             del page_images  # release rasterized image immediately
             if not page_text:
                 continue
-            section = _Section(header_path="Document", text=page_text)
-            for parent in _split_parent_chunks(
-                section,
-                source_id=source_id.strip(),
-                page_number=index,
-                page_label=None,
-                display_page=str(index),
-            ):
-                parents.append(parent)
-                children.extend(_split_child_chunks(parent))
+            pages.append(_PageData(page_text, index, None, str(index)))
+
+        if pages:
+            parents, children = _chunk_pages(pages, source_id)
 
     if not parents:
         raise ValueError(
