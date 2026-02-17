@@ -251,13 +251,15 @@ class RetrievalEngine:
         The retrieval pipeline is now:
         1. LanceDB hybrid search (vector ANN + FTS BM25 w/ RRF) → top_k_fused
         2. Deduplicate by parent
-        3. Enrich with parent text for reranking
-        4. Rerank (Jina v3) → threshold filter → top_k_final
+        3. Rerank child chunks (Jina v3) → threshold filter → top_k_final
+        4. Expand surviving children to parent text for downstream context
         """
         cfg = self._config
         k_fused = top_k_fused or (cfg.top_k_fused if cfg else 50)
         k_rerank = top_k_rerank or (cfg.top_k_rerank if cfg else 20)
         k_final = top_k_final or (cfg.top_k_final if cfg else 5)
+        reranker_enabled = bool(cfg.reranker_enabled) if cfg else self._reranker is not None
+        context_expansion_enabled = bool(cfg.context_expansion_enabled) if cfg else True
 
         timing = TimingMetrics()
         total_start = time.perf_counter()
@@ -277,41 +279,27 @@ class RetrievalEngine:
         timing.dedup_ms = (time.perf_counter() - t0) * 1000
         logger.debug(f"Early dedup: {dedup_metrics.children_before_dedup} -> {dedup_metrics.children_after_dedup} ({dedup_metrics.reduction_pct:.1f}% reduction)")
 
-        # Stage 3: Enrich with parent text for reranking
-        parent_ids = {
-            metadata.get("parent_id")
-            for metadata in (
-                item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-                for item in deduped
-            )
-            if isinstance(metadata.get("parent_id"), str) and metadata.get("parent_id")
-        }
-        parent_cache = self._storage.get_parent_texts(parent_ids)
-        for item in deduped:
-            metadata = item.get("metadata")
-            if not isinstance(metadata, dict):
-                metadata = {}
-            parent_id = metadata.get("parent_id")
-            if isinstance(parent_id, str) and parent_id in parent_cache:
-                item["rerank_text"] = parent_cache[parent_id]
-                item["parent_text"] = parent_cache[parent_id]
-
-        # Stage 4: Rerank
+        # Stage 3: Rerank (child chunks only; parent expansion happens later)
         t0 = time.perf_counter()
-        to_rerank = deduped[:k_rerank]
-        reranked, raw_scores = self._rerank(query, to_rerank)
+        if reranker_enabled:
+            to_rerank = deduped[:k_rerank]
+            reranked, raw_scores = self._rerank(query, to_rerank)
+        else:
+            reranked = deduped
+            raw_scores = []
         timing.rerank_ms = (time.perf_counter() - t0) * 1000
 
-        # Stage 5: Threshold filtering
+        # Stage 4: Threshold filtering
         threshold_metrics = ThresholdMetrics()
         if cfg and reranked:
             threshold = float(cfg.reranker_threshold)
             min_docs = cfg.reranker_min_docs
             items_before = len(reranked)
+            score_key = "rerank_score" if reranker_enabled else "score"
 
             threshold_filtered = [
                 item for item in reranked
-                if item.get("rerank_score", float("-inf")) >= threshold
+                if float(item.get(score_key, float("-inf"))) >= threshold
             ]
 
             if len(threshold_filtered) < min_docs:
@@ -351,7 +339,7 @@ class RetrievalEngine:
                 reranker_metrics.items_reranked,
             )
 
-        # Stage 6: Final dedup + boilerplate filter
+        # Stage 5: Final dedup + boilerplate filter
         final: list[dict[str, Any]] = []
         seen_parents: set[str] = set()
         seen_children: set[str] = set()
@@ -375,6 +363,19 @@ class RetrievalEngine:
             final.append(item)
             if len(final) >= k_final:
                 break
+
+        # Stage 6: Context expansion to parent text (after reranking)
+        parent_cache: dict[str, str] = {}
+        if context_expansion_enabled:
+            parent_ids = {
+                metadata.get("parent_id")
+                for metadata in (
+                    item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+                    for item in final
+                )
+                if isinstance(metadata.get("parent_id"), str) and metadata.get("parent_id")
+            }
+            parent_cache = self._storage.get_parent_texts(parent_ids)
 
         results: list[RetrievalResult] = []
         for item in final:

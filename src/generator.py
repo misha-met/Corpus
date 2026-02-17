@@ -3,7 +3,9 @@ from __future__ import annotations
 import logging
 import time
 import re
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -45,7 +47,34 @@ class MlxGenerator:
         self._default_stop_pattern = self._compile_stop_tokens_pattern(DEFAULT_STOP_TOKENS)
         try:
             from mlx_lm import load
-            self._model, self._tokenizer = load(model_path)
+            try:
+                self._model, self._tokenizer = load(model_path)
+            except Exception as load_exc:
+                message = str(load_exc)
+                if "Tokenizer class" in message or "TokenizersBackend" in message:
+                    logger.info(
+                        "Retrying tokenizer load with trust_remote_code=True for %s",
+                        model_path,
+                    )
+                    try:
+                        self._model, self._tokenizer = load(
+                            model_path,
+                            tokenizer_config={"trust_remote_code": True},
+                        )
+                    except Exception:
+                        patched_snapshot = self._patch_tokenizer_backend_config(model_path)
+                        if patched_snapshot is None:
+                            raise
+                        logger.info(
+                            "Retrying tokenizer load with patched config at %s",
+                            patched_snapshot,
+                        )
+                        self._model, self._tokenizer = load(
+                            str(patched_snapshot),
+                            tokenizer_config={"fix_mistral_regex": True},
+                        )
+                else:
+                    raise
             # Attempt to verify KVCache support for this model
             try:
                 from mlx_lm.utils import make_prompt_cache
@@ -59,6 +88,52 @@ class MlxGenerator:
                 self._make_prompt_cache = None
         except Exception as exc:
             raise RuntimeError(f"Failed to load mlx-lm model at {model_path}") from exc
+
+    @staticmethod
+    def _patch_tokenizer_backend_config(model_path: str) -> Optional[Path]:
+        """Patch cached tokenizer_config for TokenizersBackend-only models.
+
+        Some MLX-exported Ministral repos ship ``tokenizer_class=TokenizersBackend``
+        which current ``transformers`` cannot instantiate directly in this runtime.
+        We normalize to ``PreTrainedTokenizerFast`` and drop incompatible
+        ``extra_special_tokens`` list payload before reloading.
+        """
+        try:
+            from huggingface_hub import snapshot_download
+
+            snapshot_dir = Path(
+                snapshot_download(
+                    repo_id=model_path,
+                    local_files_only=True,
+                )
+            )
+        except Exception:
+            return None
+
+        cfg_path = snapshot_dir / "tokenizer_config.json"
+        if not cfg_path.exists():
+            return None
+
+        try:
+            with cfg_path.open("r", encoding="utf-8") as handle:
+                cfg = json.load(handle)
+        except Exception:
+            return None
+
+        if cfg.get("tokenizer_class") != "TokenizersBackend":
+            return snapshot_dir
+
+        cfg["tokenizer_class"] = "PreTrainedTokenizerFast"
+        if isinstance(cfg.get("extra_special_tokens"), list):
+            cfg.pop("extra_special_tokens", None)
+
+        try:
+            with cfg_path.open("w", encoding="utf-8") as handle:
+                json.dump(cfg, handle)
+        except Exception:
+            return None
+
+        return snapshot_dir
 
     @staticmethod
     def _compile_stop_tokens_pattern(stop_tokens: list[str]) -> Optional[re.Pattern[str]]:

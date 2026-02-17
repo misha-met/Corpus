@@ -8,7 +8,7 @@ simple dataclasses — no framework dependencies.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
 
 @dataclass(frozen=True)
@@ -71,13 +71,13 @@ class FinishEvent:
     completion_tokens: int = 0
 
 
-# Union type for type checking
-QueryEvent = (
-    StatusEvent
-    | IntentEvent
-    | SourcesEvent
-    | TextTokenEvent
-    | CitationListEvent
-    | ErrorEvent
-    | FinishEvent
-)
+# Union type for type checking (Python 3.9 compatible)
+QueryEvent = Union[
+    StatusEvent,
+    IntentEvent,
+    SourcesEvent,
+    TextTokenEvent,
+    CitationListEvent,
+    ErrorEvent,
+    FinishEvent,
+]

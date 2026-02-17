@@ -4,6 +4,7 @@ pydantic
 sentence-transformers
 safetensors
 mlx-lm
+mistral-common
 pypdf
 pdfminer.six
 PyMuPDF

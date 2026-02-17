@@ -41,7 +41,7 @@ _SPECIAL_TOKENS: dict[str, str] = {
     "doc_embed_token": "<|embed_token|>",
 }
 
-_MAX_DOC_TOKENS = 2048
+_MAX_DOC_TOKENS = 384
 _MAX_QUERY_TOKENS = 512
 
 # Context-window safety: leave headroom below the 131 K backbone limit.
@@ -342,6 +342,20 @@ class JinaRerankerMLX:
 
     def _score_listwise(self, query: str, docs: list[str]) -> list[float]:
         """Run a single-pass listwise forward and return per-doc scores."""
+        doc_token_counts = [len(self._tokenizer.encode(doc)) for doc in docs]
+        if doc_token_counts:
+            logger.info(
+                "Reranker doc tokens (per-doc): %s",
+                doc_token_counts,
+            )
+            logger.info(
+                "Reranker doc token stats: min=%d max=%d mean=%.1f n=%d",
+                min(doc_token_counts),
+                max(doc_token_counts),
+                sum(doc_token_counts) / len(doc_token_counts),
+                len(doc_token_counts),
+            )
+
         prompt = _build_prompt(query, docs)
         input_ids = self._tokenizer.encode(prompt)
 

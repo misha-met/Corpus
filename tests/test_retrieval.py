@@ -71,6 +71,23 @@ def _make_config(mode: str = "regular") -> ModelConfig:
             reranker_min_docs=5,
             retrieval_budget=20000,
         )
+    elif mode == "turbo":
+        return ModelConfig(
+            mode="turbo",
+            llm_model="test-model",
+            embedding_model="test-embed",
+            reranker_model="test-reranker",
+            top_k_dense=10,
+            top_k_sparse=10,
+            top_k_fused=20,
+            top_k_rerank=20,
+            top_k_final=3,
+            reranker_threshold=0.0,
+            reranker_min_docs=3,
+            reranker_enabled=False,
+            context_expansion_enabled=False,
+            retrieval_budget=4000,
+        )
     raise ValueError(f"Unknown test mode: {mode}")
 
 
@@ -238,6 +255,36 @@ class TestReranking:
         items = [{"id": "c1", "text": "test"}]
         reranked, _ = engine._rerank("test", items)
         assert len(reranked) == 1
+
+    def test_turbo_disables_reranker_stage(self, tmp_storage, mock_embedder, monkeypatch):
+        engine = RetrievalEngine(
+            storage=tmp_storage,
+            embedding_model=mock_embedder,
+            reranker=MockReranker(),
+            config=_make_config("turbo"),
+        )
+
+        called = {"rerank": False}
+
+        def _should_not_run(*args, **kwargs):
+            called["rerank"] = True
+            return [], []
+
+        monkeypatch.setattr(engine, "_rerank", _should_not_run)
+        _ = engine.search("Chomsky language theory", collect_metrics=False)
+        assert called["rerank"] is False
+
+    def test_turbo_uses_child_text_without_parent_expansion(self, tmp_storage, mock_embedder):
+        engine = RetrievalEngine(
+            storage=tmp_storage,
+            embedding_model=mock_embedder,
+            reranker=MockReranker(),
+            config=_make_config("turbo"),
+        )
+        results = engine.search("Chomsky language", collect_metrics=False)
+        assert len(results) > 0
+        assert all(r.parent_text is None for r in results)
+        assert all(isinstance(r.text, str) and len(r.text) > 0 for r in results)
 
 
 # ===========================================================================

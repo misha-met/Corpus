@@ -86,6 +86,7 @@ class QueryResult:
     source_ids: list[str] = field(default_factory=list)
     retrieval_metrics: Optional[RetrievalMetrics] = None
     budget_metrics: Optional[BudgetMetrics] = None
+    latency_report: str = ""
     context: str = ""
     config: Optional[ModelConfig] = None
     raw_answer: str = ""
@@ -299,7 +300,9 @@ def _enable_offline_if_cached(config: ModelConfig) -> None:
         logger.debug("HF cache dir %s does not exist; staying online", cache_dir)
         return
 
-    required_models = [config.llm_model, config.embedding_model, config.reranker_model]
+    required_models = [config.llm_model, config.embedding_model]
+    if config.reranker_enabled:
+        required_models.append(config.reranker_model)
     for model_id in required_models:
         cache_folder = f"models--{model_id.replace('/', '--')}"
         model_cache = cache_dir / cache_folder
@@ -451,6 +454,8 @@ class RagEngine:
         return self._embedding_model
 
     def _ensure_reranker(self) -> Any:
+        if not self._model_config.reranker_enabled:
+            return None
         if self._reranker is not None:
             return self._reranker
         logger.info("_ensure_reranker: loading...")
@@ -479,6 +484,18 @@ class RagEngine:
 
     def load_retrieval_models(self) -> None:
         """Pre-load embedding + reranker in parallel (call once at startup)."""
+        if not self._model_config.reranker_enabled:
+            self._on_status("Loading retrieval models (embedding only)...")
+            from sentence_transformers import SentenceTransformer
+
+            self._embedding_model = SentenceTransformer(
+                self._model_config.embedding_model,
+                device=self._model_config.embedding_device,
+            )
+            self._reranker = None
+            self._on_status("Retrieval models loaded.")
+            return
+
         self._on_status("Loading retrieval models (embedding + reranker)...")
         from sentence_transformers import SentenceTransformer
 
@@ -735,7 +752,7 @@ class RagEngine:
         context = ""
         results: list[RetrievalResult] = []
         source_ids: list[str] = []
-        parent_texts: list[str] = []
+        context_docs: list[str] = []
         generator: Optional[MlxGenerator] = None
 
         if bypass_retrieval:
@@ -791,7 +808,7 @@ class RagEngine:
             context = multi_result["context"]
             results = multi_result["results"]
             source_ids = multi_result["source_ids"]
-            parent_texts = multi_result["parent_texts"]
+            context_docs = multi_result["parent_texts"]
             cite = multi_result["citations_enabled"]
             extra_instructions = multi_result.get("extra_instructions")
 
@@ -808,7 +825,11 @@ class RagEngine:
                     if r.metadata.get("source_id")
                 }
             )
-            parent_texts = [r.parent_text for r in results if r.parent_text]
+            context_docs = [
+                (r.parent_text if r.parent_text else r.text)
+                for r in results
+                if (r.parent_text if r.parent_text else r.text)
+            ]
 
         retrieval_metrics: Optional[RetrievalMetrics] = (
             results[0].metrics if results and results[0].metrics else None
@@ -822,12 +843,12 @@ class RagEngine:
         budget_metrics: Optional[BudgetMetrics] = None
         source_legend: Optional[str] = None
         result_metadatas: list[dict] = (
-            [r.metadata for r in results if r.parent_text]
-            if parent_texts and results
+            [r.metadata for r in results if (r.parent_text if r.parent_text else r.text)]
+            if context_docs and results
             else []
         )
 
-        if not no_generate and parent_texts:
+        if not no_generate and context_docs:
             if generator is None:
                 generator = self._ensure_generator()
 
@@ -835,7 +856,7 @@ class RagEngine:
             with profiler.span("Budget packing"):
                 pack_start = _time.perf_counter()
                 pack_result = enforce_token_budget(
-                    docs=parent_texts,
+                    docs=context_docs,
                     max_tokens=config.retrieval_budget,
                     tokenizer=generator.tokenizer,
                     consecutive_fail_threshold=3,
@@ -881,20 +902,21 @@ class RagEngine:
                 docs_truncated=pack_result.truncated_count,
             )
 
-        elif parent_texts:
+        elif context_docs:
             if cite and result_metadatas:
                 context, source_mapping = format_context_with_citations(
-                    texts=parent_texts, metadatas=result_metadatas
+                    texts=context_docs, metadatas=result_metadatas
                 )
                 source_legend = build_source_legend(source_mapping)
             elif cite:
                 cite = False
             else:
-                context = _dedupe_context(parent_texts)
+                context = _dedupe_context(context_docs)
 
         # -- no-generate path (context only) --------------------------------
         if no_generate:
             profiler.end_wall()
+            latency_report = profiler.format_report()
             return QueryResult(
                 answer="",
                 intent=intent_result,
@@ -902,6 +924,7 @@ class RagEngine:
                 source_ids=source_ids,
                 retrieval_metrics=retrieval_metrics,
                 budget_metrics=budget_metrics,
+                latency_report=latency_report,
                 context=context,
                 config=config,
             )
@@ -936,6 +959,7 @@ class RagEngine:
             answer = sanitize_output(raw_answer)
 
         profiler.end_wall()
+        latency_report = profiler.format_report()
 
         return QueryResult(
             answer=answer,
@@ -944,6 +968,7 @@ class RagEngine:
             source_ids=source_ids,
             retrieval_metrics=retrieval_metrics,
             budget_metrics=budget_metrics,
+            latency_report=latency_report,
             context=context,
             config=config,
             raw_answer=raw_answer,
@@ -1041,9 +1066,11 @@ class RagEngine:
         logger.info("query_events_impl: yielding 'Preparing retrieval models', then loading embedding")
         yield StatusEvent(status="Preparing retrieval models...")
         embedding_model = self._ensure_embedding_model()
-        logger.info("query_events_impl: embedding ready, loading reranker")
         reranker = self._ensure_reranker()
-        logger.info("query_events_impl: reranker ready")
+        if self._model_config.reranker_enabled:
+            logger.info("query_events_impl: reranker ready")
+        else:
+            logger.info("query_events_impl: turbo mode (reranker disabled)")
 
         if should_stop():
             yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled")
@@ -1130,7 +1157,7 @@ class RagEngine:
         context = ""
         results: list[RetrievalResult] = []
         source_ids: list[str] = []
-        parent_texts: list[str] = []
+        context_docs: list[str] = []
 
         if bypass_retrieval:
             yield StatusEvent(status="Query is unclear — asking for clarification...")
@@ -1180,7 +1207,7 @@ class RagEngine:
             context = multi_result["context"]
             results = multi_result["results"]
             source_ids = multi_result["source_ids"]
-            parent_texts = multi_result["parent_texts"]
+            context_docs = multi_result["parent_texts"]
             cite = multi_result["citations_enabled"]
             extra_instructions = multi_result.get("extra_instructions")
             if should_stop():
@@ -1198,7 +1225,11 @@ class RagEngine:
                     if r.metadata.get("source_id")
                 }
             )
-            parent_texts = [r.parent_text for r in results if r.parent_text]
+            context_docs = [
+                (r.parent_text if r.parent_text else r.text)
+                for r in results
+                if (r.parent_text if r.parent_text else r.text)
+            ]
             if should_stop():
                 yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled after retrieval")
                 yield FinishEvent(finish_reason="error")
@@ -1223,18 +1254,18 @@ class RagEngine:
         # -- token budget packing ------------------------------------------
         source_legend: Optional[str] = None
         result_metadatas: list[dict] = (
-            [r.metadata for r in results if r.parent_text]
-            if parent_texts and results
+            [r.metadata for r in results if (r.parent_text if r.parent_text else r.text)]
+            if context_docs and results
             else []
         )
         generator: Optional[MlxGenerator] = None
 
-        if parent_texts:
+        if context_docs:
             generator = self._ensure_generator()
 
             yield StatusEvent(status="Packing token budget...")
             pack_result = enforce_token_budget(
-                docs=parent_texts,
+                docs=context_docs,
                 max_tokens=config.retrieval_budget,
                 tokenizer=generator.tokenizer,
                 consecutive_fail_threshold=3,
@@ -1466,12 +1497,15 @@ class RagEngine:
                 if r.metadata.get("source_id")
             }
         )
-        parent_texts = [r.parent_text for r in results if r.parent_text]
         return {
             "context": "",
             "results": results,
             "source_ids": source_ids,
-            "parent_texts": parent_texts,
+            "parent_texts": [
+                (r.parent_text if r.parent_text else r.text)
+                for r in results
+                if (r.parent_text if r.parent_text else r.text)
+            ],
             "citations_enabled": citations_enabled,
             "extra_instructions": None,
         }

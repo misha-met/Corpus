@@ -92,7 +92,7 @@ def run() -> None:
     )
     ingest_parser.add_argument(
         "--mode",
-        choices=["regular", "power-deep-research"],
+        choices=["regular", "power-deep-research", "turbo"],
         default=None,
         help="Operating mode",
     )
@@ -140,7 +140,7 @@ def run() -> None:
     )
     query_parser.add_argument(
         "--mode",
-        choices=["regular", "power-deep-research"],
+        choices=["regular", "power-deep-research", "turbo"],
         default=None,
         help="Operating mode",
     )
@@ -316,6 +316,8 @@ def run() -> None:
         if verbose:
             log_metrics(result.retrieval_metrics, config.mode, logger)
         print(f"[Retrieval: {format_metrics_summary(result.retrieval_metrics)}]")
+    if getattr(args, "latency", False) and result.latency_report:
+        print(result.latency_report)
 
     # -- no-generate output ------------------------------------------------
     if args.no_generate:

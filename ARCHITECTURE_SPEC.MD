@@ -1,61 +1,78 @@
-## Project: Offline Advanced RAG (Apple Silicon Optimized)
+## Project: DH Notebook Offline RAG Application (Apple Silicon Optimized)
 
 ## 1. Core Architecture Overview
 
-The system implements a **hybrid retrieval-augmented generation (RAG) pipeline** optimized for Apple Silicon, using:
+The application is now a **full-stack offline RAG system** composed of:
 
-- **Native hybrid retrieval** (LanceDB vector ANN + full-text search with default RRF fusion)
-- **Reranking** (Jina Reranker v3 MLX – listwise cosine scoring with hardware-aware context windowing)
-- **Token budget packing** (greedy document packing with truncation fallback)
-- **Intent-based generation** (task-specific prompt engineering)
-- **Toggleable citations** (optional academic-style source attribution)
+- **FastAPI backend** (`src/api.py`) exposing ingest, source management, and query endpoints
+- **Next.js frontend** (`frontend/`) with source panel, chat panel, and citation viewer
+- **Decoupled RAG engine** (`src/rag_engine.py`) reusable by CLI and API
+- **Hybrid retrieval pipeline** (LanceDB ANN + FTS with native RRF)
+- **Mode-aware retrieval pathing** (including a low-latency `turbo` path)
+- **Optional inline citations** for source-grounded responses
 
 ---
 
 ## 2. Technology Stack
 
-*   **LLM Inference:** `mlx-lm` (Apple Machine Learning/Metal optimized).
-*   **Embeddings:** `sentence-transformers` (Run on CPU to save VRAM).
-*   **Re-ranking:** `jinaai/jina-reranker-v3-mlx` (Jina Reranker v3, MLX-native).
-*   **Unified Data Store:** `lancedb` (Columnar store with native hybrid search: vector ANN + FTS with RRF).
-*   **Arrow Format:** `pyarrow` (Efficient serialization for LanceDB).
+- **LLM Inference:** `mlx-lm` (Metal-optimized Apple Silicon inference)
+- **Embeddings:** `sentence-transformers` (CPU device to preserve VRAM)
+- **Re-ranking:** `jinaai/jina-reranker-v3-mlx` (MLX-native listwise reranker)
+- **Storage:** `lancedb` + `pyarrow` (vector + FTS hybrid retrieval, parent/source tables)
+- **Backend API:** `fastapi`, `uvicorn`, `sse-starlette`, `python-multipart`
+- **Frontend:** `next.js` (React/TypeScript app in `frontend/`)
+- **Tokenizer compatibility dependency:** `mistral-common`
 
 ---
 
 ## 3. Core Architecture Modules
 
-### Module A: Data Layer
+### Module A: Data Model
 
-Hierarchical chunk structure for efficient retrieval and context expansion:
+Hierarchical chunk structure for retrieval efficiency and context expansion:
 
-*   **ParentChunk**: 1000–1500 tokens. Full text content stored in SQLite.
-*   **ChildChunk**: 200–300 tokens. Overlapping chunks derived from parent. Stored in vector index for efficient retrieval.
-*   **Metadata**: Tracks `source_id`, `page_number`, `page_label`, `header_path`, `parent_id`.
+- **ParentChunk:** ~1000–1500 tokens, canonical context text in `parent_chunks`
+- **ChildChunk:** ~200–300 tokens, overlapping retrieval units in `child_chunks`
+- **Metadata:** `source_id`, `parent_id`, `page_number`, `display_page`, `header_path`, etc.
 
-### Module B: Storage Engine
+### Module B: Storage Engine (LanceDB)
 
-Unified LanceDB-backed storage with three tables:
+Unified LanceDB-backed storage with three core tables:
 
-*   **child_chunks**: Embeddings with vector ANN index and full-text search index. Hybrid queries combine both via RRF.
-*   **parent_chunks**: Full parent chunk text (no vectors), used for context expansion during reranking.
-*   **source_summaries**: Per-source summaries generated during ingest, optional metadata for context.
+- **`child_chunks`**: vectors + FTS, queried with native hybrid search + RRF
+- **`parent_chunks`**: parent text for post-retrieval context expansion
+- **`source_summaries`**: per-source summaries and source/snapshot paths
 
 ### Module C: Retrieval Pipeline
 
-1.  **Hybrid Search**: Single LanceDB query combining vector ANN + FTS with RRF internally ($$Score = \sum (1 / (60 + rank))$$).
-2.  **Early Deduplication**: Keep highest-scored child per unique `parent_id` to reduce redundancy before expensive reranking.
-4.  **Reranking**: Jina Reranker v3 (MLX-native) performs listwise scoring via cosine similarity between projected query and document embeddings. A context-window safety guard dynamically truncates the document list to stay within the backbone’s 131K context limit.
-5.  **Threshold Filtering**: Remove documents below score threshold based on operating mode.
-6.  **Context Expansion**: Map child chunks to parent chunks and apply token budget packing.
+1. **Hybrid Search**: single LanceDB hybrid query (vector ANN + BM25 FTS + RRF)
+2. **Early Parent Dedup**: keep highest-scored child per `parent_id`
+3. **Conditional Rerank**:
+   - `regular` / `power-deep-research`: rerank top candidates with Jina v3
+   - `turbo`: reranker bypassed
+4. **Threshold Filtering + Safety Net**: keep scores above threshold, then enforce minimum docs
+5. **Final Dedup / Boilerplate Filter**
+6. **Conditional Context Expansion**:
+   - enabled modes: expand children to parents
+   - `turbo`: keep child text (no parent expansion)
+7. **Token Budget Packing** for generation context
 
-### Module D: Configuration
+### Module D: RAG Engine Layer
 
-System configuration via `config.py`:
+`RagEngine` centralizes ingest/query orchestration and exposes:
 
-1. Detects system RAM (psutil if available, fallback to platform detection)
-2. Supports CLI override (`--mode`) and environment variable (`RAG_MODE`)
-3. Auto-selects mode based on available RAM
-4. Embedding and BM25 operations forced to CPU to preserve LLM VRAM
+- **Synchronous query path** returning structured `QueryResult`
+- **Streaming query event path** (`query_events`) for frontend token/status streams
+- **Latency reporting integration** (returned in `QueryResult.latency_report`)
+
+### Module E: Application Layer
+
+- **CLI** (`src/cli.py`): local query/ingest workflows (`--mode`, `--cite`, `--latency`)
+- **API** (`src/api.py`):
+  - `POST /api/query` (JSON or SSE stream)
+  - `POST /api/chat` (text stream for chat transport)
+  - source CRUD + upload/ingest endpoints
+- **Frontend** (`frontend/src`): two-panel UI (sources + chat), streaming tokens, citation modal
 
 ---
 
@@ -63,229 +80,158 @@ System configuration via `config.py`:
 
 ### Operating Modes
 
-The system supports two operating modes, with `regular` mode auto-scaling based on detected RAM:
+The system supports **three user-selectable modes** (`turbo`, `regular`, `power-deep-research`).
+`regular` auto-scales internally by detected RAM tier.
 
 | Mode | LLM Model | Quantization | Context Window | Retrieval Budget | RAM Requirement |
 |------|-----------|--------------|----------------|------------------|-----------------|
-| `regular` (32GB) | Qwen3-30B-A3B-Instruct-4bit | 4-bit | 16K | 8K | 32GB |
-| `regular` (48-63GB) | Qwen3-30B-A3B-Instruct-4bit | 4-bit | 64K | 32K | 48GB |
-| `regular` (64GB+) | Qwen3-30B-A3B-Instruct-4bit | 4-bit | 64K | 48K | 64GB |
+| `turbo` | Ministral-3-3B-Instruct-2512-4bit (MLX) | 4-bit | 8K | 4K | 16GB+ |
+| `regular` (32GB) | Qwen3-30B-A3B-Instruct-2507-4bit | 4-bit | 16K | 8K | 32GB |
+| `regular` (48-63GB) | Qwen3-30B-A3B-Instruct-2507-4bit | 4-bit | 64K | 32K | 48GB |
+| `regular` (64GB+) | Qwen3-30B-A3B-Instruct-2507-4bit | 4-bit | 64K | 48K | 64GB |
 | `power-deep-research` | Qwen3-Next-80B-A3B-Instruct-4bit | 4-bit | 48K | 40K | 64GB |
 
 #### Mode Selection Precedence
 
-1. **CLI flag**: `--mode regular|power-deep-research`
-2. **Environment variable**: `RAG_MODE=power-deep-research`
-3. **Auto-detection**: Defaults to `regular` (uses RAM-aware parameter scaling)
+1. **CLI flag**: `--mode turbo|regular|power-deep-research`
+2. **Environment variable**: `RAG_MODE=<mode>`
+3. **Auto-detection**: defaults to `regular` and RAM-aware parameter scaling
 
 #### Retrieval Parameters by Mode
 
-| Parameter | Regular (32GB) | Regular (48-63GB) | Regular Plus (64GB+) | Deep-Research |
-|-----------|----------------|-------------------|----------------------|---------------|
-| `top_k_fused` | 50 | 50 | 100 | 200 |
-| `top_k_rerank` | 20 | 20 | 40 | 60 |
-| `top_k_final` | 5 | 5 | 8 | 10 |
+| Parameter | Turbo | Regular (32GB) | Regular (48-63GB) | Regular Plus (64GB+) | Deep-Research |
+|-----------|-------|----------------|-------------------|----------------------|---------------|
+| `top_k_fused` | 20 | 50 | 50 | 100 | 200 |
+| `top_k_rerank` | Disabled in pipeline | 20 | 20 | 40 | 60 |
+| `top_k_final` | 3 | 5 | 5 | 8 | 8 |
 
-#### Reranker Threshold Filtering
+#### Turbo Retrieval Path
 
-Documents are filtered after reranking based on score thresholds.  Jina v3 scores are cosine similarities in the **0.0–1.0** range:
+`turbo` mode is optimized for lowest latency:
+
+- reranker disabled
+- context expansion disabled
+- lower retrieval budget and context window
+- thresholds applied on fused retrieval score
+
+#### Threshold Filtering
 
 | Mode | Threshold Score | Minimum Documents |
 |------|----------------|-------------------|
-| `regular` (32-63GB) | 0.05 | 3 |
-| `regular` (64GB+) | 0.04 | 4 |
-| `power-deep-research` | 0.015 | 6 |
-
-After reranking, documents with `rerank_score >= threshold` are kept. If filtered count < min_docs, top min_docs results are used instead.
-
----
-
-## 5. Retrieval Pipeline Details
-
-### Early Parent-Level Deduplication
-
-To reduce redundant reranking computations, deduplication runs **before** reranking:
-
-1. After RRF fusion, group children by `parent_id`
-2. Keep only the highest-scored child per parent
-3. Trim to `top_k_fused` results
-4. Track reduction metrics for analysis
+| `turbo` | 0.01 (fused score) | 3 |
+| `regular` (32-63GB) | 0.05 (rerank score) | 3 |
+| `regular` (64GB+) | 0.04 (rerank score) | 4 |
+| `power-deep-research` | 0.04 (rerank score) | 4 |
 
 ---
 
-## 6. Token Budget Packing
+## 5. Token Budget Packing
 
-The system implements **greedy token budget packing** to maximize context utilization while staying within token limits:
+The system uses greedy packing to maximize context utility within token limits:
 
-1. **Greedy Selection**: Documents are packed in priority order (by rerank score)
-2. **Consecutive Fail Guard**: Stops after 3 consecutive documents that don't fit
-3. **Truncation Fallback**: Large documents are truncated at sentence boundaries
-4. **Accurate Counting**: Uses MLX native tokenizer for precise token counts
-5. **Metadata Preservation**: Tracks original document indices to maintain metadata alignment even when documents are truncated
-
-```
-Algorithm: enforce_token_budget(docs, max_tokens, tokenizer)
-  packed = []
-  packed_indices = []
-  consecutive_fails = 0
-  for i, doc in enumerate(docs) (priority order):
-    if doc fits:
-      pack it, record index i, reset fails
-    elif truncation possible:
-      truncate and pack, record index i
-    else:
-      skip, increment fails
-      if fails >= 3: STOP
-  return packed, packed_indices
-```
+1. Priority-order packing (post-retrieval ranking order)
+2. Stop after 3 consecutive non-fitting documents
+3. Sentence-boundary truncation fallback for oversized docs
+4. MLX tokenizer-based token counting
+5. Index preservation for metadata/citation alignment
 
 ---
 
-## 7. Toggleable Inline Citations (Academic Mode)
+## 6. Citations and Context Formatting
 
-### Feature Overview
+### Toggleable Citation Modes
 
-The system supports **toggleable inline citations** that enable academic-style source attribution in generated responses. This is useful for research contexts where source transparency is critical.
+- **Academic mode**: `--cite` (or API `citations_enabled=true`)
+- **Casual mode**: `--no-cite` (or API `citations_enabled=false`)
 
-| Mode | Flag | Description |
-|------|------|-------------|
-| **Academic Mode** | `--cite` | Enables inline citations with `[SourceID, p. X]` format |
-| **Casual Mode** | `--no-cite` | Disables citations for cleaner, conversational output |
+### Chunk Context Format
 
-### Citation Format
-
-When Academic Mode is enabled, chunks are formatted with citation markers:
+When citations are enabled, chunks are wrapped as:
 
 ```
-[CHUNK START | SOURCE: document_id | PAGE: 42]
-... chunk content ...
+[CHUNK N | SOURCE: source_id | PAGE: display_page]
+... chunk text ...
 [CHUNK END]
 ```
 
-The LLM is instructed to cite sources using the format `[SourceID, p. X]` for every factual claim.
+The system also builds a source legend when source IDs differ from display names.
 
-### Implementation Details
+### Streaming Citation Events
 
-1. **Context Formatting**: `format_context_with_citations()` wraps chunks with source/page markers
-2. **Source Legend**: Non-trivial source mappings (where source_id ≠ document name) are appended for disambiguation
-3. **Prompt Engineering**: Citation rules are conditionally injected into the system message only when enabled
-4. **Metadata Preservation**: Token budget packing tracks original indices to preserve metadata alignment even for truncated documents
-
-### CLI Usage
-
-```bash
-# Enable Academic Mode (inline citations)
-python -m src.cli query "What does Chomsky argue?" --cite
-
-# Disable citations (Casual Mode)
-python -m src.cli query "Explain the main idea" --no-cite
-
-# Default behavior controlled by CITATIONS_ENABLED_DEFAULT in config.py
-python -m src.cli query "Summarize this document"
-```
-
-### Configuration
-
-The default citation behavior is controlled by `CITATIONS_ENABLED_DEFAULT` in `src/config.py`. CLI flags take precedence:
-
-1. `--cite` → Citations enabled
-2. `--no-cite` → Citations disabled
-3. Neither → Uses `CITATIONS_ENABLED_DEFAULT`
+During streaming query execution, a structured citation list is emitted as a dedicated event so the frontend can bind numbered references to source/chunk metadata.
 
 ---
 
-## 8. Metrics Collection
+## 7. Streaming and Protocols
 
-The retrieval and packing pipeline collects comprehensive metrics for analysis and optimization:
+The backend supports two stream styles:
 
-### Budget Metrics
-- `budget_tokens`: Maximum allowed tokens
-- `used_tokens`: Actual tokens used
-- `utilization_pct`: Budget utilization percentage
-- `docs_packed/skipped/truncated`: Document counts
+1. **SSE query stream** (`/api/query` with `stream=true`) emitting typed events:
+   - `status`, `intent`, `sources`, `citations`, `token`, `error`, `complete`
+2. **Text stream chat endpoint** (`/api/chat`) for chat transport compatibility
 
-### Timing Metrics (per stage)
-- `hybrid_search_ms`: Combined vector ANN + FTS with RRF fusion time
-- `rerank_ms`: Reranking time
-- `dedup_ms`: Deduplication time
-- `budget_packing_ms`: Token budget packing time
-- `total_ms`: Total pipeline time
-
-### Reranker Metrics
-- Score distribution: min, max, mean, std
-
-### Threshold Filtering Metrics
-- `threshold_value`: Score threshold applied
-- `items_before/after_threshold`: Document counts
-- `safety_net_triggered`: Whether minimum docs override was used
-
-### Deduplication Metrics
-- Before/after counts, reduction percentage
+Internal stream events are typed dataclasses in `src/query_events.py` and encoded by `src/stream_protocol.py` utilities.
 
 ---
 
-## 9. CLI Usage Examples
+## 8. Metrics and Latency Instrumentation
+
+### Retrieval/Budget Metrics
+
+- token budget utilization and packed/skipped/truncated counts
+- per-stage timing (`hybrid_search_ms`, `dedup_ms`, `rerank_ms`, `budget_packing_ms`, `total_ms`)
+- reranker score distributions
+- threshold filtering and safety-net metrics
+
+### Latency Reporting
+
+`RagEngine` records wall and stage spans via `LatencyProfiler`; CLI can print the formatted report with `--latency`.
+
+---
+
+## 9. Intent Classification
+
+The system uses a two-stage intent classifier:
+
+1. **Heuristic regex classifier** for common intents
+2. **LLM fallback** when confidence is below threshold (default `0.70`)
+
+Default fallback model: `mlx-community/LFM2-8B-A1B-4bit`.
+
+---
+
+## 10. Usage Examples
 
 ```bash
-# Auto-detect mode based on RAM
+# CLI query (auto mode)
 python -m src.cli query "What is the main argument?"
 
-# Specify deep-research mode explicitly
-python -m src.cli query "Analyze the methodology" --mode power-deep-research
+# Turbo mode + citations
+python -m src.cli query "What docs are in here" --mode turbo --cite
 
-# Set mode via environment variable
-export RAG_MODE=power-deep-research
-python -m src.cli query "Compare the two approaches"
+# Print latency report
+python -m src.cli query "Analyze this" --latency
 
-# Ingest with summaries (uses LanceDB via --lance)
-python -m src.cli ingest document.pdf --source-id doc1 --lance data/lance
+# API health
+curl http://127.0.0.1:8000/api/health
 
-# Ingest without generating summaries
-python -m src.cli ingest document.pdf --source-id doc1 --lance data/lance --no-summarize
-
-# Enable citations with custom intent
-python -m src.cli query "Explain the concept" --cite --intent explain
-
-# Only show retrieved context without generation
-python -m src.cli query "Search for key terms" --no-generate
+# API streamed query (SSE)
+curl -N -H "Content-Type: application/json" \
+  -d '{"query":"Compare these views","stream":true}' \
+  http://127.0.0.1:8000/api/query
 ```
 
 ---
-
-## 10. Intent Classification
-
-The system implements **intent-based generation** with a two-stage classification pipeline to apply task-specific prompt engineering for improved response quality.
-
-### Heuristic Classification
-
-Primary classification uses regex-based pattern matching to identify query intents:
-
-- **Explain**: Explanatory queries (e.g., "What is...", "Explain...", "How does...")
-- **Compare**: Comparative analysis (e.g., "Compare A and B", "Differences between...")
-- **Summarize**: Summarization requests (e.g., "Summarize the main points")
-- **List**: Enumeration queries (e.g., "List the documents", "What are the key concepts")
-- **Overview**: General queries that may require fallback classification
-
-Each pattern returns a confidence score (0.0-1.0) based on match strength.
-
-### LLM Fallback
-
-For queries with heuristic confidence below the threshold (default 0.7), the system automatically falls back to an LLM classifier using `mlx-community/LFM2-8B-A1B-4bit` for more accurate intent determination. The LLM uses a structured prompt to output JSON-formatted classifications.
 
 ## 11. Dependencies
 
 ### Required
-- `lancedb` - Unified vector and metadata store with native hybrid search
-- `pyarrow` - Columnar serialization for LanceDB
-- `pydantic` - Configuration validation
-- `sentence-transformers` - Embedding model inference
-- `jinaai/jina-reranker-v3-mlx` - Reranker model (MLX-native)
-- `mlx-lm` - LLM inference on Apple Silicon
-- `pypdf` - PDF text extraction
-- `pdfminer.six` - Fallback PDF extraction
-- `PyMuPDF` - Additional PDF processing with page labels
-- `pytesseract` - OCR fallback for scanned PDFs
-- `pdf2image` - Image extraction for OCR
+
+- `lancedb`, `pyarrow`, `pydantic`
+- `sentence-transformers`, `mlx-lm`, `mistral-common`, `safetensors`
+- `pypdf`, `pdfminer.six`, `PyMuPDF`, `pytesseract`, `pdf2image`
+- `fastapi`, `uvicorn`, `httpx`, `python-multipart`, `sse-starlette`
 
 ### Optional
-- `psutil` - Cross-platform RAM detection for auto mode selection
+
+- `psutil` for robust RAM detection and mode auto-scaling

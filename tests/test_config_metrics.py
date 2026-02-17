@@ -87,6 +87,17 @@ class TestModeConfig:
         assert config.reranker_threshold == 0.04
         assert config.reranker_min_docs == 4
 
+    def test_turbo_mode(self):
+        config = _get_mode_config("turbo", ram_gb=32.0)
+        assert config.mode == "turbo"
+        assert "Ministral" in config.llm_model
+        assert config.context_window == 8_000
+        assert config.retrieval_budget == 4_000
+        assert config.top_k_fused == 20
+        assert config.top_k_final == 3
+        assert config.reranker_enabled is False
+        assert config.context_expansion_enabled is False
+
     def test_unknown_mode_raises(self):
         with pytest.raises(ValueError, match="Unknown mode"):
             _get_mode_config("nonexistent", ram_gb=64.0)
