@@ -7,6 +7,7 @@ import { CitationPanelReader } from "@/components/citation-viewer-modal";
 import { File } from "@/components/assistant-ui/file";
 import { useAppState, useAppDispatch } from "@/context/app-context";
 import { Checkbox } from "@/components/ui/checkbox";
+import { MarkdownRenderer } from "@/components/markdown-renderer";
 
 interface SourcePanelProps {
   selectedSourceIds: string[];
@@ -44,9 +45,6 @@ export function SourcePanel({
   const [activeSourceId, setActiveSourceId] = useState<string | null>(null);
   const [uploadQueue, setUploadQueue] = useState<UploadRequest[]>([]);
   const [isUploading, setIsUploading] = useState(false);
-  const [sourceContent, setSourceContent] = useState<Record<string, string>>({});
-  const [loadingContentId, setLoadingContentId] = useState<string | null>(null);
-  const [contentError, setContentError] = useState<string | null>(null);
   const [uploadStatus, setUploadStatus] = useState<
     | null
     | { stage: "uploading"; fileName: string; sourceId: string; queued: number }
@@ -201,11 +199,6 @@ export function SourcePanel({
     try {
       await sourceApi.deleteSource(sourceId);
       setSources((prev) => prev.filter((s) => s.source_id !== sourceId));
-      setSourceContent((prev) => {
-        const next = { ...prev };
-        delete next[sourceId];
-        return next;
-      });
       if (activeSourceId === sourceId) {
         setActiveSourceId(null);
       }
@@ -219,26 +212,9 @@ export function SourcePanel({
     }
   }
 
-  async function handleViewFullText(sourceId: string, e: React.MouseEvent) {
+  function handleViewFullText(sourceId: string, e: React.MouseEvent) {
     e.stopPropagation();
-    if (sourceContent[sourceId]) {
-      setSourceContent((prev) => {
-        const next = { ...prev };
-        delete next[sourceId];
-        return next;
-      });
-      return;
-    }
-    setContentError(null);
-    setLoadingContentId(sourceId);
-    try {
-      const content = await sourceApi.getContent(sourceId);
-      setSourceContent((prev) => ({ ...prev, [sourceId]: content.content }));
-    } catch (err) {
-      setContentError(err instanceof Error ? err.message : "Failed to load content");
-    } finally {
-      setLoadingContentId(null);
-    }
+    dispatch({ type: "SET_ACTIVE_CITATION", citation: { source_id: sourceId } });
   }
 
   /* ── Citation reader mode — slides in over the file list ── */
@@ -411,7 +387,6 @@ export function SourcePanel({
             const isActive = activeSourceId === source.source_id;
             const isPending = source.ingestState === "ingesting" || source.ingestState === "queued";
             const sizeLabel = formatBytes(source.content_size_bytes ?? source.source_size_bytes);
-            const hasContent = Boolean(sourceContent[source.source_id]);
             return (
               <div
                 key={source.source_id}
@@ -495,37 +470,18 @@ export function SourcePanel({
 
                 {isActive && (
                   <div className="mt-3 pl-11 pr-1 space-y-2">
-                    <div className="text-xs text-gray-300 whitespace-pre-wrap leading-relaxed max-h-28 overflow-y-auto rounded-md bg-gray-900/60 border border-gray-800 px-2 py-2">
-                      {source.ingestState === "queued"
-                        ? "In Ingest Queue"
-                        : source.ingestState === "ingesting"
-                        ? "Ingesting..."
-                        : source.summary?.trim() || "No summary available for this source."}
+                    <div className="rounded-xl border border-[#2a2a2a] bg-[#141414] px-3 py-2.5 max-h-40 overflow-y-auto text-xs text-muted-foreground prose prose-invert prose-xs max-w-none [&_p]:leading-relaxed [&_p]:my-1 [&_li]:my-0 [&_ul]:my-1">
+                      {source.ingestState === "queued" || source.ingestState === "ingesting"
+                        ? <p>{source.ingestState === "queued" ? "In Ingest Queue" : "Ingesting..."}</p>
+                        : <MarkdownRenderer content={source.summary?.trim() || "No summary available for this source."} />}
                     </div>
                     {!isPending && (
-                      <div className="flex items-center justify-between gap-2">
-                        <button
-                          onClick={(e) => handleViewFullText(source.source_id, e)}
-                          disabled={loadingContentId === source.source_id}
-                          className="px-2.5 py-1.5 text-xs rounded-md bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-200 disabled:opacity-60 disabled:cursor-not-allowed"
-                        >
-                          {hasContent
-                            ? "Hide full text"
-                            : loadingContentId === source.source_id
-                            ? "Loading..."
-                            : "View full text"}
-                        </button>
-                      </div>
-                    )}
-
-                    {contentError && loadingContentId !== source.source_id && (
-                      <p className="text-xs text-red-400">{contentError}</p>
-                    )}
-
-                    {!isPending && hasContent && (
-                      <pre className="text-xs text-gray-300 whitespace-pre-wrap max-h-48 overflow-y-auto rounded-md bg-gray-950 border border-gray-800 px-2 py-2">
-                        {sourceContent[source.source_id]}
-                      </pre>
+                      <button
+                        onClick={(e) => handleViewFullText(source.source_id, e)}
+                        className="px-3 py-1.5 text-xs rounded-lg bg-[#1e1e1e] hover:bg-[#252525] border border-[#2a2a2a] hover:border-[#333333] text-[#d0d0d0] transition-colors"
+                      >
+                        View full text
+                      </button>
                     )}
                   </div>
                 )}
