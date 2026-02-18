@@ -139,8 +139,8 @@ function useDeepResearchAvailable(): boolean {
 }
 
 const MODES = [
-  { id: "regular", name: "Regular", description: "Standard research mode" },
-  { id: "deep-research", name: "Deep Research", description: "In-depth multi-step analysis" },
+  { id: "regular", name: "Regular", description: "Qwen3-30B-A3B" },
+  { id: "deep-research", name: "Deep Research", description: "Qwen3-Next-80B-A3B" },
 ];
 
 const Composer: FC = () => {
@@ -164,13 +164,14 @@ const Composer: FC = () => {
 const ComposerAction: FC<{ deepResearchAvailable: boolean }> = ({ deepResearchAvailable }) => {
   return (
     <div className="aui-composer-action-wrapper relative mx-2 mb-2 flex items-center justify-between">
-      <div>
+      <div className="flex items-center gap-1">
         {deepResearchAvailable && (
           <ModelSelector
             models={MODES}
             defaultValue="regular"
             variant="ghost"
             size="sm"
+            contentClassName="border-[#2e2e2e] bg-[#1a1a1a]"
           />
         )}
       </div>

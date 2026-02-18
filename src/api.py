@@ -103,14 +103,26 @@ _FRONTEND_MODE_MAP: dict[str, str] = {
 }
 
 
-def _get_engine(mode: str = "regular"):
+def _get_engine(mode: str | None = None):
     """Return the RagEngine for the given mode.
 
     Only one engine is kept in memory at a time.  If the requested mode
     differs from the currently-loaded engine, the old engine is closed and a
     new one is initialised for the new mode.
+
+    If *mode* is None (the default), the currently-loaded engine is returned
+    as-is.  A new engine is only cold-started when no engine is loaded yet,
+    in which case ``"regular"`` is used as the fallback mode.  This prevents
+    non-chat endpoints (source lookups, ingest, etc.) from accidentally
+    triggering a model swap back to ``"regular"`` while a different model is
+    active.
     """
     global _engine, _engine_mode, _engine_loaded
+
+    # Resolve mode: keep whatever is loaded; only default to "regular" when
+    # nothing is loaded at all.
+    if mode is None:
+        mode = _engine_mode if _engine_mode is not None else "regular"
 
     # Fast path — already the right model.
     if _engine is not None and _engine_mode == mode:
