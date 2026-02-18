@@ -26,6 +26,7 @@ import {
   ChevronRightIcon,
   CopyIcon,
   DownloadIcon,
+  MicIcon,
   MoreHorizontalIcon,
   PencilIcon,
   RefreshCwIcon,
@@ -116,7 +117,7 @@ const ThreadSuggestionItem: FC = () => {
       <SuggestionPrimitive.Trigger send asChild>
         <Button
           variant="ghost"
-          className="aui-thread-welcome-suggestion h-auto w-full @md:flex-col flex-wrap items-start justify-start gap-1 rounded-2xl border border-[#2a2a2a] bg-[#1a1a1a] hover:bg-[#222222] px-4 py-3 text-left text-sm transition-colors"
+          className="aui-thread-welcome-suggestion h-auto w-full @md:flex-col flex-wrap items-start justify-start gap-1 rounded-2xl border border-[#2a2a2a] hover:border-[#3a3a3a] bg-[#1a1a1a] hover:bg-[#222222] px-4 py-3 text-left text-sm transition-colors"
         >
           <span className="aui-thread-welcome-suggestion-text-1 font-medium">
             <SuggestionPrimitive.Title />
@@ -130,16 +131,6 @@ const ThreadSuggestionItem: FC = () => {
   );
 };
 
-function useDeepResearchAvailable(): boolean {
-  const [available, setAvailable] = useState(false);
-  useEffect(() => {
-    fetch("/api/system-info")
-      .then((r) => r.json())
-      .then((data) => setAvailable((data?.ram_gb ?? 0) >= 48))
-      .catch(() => setAvailable(false));
-  }, []);
-  return available;
-}
 
 const MODES = [
   { id: "regular", name: "Regular", description: "Qwen3-30B-A3B" },
@@ -147,66 +138,63 @@ const MODES = [
 ];
 
 const Composer: FC = () => {
-  const deepResearchAvailable = useDeepResearchAvailable();
+  const isEmpty = useAuiState((s) => s.composer.isEmpty);
+  const isRunning = useAuiState((s) => s.thread.isRunning);
   return (
-    <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
-      <div className="aui-composer-attachment-dropzone flex w-full flex-col rounded-[14px] border border-[#2e2e2e] bg-[#1a1a1a] px-1 pt-2 outline-none transition-shadow focus-within:border-[#444444]">
+    <ComposerPrimitive.Root
+      className="aui-composer-root group/composer relative flex w-full flex-col"
+      data-empty={isEmpty}
+      data-running={isRunning}
+    >
+      {/* Single-row pill */}
+      <div className="aui-composer-attachment-dropzone flex w-full items-center gap-2 rounded-full ring-1 ring-[#2e2e2e] ring-inset bg-[#1a1a1a] px-4 py-1 outline-none transition-shadow focus-within:ring-[#444444]">
+        {/* Text input — grows to fill space */}
         <ComposerPrimitive.Input
-          placeholder="Send a message..."
-          className="aui-composer-input mb-1 max-h-32 min-h-14 w-full resize-none bg-transparent px-4 pt-2 pb-3 text-sm text-white outline-none placeholder:text-[#555555] focus-visible:ring-0"
+          placeholder="What do you want to know?"
+          className="aui-composer-input max-h-32 flex-1 resize-none bg-transparent py-2 text-sm text-white outline-none placeholder:text-[#555555] focus-visible:ring-0"
           rows={1}
           autoFocus
           aria-label="Message input"
         />
-        <ComposerAction deepResearchAvailable={deepResearchAvailable} />
-      </div>
-    </ComposerPrimitive.Root>
-  );
-};
 
-const ComposerAction: FC<{ deepResearchAvailable: boolean }> = ({ deepResearchAvailable }) => {
-  return (
-    <div className="aui-composer-action-wrapper relative mx-2 mb-2 flex items-center justify-between">
-      <div className="flex items-center gap-1">
-        {deepResearchAvailable && (
-          <ModelSelector
-            models={MODES}
-            defaultValue="regular"
-            variant="ghost"
-            size="sm"
-            contentClassName="border-[#2e2e2e] bg-[#1a1a1a]"
-          />
-        )}
-      </div>
-      <AuiIf condition={(s) => !s.thread.isRunning}>
-        <ComposerPrimitive.Send asChild>
-          <TooltipIconButton
-            tooltip="Send message"
-            side="bottom"
-            type="submit"
-            variant="default"
-            size="icon"
-            className="aui-composer-send size-8 rounded-full bg-[#2a2a2a] hover:bg-[#383838] text-white border-0"
+        {/* Model selector — always visible */}
+        <ModelSelector
+          models={MODES}
+          defaultValue="regular"
+          variant="ghost"
+          size="sm"
+          contentClassName="border-[#2e2e2e] bg-[#1a1a1a]"
+        />
+
+        {/* Animated 3-state button */}
+        <div className="relative shrink-0 size-9 rounded-full bg-white">
+          {/* Mic — visible only when empty & not running */}
+          <button
+            type="button"
+            aria-label="Voice input"
+            className="absolute inset-0 flex items-center justify-center rounded-full transition-all duration-150 group-data-[empty=false]/composer:scale-0 group-data-[empty=false]/composer:opacity-0 group-data-[running=true]/composer:scale-0 group-data-[running=true]/composer:opacity-0"
+          >
+            <MicIcon className="size-4 text-black" />
+          </button>
+
+          {/* Send — visible when text present & not running */}
+          <ComposerPrimitive.Send
+            className="absolute inset-0 flex items-center justify-center rounded-full transition-all duration-150 group-data-[empty=true]/composer:scale-0 group-data-[empty=true]/composer:opacity-0 group-data-[running=true]/composer:scale-0 group-data-[running=true]/composer:opacity-0"
             aria-label="Send message"
           >
-            <ArrowUpIcon className="aui-composer-send-icon size-4 aui-icon-accent" />
-          </TooltipIconButton>
-        </ComposerPrimitive.Send>
-      </AuiIf>
-      <AuiIf condition={(s) => s.thread.isRunning}>
-        <ComposerPrimitive.Cancel asChild>
-          <Button
-            type="button"
-            variant="default"
-            size="icon"
-            className="aui-composer-cancel size-8 rounded-full bg-[#2a2a2a] hover:bg-[#383838] text-white border-0"
+            <ArrowUpIcon className="size-4 text-black" />
+          </ComposerPrimitive.Send>
+
+          {/* Cancel — visible only when running */}
+          <ComposerPrimitive.Cancel
+            className="absolute inset-0 flex items-center justify-center rounded-full transition-all duration-150 group-data-[running=false]/composer:scale-0 group-data-[running=false]/composer:opacity-0"
             aria-label="Stop generating"
           >
-            <SquareIcon className="aui-composer-cancel-icon size-3 fill-current" />
-          </Button>
-        </ComposerPrimitive.Cancel>
-      </AuiIf>
-    </div>
+            <SquareIcon className="size-3 fill-black text-black" />
+          </ComposerPrimitive.Cancel>
+        </div>
+      </div>
+    </ComposerPrimitive.Root>
   );
 };
 

@@ -26,20 +26,21 @@
   --foreground: #ffffff;
 
   /* Card / popover surfaces */
-  --card: #1a1a1a;
+  --card: #181818;
   --card-foreground: #ffffff;
-  --popover: #1a1a1a;
+  --popover: #181818;
   --popover-foreground: #ffffff;
 
   /* Primary interactive elements (dark buttons with white text) */
-  --primary: #2a2a2a;
+  --primary: #282828;
   --primary-foreground: #ffffff;
 
   /* Secondary / muted */
-  --secondary: #1e1e1e;
+  --secondary: #1c1c1c;
   --secondary-foreground: #ffffff;
-  --muted: #1e1e1e;
-  --muted-foreground: #888888;
+  --muted: #1c1c1c;
+  --muted-foreground: #9a9a9a;
+  --muted-foreground-faint: #6b6b6b;
 
   /* Accent */
   --accent: #1c1c1c;
