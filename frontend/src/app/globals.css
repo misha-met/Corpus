@@ -17,7 +17,7 @@
   background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
-  animation: shimmer 2s linear infinite;
+  animation: shimmer 3.5s linear infinite;
 }
 
 /* ─── Monochrome dark theme (blacks / dark greys / white) ─────────────────── */

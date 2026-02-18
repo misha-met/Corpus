@@ -79,7 +79,12 @@ export default function Page() {
     switch (event.type) {
       case "status":
         dispatch({ type: "SET_STATUS", status: event.status });
-        dispatch({ type: "ADD_THINKING_STEP", message: event.status });
+        if (
+          event.status !== "Building prompt..." &&
+          event.status !== "Generating answer..."
+        ) {
+          dispatch({ type: "ADD_THINKING_STEP", message: event.status });
+        }
         break;
       case "intent": {
         dispatch({

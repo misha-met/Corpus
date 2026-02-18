@@ -1302,6 +1302,35 @@ class RagEngine:
                 search_query, source_id=source_id,
                 params=retrieval_params,
             )
+            # -- emit detailed retrieval step statuses ---------------------
+            if results:
+                m = results[0].metrics
+                if m:
+                    t = m.timing
+                    d = m.deduplication
+                    th = m.threshold
+                    n_raw = d.children_before_dedup
+                    yield StatusEvent(
+                        status=f"Hybrid search: {n_raw} results in {t.hybrid_search_ms:.0f}ms"
+                    )
+                    if d.parents_deduplicated > 0:
+                        yield StatusEvent(
+                            status=(
+                                f"Deduplication: {n_raw} → {d.children_after_dedup} docs"
+                                f" ({d.parents_deduplicated} duplicates removed)"
+                            )
+                        )
+                    if m.reranker.items_reranked > 0:
+                        yield StatusEvent(
+                            status=(
+                                f"Reranker: scored {m.reranker.items_reranked} docs in {t.rerank_ms:.0f}ms"
+                                f" → {th.items_after_threshold} passed"
+                                + (" (safety net)" if th.safety_net_triggered else "")
+                            )
+                        )
+                    yield StatusEvent(
+                        status=f"Retrieved {len(results)} relevant passage{'s' if len(results) != 1 else ''}"
+                    )
             source_ids = sorted(
                 {
                     r.metadata.get("source_id")
@@ -1373,6 +1402,19 @@ class RagEngine:
                 consecutive_fail_threshold=3,
                 allow_truncation=True,
                 log=logger,
+            )
+            # -- budget summary status ------------------------------------
+            n_packed = len(pack_result.packed_docs)
+            used_tok = pack_result.used_tokens
+            budget_pct = f"{100 * used_tok / config.retrieval_budget:.0f}%" if config.retrieval_budget else "n/a"
+            _budget_extras = []
+            if pack_result.skipped_count:
+                _budget_extras.append(f"{pack_result.skipped_count} skipped")
+            if pack_result.truncated_count:
+                _budget_extras.append(f"{pack_result.truncated_count} truncated")
+            _extra_str = f" ({', '.join(_budget_extras)})" if _budget_extras else ""
+            yield StatusEvent(
+                status=f"Budget: {n_packed} docs, {used_tok:,} tokens ({budget_pct} of budget){_extra_str}"
             )
 
             packed_metadatas = [

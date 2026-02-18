@@ -23,15 +23,25 @@ import {
 export const ThinkingPanel: FC = () => {
   const { thinkingSteps } = useAppState();
   const isRunning = useAuiState((s) => s.message.status?.type === "running");
+  // Flips true the moment the first text token lands and remains true
+  // for the rest of the active stream.
+  const hasText = useAuiState((s) =>
+    s.message.parts.some((p) => p.type === "text"),
+  );
 
   if (!isRunning && thinkingSteps.length === 0) return null;
 
+  const triggerLabel = !isRunning
+    ? "Done"
+    : hasText
+      ? "Generating answer..."
+      : thinkingSteps.length > 0
+        ? "Thinking..."
+        : "Searching...";
+
   return (
     <ReasoningRoot variant="ghost" defaultOpen={false}>
-      <ReasoningTrigger
-        active={isRunning}
-        label={isRunning ? "Thinking..." : "Thinking"}
-      />
+      <ReasoningTrigger active={isRunning} label={triggerLabel} />
       <ReasoningContent aria-busy={isRunning}>
         <ReasoningText>
           <ul className="space-y-1.5">
