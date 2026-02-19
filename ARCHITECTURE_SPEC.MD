@@ -11,7 +11,7 @@ The application is a **full-stack offline RAG system** designed for local-first 
 - **Decoupled RAG engine** (`src/rag_engine.py`) -- shared by CLI and API, orchestrates the full pipeline
 - **Hybrid retrieval pipeline** (`src/retrieval.py`) -- LanceDB ANN + BM25 FTS with RRF fusion, Jina v3 reranking
 - **MLX inference stack** -- generator (`src/generator.py`), embeddings (`src/embeddings.py`), reranker (`src/reranker.py`)
-- **Mode-aware configuration** (`src/config.py`) -- RAM-based auto-scaling across three operating modes
+- **Mode-aware configuration** (`src/config.py`) -- RAM-based auto-scaling across active operating modes
 - **Inline academic citations** -- source-grounded responses with chunk-level references
 
 ---
@@ -65,6 +65,11 @@ Unified LanceDB-backed storage managing three table types:
 - Parent chunks: 1000-1500 tokens (1200 target, 150 overlap)
 - Child chunks: 200-300 tokens (250 target, 50 overlap)
 
+**Child trailing-fragment handling:**
+- Child segments below `CHILD_MIN_TOKENS` are not dropped.
+- If a prior child exists, short trailing text is merged into that previous child.
+- If no prior child exists, a sole short child is created so sparse facts remain searchable.
+
 **Markdown ingestion:** Parses headers (H1-H6) into sections with hierarchical `header_path` (e.g., "Document > Chapter 1 > Section A"), then chunks each section into parent/child pairs.
 
 **PDF ingestion:** Four-strategy fallback chain, each producing `_PageData` tuples that feed into a shared `_chunk_pages()` helper:
@@ -105,17 +110,22 @@ query_text
 [3. Parent Dedup] -- keep highest-scored child per parent_id
   |
   v
-[4. Rerank] -- Jina v3 listwise reranker (skipped in turbo mode)
+[4. Rerank] -- Jina v3 listwise reranker
   |             replaces fusion score with cosine similarity score
   v
-[5. Threshold Filter] -- score > threshold, safety net: min_docs guaranteed
+[5. Threshold Filter] -- adaptive threshold + safety net: min_docs guaranteed
   |
   v
-[6. Context Expansion] -- fetch parent text (skipped in turbo mode)
+[6. Context Expansion] -- fetch parent text
   |
   v
 List[RetrievalResult] with text, metadata, scores, optional parent_text
 ```
+
+Additional retrieval controls in the current pipeline:
+- **Adaptive reranker threshold**: effective threshold is `max(config_threshold, top_score * 0.15)`.
+- **Budget-aware expansion**: when selected chunks underfill budget, `k_final` expands up to a budget ceiling.
+- **Sub-threshold expansion**: for starved contexts, additional below-threshold chunks are admitted up to a capped budget share.
 
 Boilerplate filtering removes known LLM-speak ("as an AI", "as a language model", etc.) from retrieved chunks.
 
@@ -149,8 +159,10 @@ Two-stage classifier with heuristic-first design:
 
 **Stage 1 -- Heuristic (regex + structural signals):**
 - 8 intents: `OVERVIEW`, `SUMMARIZE`, `EXPLAIN`, `ANALYZE`, `COMPARE`, `CRITIQUE`, `FACTUAL`, `COLLECTION`
-- ~90 regex patterns across all intents
-- Structural signal boosting: corpus scope, command verbs, comparative structures, technical how/why
+- Regex families include corpus/document inventory, factual extraction, analysis/comparison/critique, and summary/explain framing.
+- Structural boosts include command verbs, comparative/extraction structures, corpus-scope detection, and technical how/why bias.
+- **Why-question specificity override**: `why` queries with a detected named entity + action verb are promoted to `FACTUAL`.
+- **Enumeration + entity-mention routing**: patterns like `list every/all`, `name all`, `what mentions of ...`, `find all references to ...`, and `where is ... discussed` are routed to `FACTUAL` for chunk-level retrieval.
 - Typo tolerance via `difflib.get_close_matches(cutoff=0.82)`
 - Confidence levels: 0.85 (strong, 2+ hits), 0.70 (single hit), 0.50 (weak), 0.40 (fallback)
 
@@ -160,6 +172,8 @@ Two-stage classifier with heuristic-first design:
 - JSON output: `{"intent": "...", "confidence": 0.0-1.0}`
 - Final gate: demotes to OVERVIEW if confidence < 0.60
 
+`rag_engine.py` also applies a **source-selection guard**: with multiple sources loaded, queries such as “which document/source …” are forced to `COLLECTION` summary routing.
+
 ### 3.9 Prompt Construction (`src/generation.py`)
 
 Intent-aware message builder producing chat-format messages:
@@ -168,6 +182,7 @@ Intent-aware message builder producing chat-format messages:
 - **8 instruction profiles:** Each defines `task`, `format`, `tone` (e.g., ANALYZE = "6-8 focused paragraphs, 60-100 words each, analytical, objective, scholarly")
 - **Citation rules:** When enabled, adds mandatory `[N]` inline citation format
 - **Source legend:** Maps source IDs to display names when they differ
+- **Context-sparsity warning:** Injects an explicit anti-hallucination warning when retrieved context fills <10% of retrieval budget
 - **Output:** `[{role: "system", content: ...}, {role: "user", content: context + question}]`
 
 ### 3.10 RAG Engine (`src/rag_engine.py`)
@@ -179,9 +194,10 @@ Central orchestrator consumed by both CLI and API:
 - **`query_events()`**: Streaming path yielding `QueryEvent` objects (status, intent, sources, citations, tokens, errors, finish)
 - **`ingest()`**: Ingests document, embeds chunks, optionally summarizes
 - **Output sanitization:** `_sanitize_output()` strips instruction leakage ("Important:", "Task:", "Format:", "Tone:"), filler phrases, and deduplicates repeated halves (>85% similarity)
-- **Heuristic query expansion:** `_expand_query()` appends intent-specific static terms (controlled by `enable_query_expansion` flag)
+- **Decoupled query expansion:** `_expand_query()` appends intent terms for BM25 retrieval only; embedding query remains the original user text
 - **Offline mode:** `_enable_offline_if_cached()` sets `HF_HUB_OFFLINE=1` when all models are cached locally
 - **Metal cache management:** Explicit `mx.clear_cache()` to release GPU memory between phases
+- **Hallucination guardrail signal:** `_check_novel_proper_nouns()` logs warnings when generated output contains many proper nouns absent from retrieved context
 
 ### 3.11 Event System (`src/query_events.py`, `src/stream_protocol.py`)
 
@@ -298,21 +314,20 @@ Page (app/page.tsx)
 
 ### 5.1 Operating Modes
 
-Three user-selectable modes with RAM-aware auto-scaling within `regular`:
+Current active modes (`VALID_MODES`) with RAM-aware scaling in `regular`:
 
 | Mode | LLM Model | Context Window | Retrieval Budget | RAM |
 |------|-----------|----------------|------------------|-----|
-| `turbo` | Ministral-3-3B-Instruct-4bit | 8K | 4K | 16GB+ |
-| `regular` (32GB) | Qwen3-30B-A3B-Instruct-4bit | 16K | 8K | 32GB |
-| `regular` (48-63GB) | Qwen3-30B-A3B-Instruct-4bit | 64K | 32K | 48GB |
-| `regular` (64GB+) | Qwen3-30B-A3B-Instruct-4bit | 64K | 48K | 64GB |
-| `power-deep-research` | Qwen3-Next-80B-A3B-Instruct-4bit | 48K | 40K | 64GB |
+| `regular` (32-47GB) | Qwen3-30B-A3B-Instruct-2507-4bit | 16K | 8K | 32GB+ |
+| `regular` (48-63GB) | Qwen3-30B-A3B-Instruct-2507-4bit | 64K | 32K | 48GB+ |
+| `regular` (64GB+) | Qwen3-30B-A3B-Instruct-2507-4bit | 64K | 48K | 64GB+ |
+| `power-deep-research` | Qwen3-Next-80B-A3B-Instruct-4bit | 48K | 40K | 64GB+ |
 
 All modes share: Qwen3-Embedding-0.6B-4bit-DWQ (embeddings) + jinaai/jina-reranker-v3-mlx (reranker).
 
 ### 5.2 Mode Selection Precedence
 
-1. CLI flag: `--mode turbo|regular|power-deep-research`
+1. CLI flag: `--mode regular|power-deep-research`
 2. Environment variable: `RAG_MODE=<mode>`
 3. Auto-detection: defaults to `regular` with RAM-based parameter scaling
 
@@ -320,16 +335,16 @@ Legacy mode names (`high`, `efficiency`, `power-fast`, etc.) are mapped to curre
 
 ### 5.3 Retrieval Parameters by Mode
 
-| Parameter | Turbo | Regular (32GB) | Regular (48-63GB) | Regular (64GB+) | Deep-Research |
-|-----------|-------|----------------|-------------------|-----------------|---------------|
-| `top_k_dense` | 40 | 100 | 100 | 200 | 400 |
-| `top_k_fused` | 20 | 50 | 50 | 100 | 200 |
-| `top_k_rerank` | 20 (disabled) | 20 | 20 | 40 | 60 |
-| `top_k_final` | 3 | 5 | 5 | 8 | 8 |
-| `reranker_threshold` | 0.01 | 0.05 | 0.05 | 0.04 | 0.04 |
-| `reranker_min_docs` | 3 | 3 | 3 | 4 | 4 |
-| Reranker enabled | No | Yes | Yes | Yes | Yes |
-| Context expansion | No | Yes | Yes | Yes | Yes |
+| Parameter | Regular (32-47GB) | Regular (48-63GB) | Regular (64GB+) | Deep-Research |
+|-----------|-------------------|-------------------|-----------------|---------------|
+| `top_k_dense` | 100 | 100 | 200 | 400 |
+| `top_k_fused` | 50 | 50 | 100 | 200 |
+| `top_k_rerank` | 20 | 20 | 40 | 60 |
+| `top_k_final` | 5 | 5 | 8 | 8 |
+| `reranker_threshold` | 0.05 | 0.05 | 0.04 | 0.04 |
+| `reranker_min_docs` | 3 | 3 | 4 | 4 |
+| Reranker enabled | Yes | Yes | Yes | Yes |
+| Context expansion | Yes | Yes | Yes | Yes |
 
 ### 5.4 System Detection
 
@@ -476,8 +491,8 @@ source_cache.save_snapshot() -> data/source_cache/
 # CLI query (auto mode)
 python -m src.cli query "What is the main argument?"
 
-# Turbo mode + citations
-python -m src.cli query "What docs are in here" --mode turbo --cite
+# Regular mode + citations
+python -m src.cli query "What docs are in here" --mode regular --cite
 
 # Print latency report
 python -m src.cli query "Analyze this" --latency
