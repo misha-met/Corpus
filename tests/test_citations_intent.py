@@ -195,6 +195,9 @@ class TestIntentClassification:
             ("Name the key theorists", Intent.FACTUAL),
             ("Extract all publication years and cited authors", Intent.FACTUAL),
             ("Format the results as a table", Intent.FACTUAL),
+            ("what mentions of ChatGPT are there", Intent.FACTUAL),
+            ("where is mortality discussed in the text", Intent.FACTUAL),
+            ("find all references to the Nurse", Intent.FACTUAL),
             # COLLECTION intent tests
             ("What documents do we have?", Intent.COLLECTION),
             ("What are we looking at?", Intent.COLLECTION),
@@ -595,7 +598,7 @@ class TestCollectionIntent:
         assert result.confidence >= 0.60
 
     def test_collection_generation_messages(self):
-        """COLLECTION messages should contain corpus/collection-level instructions."""
+        """COLLECTION messages should contain passage-finding instructions."""
         messages = build_messages(
             context="Source: doc1\nSummary: About linguistics.\n\nSource: doc2\nSummary: About philosophy.",
             question="What documents do we have?",
@@ -603,7 +606,7 @@ class TestCollectionIntent:
             citations_enabled=False,
         )
         system = messages[0]["content"]
-        assert "collection" in system.lower() or "document" in system.lower()
+        assert "passages" in system.lower() or "mentions" in system.lower() or "references" in system.lower()
 
     def test_collection_citations_auto_disabled(self):
         """COLLECTION intent uses summaries, so citation rules should NOT be injected."""
@@ -628,6 +631,21 @@ class TestCollectionIntent:
             assert result.intent == Intent.COLLECTION, (
                 f"Query '{q}': expected collection, got {result.intent.value}"
             )
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "what mentions of ChatGPT are there",
+            "where is mortality discussed in the text",
+            "find all references to the Nurse",
+        ],
+    )
+    def test_entity_mentions_not_collection(self, query: str):
+        """Entity-mention queries should route to FACTUAL chunk retrieval, not COLLECTION summaries."""
+        result = _classify_heuristic(query)
+        assert result.intent == Intent.FACTUAL, (
+            f"Query '{query}': expected factual, got {result.intent.value}"
+        )
 
     def test_single_doc_overview_stays_overview(self):
         """Single-document overview queries should still be OVERVIEW, not COLLECTION."""

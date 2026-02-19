@@ -114,6 +114,15 @@ _INTENT_PATTERNS: dict[Intent, list[re.Pattern]] = {
         re.compile(r"\blist\s+(every|all)\b", re.IGNORECASE),
         re.compile(r"\bname\s+all\b", re.IGNORECASE),
         re.compile(r"\bwho\s+are\s+all\s+(the\s+)?\w", re.IGNORECASE),
+        # Entity-mention / reference-finding queries (Fix 10: moved from COLLECTION)
+        re.compile(r"\bwhat\s+mentions?\s+of\b.+\bare\s+there\b", re.IGNORECASE),
+        re.compile(r"\bwhere\s+is\b.+\bmentioned\b", re.IGNORECASE),
+        re.compile(r"\bwhere\s+does\b.+\bappear\b", re.IGNORECASE),
+        re.compile(r"\bfind\s+(all|every)\s+(references?|mentions?)\s+(to|of)\b", re.IGNORECASE),
+        re.compile(r"\bhow\s+many\s+times\s+is\b.+\bmentioned\b", re.IGNORECASE),
+        re.compile(r"\bwhat\s+does\s+the\s+text\s+say\s+about\b", re.IGNORECASE),
+        re.compile(r"\bwhat\s+is\s+said\s+about\b", re.IGNORECASE),
+        re.compile(r"\bwhere\s+is\b.+\bdiscuss(?:ed|es|ing)?\b", re.IGNORECASE),
     ],
     # ---- OVERVIEW: high-level single-document description ----
     Intent.OVERVIEW: [
@@ -300,6 +309,14 @@ _EXTRACTION_STRUCTURES: list[re.Pattern] = [
     re.compile(r"\blist\s+(every|all)\b", re.IGNORECASE),
     re.compile(r"\bname\s+all\b", re.IGNORECASE),
     re.compile(r"\bwho\s+are\s+all\b", re.IGNORECASE),
+    # Entity-mention / reference-finding — chunk-level recall queries
+    re.compile(r"\bmentions?\s+of\b", re.IGNORECASE),
+    re.compile(r"\bmentioned\b", re.IGNORECASE),
+    re.compile(r"\breferences?\s+to\b", re.IGNORECASE),
+    re.compile(r"\bwhere\s+is\b.+\bdiscuss", re.IGNORECASE),
+    re.compile(r"\bwhere\s+does\b.+\bappear\b", re.IGNORECASE),
+    re.compile(r"\bwhat\s+(does|did)\s+the\s+text\s+say\s+about\b", re.IGNORECASE),
+    re.compile(r"\bwhat\s+is\s+said\s+about\b", re.IGNORECASE),
 ]
 
 _SUMMARIZATION_STRUCTURES: list[re.Pattern] = [
@@ -630,7 +647,7 @@ Categories:
 - critique: User explicitly asks to evaluate, critique, or assess the merits of an argument — uses words like "evaluate", "critique", "strengths", "weaknesses", "how convincing"
 - analyze: User wants to understand how or why something works, or wants analysis of themes, patterns, causes, or mechanisms (default for "how does X" and "why does X" questions)
 - factual: User wants a direct factual answer extracted from the text (who, what, when, where, which, how many)
-- collection: User wants to know what documents are available, or wants an overview of all documents in the corpus
+- collection: User wants to know what documents are available or wants an overview of all documents in the corpus
 
 User query: "{query}"
 
