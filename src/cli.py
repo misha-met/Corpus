@@ -92,7 +92,7 @@ def run() -> None:
     )
     ingest_parser.add_argument(
         "--mode",
-        choices=["regular", "power-deep-research", "turbo"],
+        choices=["regular", "power-deep-research"],
         default=None,
         help="Operating mode",
     )
@@ -140,7 +140,7 @@ def run() -> None:
     )
     query_parser.add_argument(
         "--mode",
-        choices=["regular", "power-deep-research", "turbo"],
+        choices=["regular", "power-deep-research"],
         default=None,
         help="Operating mode",
     )

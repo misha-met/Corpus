@@ -4,7 +4,6 @@ pydantic
 sentence-transformers
 safetensors
 mlx-lm
-mistral-common
 pypdf
 pdfminer.six
 PyMuPDF
@@ -19,7 +18,6 @@ fastapi
 uvicorn
 httpx
 python-multipart
-sse-starlette
 
 # Offline Speech-to-Text (MLX Whisper)
 mlx-whisper

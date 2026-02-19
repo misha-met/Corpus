@@ -186,36 +186,13 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
             system_ram_gb=ram_gb,
         )
 
-    elif mode == "turbo":
-        return ModelConfig(
-            mode="turbo",
-            llm_model="mlx-community/Ministral-3-3B-Instruct-2512-4bit",
-            embedding_model="mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
-            reranker_model="jinaai/jina-reranker-v3-mlx",
-            embedding_device="cpu",
-            quantization="4-bit",
-            context_window=8_000,
-            retrieval_budget=4_000,
-            top_k_dense=40,
-            top_k_sparse=40,
-            top_k_fused=20,
-            top_k_rerank=20,
-            top_k_final=3,
-            reranker_threshold=0.01,
-            reranker_min_docs=3,
-            reranker_enabled=False,
-            context_expansion_enabled=False,
-            system_ram_gb=ram_gb,
-        )
-
     raise ValueError(f"Unknown mode: {mode}")
 
 
-VALID_MODES = {"regular", "power-deep-research", "turbo"}
+VALID_MODES = {"regular", "power-deep-research"}
 MODE_RAM_REQUIREMENTS: dict[str, float] = {
     "regular": 32.0,
     "power-deep-research": 64.0,
-    "turbo": 16.0,
 }
 
 

@@ -99,7 +99,6 @@ _engine_loaded: bool = False
 _FRONTEND_MODE_MAP: dict[str, str] = {
     "regular": "regular",
     "deep-research": "power-deep-research",
-    "turbo": "turbo",
 }
 
 
@@ -234,20 +233,6 @@ async def validation_exception_handler(request: Request, exc: Exception):
 @app.get("/api/health", response_model=HealthResponse)
 async def health():
     return HealthResponse(status="ok", engine_loaded=_engine_loaded)
-
-
-@app.get("/api/system-info")
-async def system_info():
-    """Return basic hardware info so the frontend can conditionally enable features."""
-    import subprocess
-    try:
-        ram_bytes_str = subprocess.check_output(
-            ["sysctl", "-n", "hw.memsize"], text=True
-        ).strip()
-        ram_gb = int(int(ram_bytes_str) / (1024 ** 3))
-    except Exception:
-        ram_gb = 0
-    return JSONResponse({"ram_gb": ram_gb})
 
 
 # ---------------------------------------------------------------------------

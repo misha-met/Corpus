@@ -302,7 +302,7 @@ def compute_highlight_texts(
 
         result = retrieval_results[result_idx]
 
-        # Skip if no parent text (turbo mode or no context expansion)
+        # Skip if no parent text (no context expansion)
         if not result.parent_text:
             continue
 

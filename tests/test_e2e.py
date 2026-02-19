@@ -116,17 +116,6 @@ class TestEndToEnd:
                 reranker_threshold=0.0, reranker_min_docs=1,
                 retrieval_budget=8000,
             )
-        elif mode == "turbo":
-            model_config = ModelConfig(
-                mode=mode, llm_model="test", embedding_model="test",
-                reranker_model="test",
-                top_k_dense=10, top_k_sparse=10, top_k_fused=20,
-                top_k_rerank=20, top_k_final=3,
-                reranker_threshold=0.0, reranker_min_docs=1,
-                reranker_enabled=False,
-                context_expansion_enabled=False,
-                retrieval_budget=4000,
-            )
         else:  # power-deep-research
             model_config = ModelConfig(
                 mode=mode, llm_model="test", embedding_model="test",
@@ -264,7 +253,7 @@ class TestEndToEnd:
     def test_e2e_all_queries_all_modes(self):
         """Run all fixed queries across all modes, collecting comprehensive metrics."""
         valid_queries = [q for q in FIXED_QUERIES if q.strip()]
-        modes = ["regular", "power-deep-research", "turbo"]
+        modes = ["regular", "power-deep-research"]
         all_results: list[dict] = []
 
         for mode in modes:

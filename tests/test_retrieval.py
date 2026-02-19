@@ -41,21 +41,6 @@ def _make_config(mode: str = "regular") -> ModelConfig:
             reranker_min_docs=2,
             retrieval_budget=8000,
         )
-    elif mode == "power-fast":
-        return ModelConfig(
-            mode="power-fast",
-            llm_model="test-model",
-            embedding_model="test-embed",
-            reranker_model="test-reranker",
-            top_k_dense=20,
-            top_k_sparse=20,
-            top_k_fused=15,
-            top_k_rerank=10,
-            top_k_final=5,
-            reranker_threshold=0.02,
-            reranker_min_docs=3,
-            retrieval_budget=50000,
-        )
     elif mode == "power-deep-research":
         return ModelConfig(
             mode="power-deep-research",
@@ -70,23 +55,6 @@ def _make_config(mode: str = "regular") -> ModelConfig:
             reranker_threshold=0.01,
             reranker_min_docs=5,
             retrieval_budget=20000,
-        )
-    elif mode == "turbo":
-        return ModelConfig(
-            mode="turbo",
-            llm_model="test-model",
-            embedding_model="test-embed",
-            reranker_model="test-reranker",
-            top_k_dense=10,
-            top_k_sparse=10,
-            top_k_fused=20,
-            top_k_rerank=20,
-            top_k_final=3,
-            reranker_threshold=0.0,
-            reranker_min_docs=3,
-            reranker_enabled=False,
-            context_expansion_enabled=False,
-            retrieval_budget=4000,
         )
     raise ValueError(f"Unknown test mode: {mode}")
 
@@ -256,36 +224,6 @@ class TestReranking:
         reranked, _ = engine._rerank("test", items)
         assert len(reranked) == 1
 
-    def test_turbo_disables_reranker_stage(self, tmp_storage, mock_embedder, monkeypatch):
-        engine = RetrievalEngine(
-            storage=tmp_storage,
-            embedding_model=mock_embedder,
-            reranker=MockReranker(),
-            config=_make_config("turbo"),
-        )
-
-        called = {"rerank": False}
-
-        def _should_not_run(*args, **kwargs):
-            called["rerank"] = True
-            return [], []
-
-        monkeypatch.setattr(engine, "_rerank", _should_not_run)
-        _ = engine.search("Chomsky language theory", collect_metrics=False)
-        assert called["rerank"] is False
-
-    def test_turbo_uses_child_text_without_parent_expansion(self, tmp_storage, mock_embedder):
-        engine = RetrievalEngine(
-            storage=tmp_storage,
-            embedding_model=mock_embedder,
-            reranker=MockReranker(),
-            config=_make_config("turbo"),
-        )
-        results = engine.search("Chomsky language", collect_metrics=False)
-        assert len(results) > 0
-        assert all(r.parent_text is None for r in results)
-        assert all(isinstance(r.text, str) and len(r.text) > 0 for r in results)
-
 
 # ===========================================================================
 # Threshold filtering and safety net
@@ -412,16 +350,14 @@ class TestModeComparison:
     def test_modes_differ_in_top_k(self):
         """Different modes should have different top_k parameters."""
         regular = _make_config("regular")
-        power = _make_config("power-fast")
-        assert power.top_k_dense > regular.top_k_dense
-        assert power.top_k_final > regular.top_k_final
+        deep = _make_config("power-deep-research")
+        assert deep.top_k_dense > regular.top_k_dense
+        assert deep.top_k_final > regular.top_k_final
 
     def test_modes_differ_in_threshold(self):
         regular = _make_config("regular")
-        power = _make_config("power-fast")
         deep = _make_config("power-deep-research")
-        assert power.reranker_threshold < regular.reranker_threshold
-        assert deep.reranker_threshold < power.reranker_threshold
+        assert deep.reranker_threshold < regular.reranker_threshold
 
 
 # ===========================================================================

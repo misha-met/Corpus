@@ -1204,7 +1204,7 @@ class RagEngine:
         if self._model_config.reranker_enabled:
             logger.info("query_events_impl: reranker ready")
         else:
-            logger.info("query_events_impl: turbo mode (reranker disabled)")
+            logger.info("query_events_impl: reranker disabled")
 
         if should_stop():
             yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled")
