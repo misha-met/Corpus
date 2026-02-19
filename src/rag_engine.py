@@ -148,15 +148,6 @@ _INCOMPLETE_ENDING = re.compile(
     re.IGNORECASE,
 )
 
-_RETRIEVAL_JARGON_REWRITES: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\bcontext chunks?\b", re.IGNORECASE), "provided passages"),
-    (re.compile(r"\bretrieved chunks?\b", re.IGNORECASE), "retrieved passages"),
-    (re.compile(r"\bchunks?\s+(\d+)\b", re.IGNORECASE), r"passage \1"),
-    (re.compile(r"\bchunks?\s+([\d,\sand]+)\b", re.IGNORECASE), r"passages \1"),
-    (re.compile(r"\bacross\s+several\s+chunks\b", re.IGNORECASE), "across several passages"),
-    (re.compile(r"\bmultiple\s+chunks\b", re.IGNORECASE), "multiple passages"),
-]
-
 _EXPANSION_TERMS: dict[Intent, list[str]] = {
     Intent.OVERVIEW: [
         "overview",
@@ -252,16 +243,6 @@ def _dedupe_repeated_blocks(text: str) -> str:
     return text
 
 
-def _rewrite_retrieval_jargon(text: str) -> str:
-    """Normalize retrieval-internal wording to user-facing phrasing."""
-    if not text:
-        return text
-    result = text
-    for pattern, replacement in _RETRIEVAL_JARGON_REWRITES:
-        result = pattern.sub(replacement, result)
-    return result
-
-
 def sanitize_output(text: str) -> str:
     """Post-process LLM output: remove instruction leakage, chatter, and incomplete sentences."""
     if not text:
@@ -270,7 +251,6 @@ def sanitize_output(text: str) -> str:
     for pattern in _INSTRUCTION_PATTERNS:
         result = pattern.sub("", result)
     result = _strip_chatter(result)
-    result = _rewrite_retrieval_jargon(result)
     result = _dedupe_repeated_blocks(result)
     result = _REPETITION_PATTERN.sub(r"\1", result)
 
