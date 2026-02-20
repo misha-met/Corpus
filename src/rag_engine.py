@@ -148,59 +148,20 @@ _INCOMPLETE_ENDING = re.compile(
     re.IGNORECASE,
 )
 
+# BM25 expansion terms removed — live A/B evaluation (2026-02-20) showed
+# all expansion-only chunks scored negative on the reranker, zero intents
+# showed positive Δ threshold survivors, and two cases of active harm were
+# observed (queries #17 and #21 in docs/QUERY_EXPANSION_EVAL_RESULTS.md).
+# The dict structure is preserved so a smarter expansion strategy (e.g.
+# pseudo-relevance feedback or LLM query rewrite) can be slotted in without
+# call-site changes.  See docs/QUERY_EXPANSION_EVAL.md §8 for full rationale.
 _EXPANSION_TERMS: dict[Intent, list[str]] = {
-    Intent.OVERVIEW: [
-        "overview",
-        "introduction",
-        "background",
-        "context",
-    ],
-    Intent.SUMMARIZE: [
-        "summary",
-        "conclusion",
-        "findings",
-        "results",
-        "main points",
-    ],
-    Intent.EXPLAIN: [
-        "definition",
-        "how",
-        "why",
-        "mechanism",
-        "process",
-        "works",
-        "example",
-    ],
-    Intent.ANALYZE: [
-        "argument",
-        "reasoning",
-        "assumptions",
-        "evidence",
-        "implications",
-        "logic",
-        "support",
-    ],
-    Intent.COMPARE: [
-        "compare",
-        "contrast",
-        "difference",
-        "similarity",
-        "versus",
-        "unlike",
-        "whereas",
-        "than",
-    ],
-    Intent.CRITIQUE: [
-        "criticism",
-        "critique",
-        "weakness",
-        "strength",
-        "limitation",
-        "flaw",
-        "problem",
-        "objection",
-        "advantage",
-    ],
+    Intent.OVERVIEW: [],
+    Intent.SUMMARIZE: [],
+    Intent.EXPLAIN: [],
+    Intent.ANALYZE: [],
+    Intent.COMPARE: [],
+    Intent.CRITIQUE: [],
     Intent.FACTUAL: [],
     Intent.COLLECTION: [],
 }
