@@ -34,6 +34,64 @@ _BOILERPLATE_REGEX = re.compile(
 )
 
 
+@dataclass(frozen=True)
+class _SubThresholdPolicy:
+    starvation_floor_ratio: float
+    budget_ceiling_ratio: float
+    max_additional_chunks: int
+
+
+_SUB_THRESHOLD_ENUMERATION = _SubThresholdPolicy(
+    starvation_floor_ratio=0.10,
+    budget_ceiling_ratio=0.15,
+    max_additional_chunks=25,
+)
+_SUB_THRESHOLD_ANALYTICAL = _SubThresholdPolicy(
+    starvation_floor_ratio=0.10,
+    budget_ceiling_ratio=0.12,
+    max_additional_chunks=10,
+)
+_SUB_THRESHOLD_FACTUAL = _SubThresholdPolicy(
+    starvation_floor_ratio=0.08,
+    budget_ceiling_ratio=0.09,
+    max_additional_chunks=4,
+)
+
+_ENUMERATION_QUERY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\blist\s+(all|every)\b", re.IGNORECASE),
+    re.compile(r"\bfind\s+(all|every)\b", re.IGNORECASE),
+    re.compile(r"\bname\s+all\b", re.IGNORECASE),
+    re.compile(r"\bwhat\s+mentions?\s+of\b", re.IGNORECASE),
+    re.compile(r"\bmentions?\s+of\b.+\bare\s+there\b", re.IGNORECASE),
+    re.compile(r"\breferences?\s+(to|of)\b", re.IGNORECASE),
+    re.compile(r"\bwhere\s+is\b.+\bmentioned\b", re.IGNORECASE),
+    re.compile(r"\bhow\s+many\s+times\s+is\b.+\bmentioned\b", re.IGNORECASE),
+)
+
+
+def _is_enumeration_query(query: str) -> bool:
+    text = query.strip()
+    if not text:
+        return False
+    return any(pattern.search(text) for pattern in _ENUMERATION_QUERY_PATTERNS)
+
+
+def _resolve_sub_threshold_policy(
+    *,
+    query: str,
+    intent: Optional[str],
+) -> tuple[str, _SubThresholdPolicy]:
+    if _is_enumeration_query(query):
+        return "enumeration", _SUB_THRESHOLD_ENUMERATION
+
+    intent_key = (intent or "").strip().upper()
+    if intent_key == "FACTUAL":
+        return "factual", _SUB_THRESHOLD_FACTUAL
+    if intent_key in {"ANALYZE", "COMPARE", "CRITIQUE", "SUMMARIZE", "OVERVIEW", "EXPLAIN"}:
+        return "analytical", _SUB_THRESHOLD_ANALYTICAL
+    return "default", _SUB_THRESHOLD_ANALYTICAL
+
+
 def _is_boilerplate(text: str) -> bool:
     return bool(_BOILERPLATE_REGEX.search(text))
 
@@ -271,6 +329,7 @@ class RetrievalEngine:
         retrieval_budget: Optional[int] = None,
         embedding_query: Optional[str] = None,
         bm25_query: Optional[str] = None,
+        intent: Optional[str] = None,
     ) -> list[RetrievalResult]:
         """Execute hybrid search with timing and metrics collection.
 
@@ -349,6 +408,7 @@ class RetrievalEngine:
         # Preserve full reranked pool for sub-threshold expansion (Fix 8)
         all_reranked = list(reranked)
         threshold = float(reranker_threshold)  # default; updated by adaptive logic below
+        above_threshold_results: list[dict[str, Any]] = []
 
         # Stage 4: Threshold filtering (adaptive)
         threshold_metrics = ThresholdMetrics()
@@ -378,6 +438,7 @@ class RetrievalEngine:
                 item for item in reranked
                 if float(item.get(score_key, float("-inf"))) >= threshold
             ]
+            above_threshold_results = list(threshold_filtered)
 
             if len(threshold_filtered) < min_docs:
                 logger.debug(
@@ -419,6 +480,11 @@ class RetrievalEngine:
         # Stage 5: Budget-aware expansion — raise k_final if budget is underutilized
         budget = retrieval_budget or (cfg.retrieval_budget if cfg else 0)
         if budget > 0 and reranked:
+            policy_name, sub_threshold_policy = _resolve_sub_threshold_policy(
+                query=query,
+                intent=intent,
+            )
+
             def _est_tokens(text: str) -> int:
                 return len(text.split())
 
@@ -454,18 +520,41 @@ class RetrievalEngine:
             current_final_tokens = sum(
                 _est_tokens(item.get("text", "")) for item in reranked[:k_final]
             )
-            starvation_floor = int(budget * 0.10)
+            starvation_floor = int(budget * sub_threshold_policy.starvation_floor_ratio)
 
             if current_final_tokens < starvation_floor:
                 threshold_ids = {item.get("id") for item in reranked}
+
+                def _candidate_source_id(item: dict[str, Any]) -> Optional[str]:
+                    metadata = item.get("metadata")
+                    if isinstance(metadata, dict):
+                        source = metadata.get("source_id")
+                        if isinstance(source, str) and source:
+                            return source
+                    source = item.get("source_id")
+                    if isinstance(source, str) and source:
+                        return source
+                    return None
+
+                sources_with_hits = {
+                    source
+                    for source in (_candidate_source_id(item) for item in above_threshold_results)
+                    if source
+                }
                 sub_threshold_candidates = [
                     item for item in all_reranked
                     if item.get("id") not in threshold_ids
+                    and (
+                        not sources_with_hits
+                        or _candidate_source_id(item) in sources_with_hits
+                    )
                 ]
-                sub_ceiling = int(budget * 0.15)
+                sub_ceiling = int(budget * sub_threshold_policy.budget_ceiling_ratio)
                 running_sub = current_final_tokens
                 sub_added = 0
                 for item in sub_threshold_candidates:
+                    if sub_added >= sub_threshold_policy.max_additional_chunks:
+                        break
                     item_tok = _est_tokens(item.get("text", ""))
                     if running_sub + item_tok > sub_ceiling:
                         break
@@ -481,8 +570,12 @@ class RetrievalEngine:
                 if sub_added > 0:
                     sub_pct = round(100 * running_sub / budget) if budget else 0
                     logger.info(
-                        "Sub-threshold expansion: added %d chunks below threshold=%.4f (budget now %d%%)",
-                        sub_added, threshold, sub_pct,
+                        "Sub-threshold expansion (%s): added %d chunks below threshold=%.4f (budget now %d%%, cap=%d)",
+                        policy_name,
+                        sub_added,
+                        threshold,
+                        sub_pct,
+                        sub_threshold_policy.max_additional_chunks,
                     )
 
         # Stage 6: Final dedup + boilerplate filter

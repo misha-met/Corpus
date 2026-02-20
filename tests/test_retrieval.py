@@ -296,6 +296,113 @@ class TestThresholdFiltering:
             metrics = results[0].metrics
             assert metrics.threshold is not None
 
+    def test_sub_threshold_expansion_scoped_to_above_threshold_sources(
+        self,
+        tmp_storage,
+        mock_embedder,
+        mock_reranker,
+        monkeypatch,
+    ):
+        config = ModelConfig(
+            mode="regular",
+            llm_model="test",
+            embedding_model="test",
+            reranker_model="test",
+            top_k_dense=10,
+            top_k_sparse=10,
+            top_k_fused=6,
+            top_k_rerank=6,
+            top_k_final=1,
+            reranker_threshold=0.05,
+            reranker_min_docs=1,
+            retrieval_budget=400,
+        )
+        engine = RetrievalEngine(
+            storage=tmp_storage,
+            embedding_model=mock_embedder,
+            reranker=mock_reranker,
+            config=config,
+        )
+
+        token_rich_text = "word " * 15
+
+        def _fake_hybrid_search_decoupled(*, embedding_query, bm25_query, top_k, source_id=None):
+            return [
+                {"id": "a1", "text": token_rich_text, "score": 0.9, "metadata": {"parent_id": "pa1", "source_id": "source_a"}},
+                {"id": "b1", "text": token_rich_text, "score": 0.8, "metadata": {"parent_id": "pb1", "source_id": "source_b"}},
+                {"id": "a2", "text": token_rich_text, "score": 0.7, "metadata": {"parent_id": "pa2", "source_id": "source_a"}},
+                {"id": "b2", "text": token_rich_text, "score": 0.6, "metadata": {"parent_id": "pb2", "source_id": "source_b"}},
+            ]
+
+        def _fake_rerank(query, items):
+            reranked = [
+                {**items[0], "rerank_score": 0.90},
+                {**items[1], "rerank_score": 0.10},
+                {**items[2], "rerank_score": 0.09},
+                {**items[3], "rerank_score": 0.08},
+            ]
+            return reranked, [0.90, 0.10, 0.09, 0.08]
+
+        monkeypatch.setattr(engine, "_hybrid_search_decoupled", _fake_hybrid_search_decoupled)
+        monkeypatch.setattr(engine, "_rerank", _fake_rerank)
+
+        results = engine.search("what mentions of ChatGPT are there", intent="factual")
+        sources = {r.metadata.get("source_id") for r in results if r.metadata.get("source_id")}
+        assert "source_b" not in sources
+        assert sources == {"source_a"}
+
+    def test_sub_threshold_expansion_falls_back_when_no_above_threshold_hits(
+        self,
+        tmp_storage,
+        mock_embedder,
+        mock_reranker,
+        monkeypatch,
+    ):
+        config = ModelConfig(
+            mode="regular",
+            llm_model="test",
+            embedding_model="test",
+            reranker_model="test",
+            top_k_dense=10,
+            top_k_sparse=10,
+            top_k_fused=6,
+            top_k_rerank=6,
+            top_k_final=1,
+            reranker_threshold=0.50,
+            reranker_min_docs=1,
+            retrieval_budget=400,
+        )
+        engine = RetrievalEngine(
+            storage=tmp_storage,
+            embedding_model=mock_embedder,
+            reranker=mock_reranker,
+            config=config,
+        )
+
+        token_rich_text = "word " * 15
+
+        def _fake_hybrid_search_decoupled(*, embedding_query, bm25_query, top_k, source_id=None):
+            return [
+                {"id": "a1", "text": token_rich_text, "score": 0.9, "metadata": {"parent_id": "pa1", "source_id": "source_a"}},
+                {"id": "b1", "text": token_rich_text, "score": 0.8, "metadata": {"parent_id": "pb1", "source_id": "source_b"}},
+                {"id": "a2", "text": token_rich_text, "score": 0.7, "metadata": {"parent_id": "pa2", "source_id": "source_a"}},
+            ]
+
+        def _fake_rerank(query, items):
+            reranked = [
+                {**items[0], "rerank_score": 0.20},
+                {**items[1], "rerank_score": 0.19},
+                {**items[2], "rerank_score": 0.18},
+            ]
+            return reranked, [0.20, 0.19, 0.18]
+
+        monkeypatch.setattr(engine, "_hybrid_search_decoupled", _fake_hybrid_search_decoupled)
+        monkeypatch.setattr(engine, "_rerank", _fake_rerank)
+
+        results = engine.search("who is Romeo", intent="factual")
+        sources = {r.metadata.get("source_id") for r in results if r.metadata.get("source_id")}
+        assert "source_b" in sources
+
 
 # ===========================================================================
 # Full search pipeline

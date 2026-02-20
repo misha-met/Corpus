@@ -954,6 +954,7 @@ class RagEngine:
                     retrieval_budget=config.retrieval_budget,
                     embedding_query=embedding_query,
                     bm25_query=bm25_query,
+                    intent=intent_result.intent.value,
                 )
             source_ids = sorted(
                 {
@@ -1395,6 +1396,7 @@ class RagEngine:
                 retrieval_budget=config.retrieval_budget,
                 embedding_query=embedding_query,
                 bm25_query=bm25_query,
+                intent=intent_result.intent.value,
             )
             # -- emit detailed retrieval step statuses ---------------------
             if results:
