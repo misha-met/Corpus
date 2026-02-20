@@ -103,6 +103,53 @@ class QueryResult:
 
 
 # ---------------------------------------------------------------------------
+# Internal pipeline step results (private — not part of the public API)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _ClassifyResult:
+    """Output of intent classification + parameter resolution step."""
+
+    intent_result: IntentResult
+    before_guard_intent: IntentResult  # original intent before collection guard
+    retrieval_params: Any
+    generation_params: Any
+    force_collection: bool
+    bypass_retrieval: bool
+
+
+@dataclass
+class _RetrieveResult:
+    """Output of the retrieval step."""
+
+    # context is None only when COLLECTION intent finds no documents (early exit)
+    context: Optional[str]
+    results: Any  # list[RetrievalResult]
+    source_ids: Any  # list[str]
+    context_docs: Any  # list[str]
+    cite: bool
+    extra_instructions: Optional[str]
+    retrieval_metrics: Any  # Optional[RetrievalMetrics]
+    generator_preload_future: Any  # Optional[Future[MlxGenerator]]
+
+
+@dataclass
+class _PackResult:
+    """Output of the token budget packing + citation formatting step."""
+
+    context: str
+    cite: bool
+    source_legend: Optional[str]
+    result_metadatas: Any  # list[dict]
+    budget_metrics: Any  # Optional[BudgetMetrics]
+    citation_list: Any  # list[dict]
+    packed_retrieval_results: Any  # list[RetrievalResult]
+    pack_result: Any  # Optional[BudgetPackResult] — None for no_generate path
+    packed_metadatas: Any  # list[dict]
+
+
+# ---------------------------------------------------------------------------
 # Output sanitisation helpers (moved from cli.py)
 # ---------------------------------------------------------------------------
 
@@ -707,7 +754,6 @@ class RagEngine:
             If True, skip LLM generation and return only retrieved context.
         """
         config = self._model_config
-        model_id = self._cfg.model or config.llm_model
         profiler = LatencyProfiler(enabled=self._cfg.latency)
         profiler.start_wall()
 
@@ -738,249 +784,79 @@ class RagEngine:
             config=config,
         )
 
-        # -- intent classification -----------------------------------------
+        # -- intent classification + parameter resolution ------------------
         self._on_status("Classifying intent...")
-        with profiler.span("Intent classification"):
-            intent_result = self._classify_intent(
-                query_text=query_text,
-                intent_override=intent_override,
-                no_generate=no_generate,
-            )
-
-        logger.info(
-            "Classified intent: %s (confidence=%.2f, method=%s)",
-            intent_result.intent.value,
-            intent_result.confidence,
-            intent_result.method,
+        classified = self._step_classify(
+            query_text, source_id, intent_override, no_generate, profiler=profiler
         )
+        intent_result = classified.intent_result
 
-        intent_result, force_collection = self._apply_collection_guard(
-            query_text=query_text,
-            source_id=source_id,
-            intent_override=intent_override,
-            intent_result=intent_result,
-        )
-
-        # -- resolve intent-aware parameters --------------------------------
-        retrieval_params = resolve_retrieval_params(config, intent_result.intent.value)
-        generation_params = resolve_generation_params(intent_result.intent.value)
-
-        logger.info(
-            "INTENT_CLASSIFIED | intent=%s | confidence=%.2f | method=%s | mode=%s",
-            intent_result.intent.value,
-            intent_result.confidence,
-            intent_result.method,
-            config.mode,
-        )
-
-        extra_instructions: Optional[str] = None
-        bypass_retrieval = is_low_information_query(query_text)
-
-        # -- retrieval paths -----------------------------------------------
-        context = ""
-        results: list[RetrievalResult] = []
-        source_ids: list[str] = []
-        context_docs: list[str] = []
-        generator: Optional[MlxGenerator] = None
-        generator_preload_future: Optional[concurrent.futures.Future[MlxGenerator]] = None
-
-        if bypass_retrieval:
+        # -- retrieval (bypass / collection / hybrid) ----------------------
+        if classified.bypass_retrieval:
             self._on_status("Query is unclear — skipping retrieval...")
-            logger.info(
-                "Skipping retrieval for low-information query; delegating to generation model"
-            )
-            if cite:
-                logger.info(
-                    "Auto-disabling citations: no retrieval context for unclear query"
-                )
-                cite = False
-            extra_instructions = (
-                "The user query is unclear or nonsensical. Ask a concise clarifying "
-                "question first, and optionally suggest 2-3 concrete ways they can rephrase it."
-            )
-
-        elif intent_result.intent == Intent.COLLECTION:
+        elif classified.intent_result.intent == Intent.COLLECTION:
             self._on_status("Fetching collection summaries...")
-            context, source_ids, cite = self._handle_collection(
-                config=config,
-                model_id=model_id,
-                no_generate=no_generate,
-                citations_enabled=cite,
-            )
-            if force_collection:
-                extra_instructions = (
-                    "If the question asks which source/document matches a criterion, "
-                    "name the matching source IDs explicitly in the first sentence, "
-                    "then justify briefly from the summaries. If none match, say that clearly."
-                )
-            if context is None:
-                # No docs — return early
-                return QueryResult(
-                    answer="No documents found in the database.",
-                    intent=intent_result,
-                    citations_enabled=False,
-                    config=config,
-                )
-
         else:
             self._on_status("Searching knowledge base...")
-            if not no_generate:
-                generator_preload_future = self._start_generator_preload()
-            with profiler.span("Retrieval (hybrid search + rerank)"):
-                results = retrieval_engine.search(
-                    query_text, source_id=source_id,
-                    params=retrieval_params,
-                    retrieval_budget=config.retrieval_budget,
-                    intent=intent_result.intent.value,
-                )
-            source_ids = sorted(
-                {
-                    r.metadata.get("source_id")
-                    for r in results
-                    if r.metadata.get("source_id")
-                }
+
+        retrieved = self._step_retrieve(
+            query_text, source_id, classified, retrieval_engine, cite,
+            no_generate=no_generate, profiler=profiler,
+        )
+        cite = retrieved.cite
+
+        if retrieved.context is None:
+            # COLLECTION with no documents → early exit
+            return QueryResult(
+                answer="No documents found in the database.",
+                intent=intent_result,
+                citations_enabled=False,
+                config=config,
             )
-            context_docs = [
-                (r.parent_text if r.parent_text else r.text)
-                for r in results
-                if (r.parent_text if r.parent_text else r.text)
-            ]
-
-        retrieval_metrics: Optional[RetrievalMetrics] = (
-            results[0].metrics if results and results[0].metrics else None
-        )
-
-        # -- BASELINE: retrieval results logging ---------------------------
-        _scores = [r.score for r in results] if results else []
-        logger.info(
-            "INTENT_AWARE | intent=%s | retrieval_results=%d | top_score=%.4f | low_score=%.4f | "
-            "params: top_k_dense=%d top_k_fused=%d top_k_rerank=%d top_k_final=%d threshold=%.4f",
-            intent_result.intent.value,
-            len(results),
-            max(_scores) if _scores else 0.0,
-            min(_scores) if _scores else 0.0,
-            retrieval_params.top_k_dense,
-            retrieval_params.top_k_fused,
-            retrieval_params.top_k_rerank,
-            retrieval_params.top_k_final,
-            retrieval_params.reranker_threshold,
-        )
 
         # -- release retrieval models for LLM headroom ---------------------
         with profiler.span("Memory cleanup (gc)"):
             retrieval_engine = None
             self._release_retrieval_models()
 
-        # -- token budget packing ------------------------------------------
-        budget_metrics: Optional[BudgetMetrics] = None
-        source_legend: Optional[str] = None
-        result_metadatas: list[dict] = (
-            [r.metadata for r in results if (r.parent_text if r.parent_text else r.text)]
-            if context_docs and results
-            else []
-        )
-
-        if not no_generate and context_docs:
-            if generator is None:
-                generator = self._consume_preloaded_generator(
-                    generator_preload_future
-                )
-
-            self._on_status("Packing token budget...")
-            with profiler.span("Budget packing"):
-                pack_start = _time.perf_counter()
-                pack_result = enforce_token_budget(
-                    docs=context_docs,
-                    max_tokens=config.retrieval_budget,
-                    tokenizer=generator.tokenizer,
-                    consecutive_fail_threshold=3,
-                    allow_truncation=True,
-                    log=logger,
-                )
-                pack_time_ms = (_time.perf_counter() - pack_start) * 1000
-
-            packed_metadatas = [
-                result_metadatas[i]
-                for i in pack_result.packed_indices
-                if i < len(result_metadatas)
-            ]
-
-            if cite and packed_metadatas:
-                context, source_mapping = format_context_with_citations(
-                    texts=pack_result.packed_docs, metadatas=packed_metadatas
-                )
-                source_legend = build_source_legend(source_mapping)
-            elif cite:
-                logger.info(
-                    "Auto-disabling citations: packed context missing metadata"
-                )
-                cite = False
-            else:
-                context = "\n\n".join(pack_result.packed_docs)
-
-            budget_metrics = BudgetMetrics(
-                budget_tokens=config.retrieval_budget,
-                used_tokens=pack_result.used_tokens,
-                utilization_pct=(
-                    100 * pack_result.used_tokens / config.retrieval_budget
-                    if config.retrieval_budget > 0
-                    else 0
-                ),
-                avg_doc_tokens=(
-                    pack_result.used_tokens / len(pack_result.packed_docs)
-                    if pack_result.packed_docs
-                    else 0
-                ),
-                docs_packed=len(pack_result.packed_docs),
-                docs_skipped=pack_result.skipped_count,
-                docs_truncated=pack_result.truncated_count,
-            )
-
-        elif context_docs:
-            if cite and result_metadatas:
-                context, source_mapping = format_context_with_citations(
-                    texts=context_docs, metadatas=result_metadatas
-                )
-                source_legend = build_source_legend(source_mapping)
-            elif cite:
-                cite = False
-            else:
-                context = _dedupe_context(context_docs)
-
-        # -- no-generate path (context only) --------------------------------
+        # -- no-generate path (context only, no token budgeting) -----------
         if no_generate:
+            packed = self._step_pack_budget(retrieved, config, generator=None)
             profiler.end_wall()
-            latency_report = profiler.format_report()
             return QueryResult(
                 answer="",
                 intent=intent_result,
-                citations_enabled=cite,
-                source_ids=source_ids,
-                retrieval_metrics=retrieval_metrics,
-                budget_metrics=budget_metrics,
-                latency_report=latency_report,
-                context=context,
+                citations_enabled=packed.cite,
+                source_ids=retrieved.source_ids,
+                retrieval_metrics=retrieved.retrieval_metrics,
+                budget_metrics=None,
+                latency_report=profiler.format_report(),
+                context=packed.context,
                 config=config,
             )
+
+        # -- token budget packing ------------------------------------------
+        generator = self._consume_preloaded_generator(retrieved.generator_preload_future)
+        self._on_status("Packing token budget...")
+        with profiler.span("Budget packing"):
+            packed = self._step_pack_budget(retrieved, config, generator)
+        cite = packed.cite
 
         # -- build prompt ---------------------------------------------------
         self._on_status("Building prompt...")
         with profiler.span("Build prompt / messages"):
             messages = build_messages(
-                context,
+                packed.context,
                 query_text,
                 intent=intent_result.intent,
-                extra_instructions=extra_instructions,
+                extra_instructions=retrieved.extra_instructions,
                 citations_enabled=cite,
-                source_legend=source_legend,
+                source_legend=packed.source_legend,
                 mode=config.mode,
                 retrieval_budget=config.retrieval_budget,
             )
 
         # -- generate -------------------------------------------------------
-        if generator is None:
-            generator = self._consume_preloaded_generator(generator_preload_future)
-
         gen_config = GenerationConfig(
             max_tokens=self._generation_max_tokens,
             context_window=config.context_window,
@@ -991,39 +867,35 @@ class RagEngine:
             raw_answer = generator.generate_chat(
                 messages,
                 config=gen_config,
-                temperature=generation_params.temperature,
-                top_p=generation_params.top_p,
+                temperature=classified.generation_params.temperature,
+                top_p=classified.generation_params.top_p,
             )
 
-        # -- INTENT_AWARE: generation logging ------------------------------
         _gen_tokens = count_tokens(raw_answer, generator.tokenizer)
         logger.info(
             "INTENT_AWARE | intent=%s | temperature=%.2f | top_p=%.2f | tokens_generated=%d",
             intent_result.intent.value,
-            generation_params.temperature,
-            generation_params.top_p,
+            classified.generation_params.temperature,
+            classified.generation_params.top_p,
             _gen_tokens,
         )
 
         with profiler.span("Output sanitisation"):
             answer = sanitize_output(raw_answer)
 
-        # Claim-density heuristic: warn if output contains proper nouns not in context
-        if answer and context:
-            _check_novel_proper_nouns(answer, context)
+        if answer and packed.context:
+            _check_novel_proper_nouns(answer, packed.context)
 
         profiler.end_wall()
-        latency_report = profiler.format_report()
-
         return QueryResult(
             answer=answer,
             intent=intent_result,
             citations_enabled=cite,
-            source_ids=source_ids,
-            retrieval_metrics=retrieval_metrics,
-            budget_metrics=budget_metrics,
-            latency_report=latency_report,
-            context=context,
+            source_ids=retrieved.source_ids,
+            retrieval_metrics=retrieved.retrieval_metrics,
+            budget_metrics=packed.budget_metrics,
+            latency_report=profiler.format_report(),
+            context=packed.context,
             config=config,
             raw_answer=raw_answer,
         )
@@ -1095,7 +967,6 @@ class RagEngine:
         """Internal implementation of query_events (unwrapped from error handling)."""
         logger.info("query_events_impl: started")
         config = self._model_config
-        model_id = self._cfg.model or config.llm_model
 
         # -- resolve citation mode -----------------------------------------
         if citations_enabled is not None:
@@ -1109,14 +980,9 @@ class RagEngine:
             self._release_generator_model()
 
         # -- load retrieval models -----------------------------------------
-        logger.info("query_events_impl: yielding 'Preparing retrieval models', then loading embedding")
         yield StatusEvent(status="Preparing retrieval models...")
         embedding_model = self._ensure_embedding_model()
         reranker = self._ensure_reranker()
-        if self._model_config.reranker_enabled:
-            logger.info("query_events_impl: reranker ready")
-        else:
-            logger.info("query_events_impl: reranker disabled")
 
         if should_stop():
             yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled")
@@ -1130,13 +996,12 @@ class RagEngine:
             config=config,
         )
 
-        # -- intent classification -----------------------------------------
+        # -- intent classification + parameter resolution ------------------
         yield StatusEvent(status="Classifying intent...")
-        intent_result = self._classify_intent(
-            query_text=query_text,
-            intent_override=intent_override,
-            no_generate=False,
+        classified = self._step_classify(
+            query_text, source_id, intent_override, no_generate=False
         )
+        intent_result = classified.intent_result
 
         yield IntentEvent(
             intent=intent_result.intent.value,
@@ -1144,20 +1009,11 @@ class RagEngine:
             method=intent_result.method,
         )
 
-        before_guard = intent_result
-        intent_result, force_collection = self._apply_collection_guard(
-            query_text=query_text,
-            source_id=source_id,
-            intent_override=intent_override,
-            intent_result=intent_result,
-        )
-        if (
-            force_collection
-            and (
-                intent_result.intent != before_guard.intent
-                or intent_result.method != before_guard.method
-                or intent_result.confidence != before_guard.confidence
-            )
+        # Re-emit if collection guard altered the intent
+        if classified.force_collection and (
+            classified.intent_result.intent != classified.before_guard_intent.intent
+            or classified.intent_result.method != classified.before_guard_intent.method
+            or classified.intent_result.confidence != classified.before_guard_intent.confidence
         ):
             yield IntentEvent(
                 intent=intent_result.intent.value,
@@ -1170,7 +1026,225 @@ class RagEngine:
             yield FinishEvent(finish_reason="error")
             return
 
-        # -- resolve intent-aware parameters --------------------------------
+        # -- retrieval (bypass / collection / hybrid) ----------------------
+        if classified.bypass_retrieval:
+            yield StatusEvent(status="Query is unclear — asking for clarification...")
+        elif classified.intent_result.intent == Intent.COLLECTION:
+            yield StatusEvent(status="Fetching collection summaries...")
+        else:
+            yield StatusEvent(status="Searching knowledge base...")
+
+        retrieved = self._step_retrieve(
+            query_text, source_id, classified, retrieval_engine, cite, no_generate=False
+        )
+        cite = retrieved.cite
+
+        if retrieved.context is None:
+            yield TextTokenEvent(token="No documents found in the database.")
+            yield FinishEvent(finish_reason="stop")
+            return
+
+        # -- emit detailed retrieval step statuses -------------------------
+        if retrieved.results:
+            m = retrieved.results[0].metrics
+            if m:
+                t = m.timing
+                d = m.deduplication
+                th = m.threshold
+                n_raw = d.children_before_dedup
+                yield StatusEvent(
+                    status=f"Hybrid search: {n_raw} results in {t.hybrid_search_ms:.0f}ms"
+                )
+                if d.parents_deduplicated > 0:
+                    yield StatusEvent(
+                        status=(
+                            f"Deduplication: {n_raw} → {d.children_after_dedup} docs"
+                            f" ({d.parents_deduplicated} duplicates removed)"
+                        )
+                    )
+                if m.reranker.items_reranked > 0:
+                    yield StatusEvent(
+                        status=(
+                            f"Reranker: scored {m.reranker.items_reranked} docs in {t.rerank_ms:.0f}ms"
+                            f" → {th.items_after_threshold} passed"
+                            + (" (safety net)" if th.safety_net_triggered else "")
+                        )
+                    )
+                yield StatusEvent(
+                    status=(
+                        f"Retrieved {len(retrieved.results)} relevant passage"
+                        f"{'s' if len(retrieved.results) != 1 else ''}"
+                    )
+                )
+
+        if retrieved.source_ids:
+            yield SourcesEvent(source_ids=retrieved.source_ids)
+
+        if should_stop():
+            yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled after retrieval")
+            yield FinishEvent(finish_reason="error")
+            return
+
+        # -- release retrieval models for LLM headroom ---------------------
+        retrieval_engine = None
+        self._release_retrieval_models()
+
+        if should_stop():
+            yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled after model cleanup")
+            yield FinishEvent(finish_reason="error")
+            return
+
+        # -- token budget packing ------------------------------------------
+        generator = self._consume_preloaded_generator(retrieved.generator_preload_future)
+        yield StatusEvent(status="Packing token budget...")
+        packed = self._step_pack_budget(retrieved, config, generator)
+        cite = packed.cite
+
+        # -- budget summary status -----------------------------------------
+        if packed.pack_result is not None:
+            pr = packed.pack_result
+            n_packed = len(pr.packed_docs)
+            used_tok = pr.used_tokens
+            budget_pct = (
+                f"{100 * used_tok / config.retrieval_budget:.0f}%"
+                if config.retrieval_budget
+                else "n/a"
+            )
+            _budget_extras = []
+            if pr.skipped_count:
+                _budget_extras.append(f"{pr.skipped_count} skipped")
+            if pr.truncated_count:
+                _budget_extras.append(f"{pr.truncated_count} truncated")
+            _extra_str = f" ({', '.join(_budget_extras)})" if _budget_extras else ""
+            yield StatusEvent(
+                status=(
+                    f"Budget: {n_packed} docs, {used_tok:,} tokens"
+                    f" ({budget_pct} of budget){_extra_str}"
+                )
+            )
+
+        if packed.citation_list:
+            yield CitationListEvent(citations=packed.citation_list)
+
+        # -- build prompt ---------------------------------------------------
+        if should_stop():
+            yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled before prompt build")
+            yield FinishEvent(finish_reason="error")
+            return
+
+        yield StatusEvent(status="Building prompt...")
+        messages = build_messages(
+            packed.context,
+            query_text,
+            intent=intent_result.intent,
+            extra_instructions=retrieved.extra_instructions,
+            citations_enabled=cite,
+            source_legend=packed.source_legend,
+            mode=config.mode,
+            retrieval_budget=config.retrieval_budget,
+        )
+
+        # -- generate with streaming tokens --------------------------------
+        gen_config = GenerationConfig(
+            max_tokens=self._generation_max_tokens,
+            context_window=config.context_window,
+        )
+        yield StatusEvent(status="Generating answer...")
+        token_count = 0
+        answer_tokens: list[str] = []
+
+        for token in generator.generate_chat_stream(
+            messages,
+            config=gen_config,
+            should_stop=should_stop,
+            temperature=classified.generation_params.temperature,
+            top_p=classified.generation_params.top_p,
+        ):
+            if should_stop():
+                yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled during generation")
+                yield FinishEvent(finish_reason="error")
+                return
+            token_count += 1
+            answer_tokens.append(token)
+            yield TextTokenEvent(token=token)
+
+        # -- post-hoc citation highlight verification ----------------------
+        if cite and packed.citation_list and packed.packed_retrieval_results:
+            full_answer = "".join(answer_tokens)
+            try:
+                highlight_map = compute_highlight_texts(full_answer, packed.packed_retrieval_results)
+                if highlight_map:
+                    updated_citations: list[dict[str, object]] = []
+                    for cit in packed.citation_list:
+                        cit_copy = dict(cit)
+                        cit_idx = cit_copy.get("index")
+                        if isinstance(cit_idx, int) and cit_idx in highlight_map:
+                            cit_copy["highlight_text"] = highlight_map[cit_idx]
+                        updated_citations.append(cit_copy)
+                    yield CitationListEvent(citations=updated_citations)
+                    logger.info(
+                        "Citation verification: corrected %d/%d citations",
+                        len(highlight_map),
+                        len(packed.citation_list),
+                    )
+            except Exception as exc:
+                logger.warning("Citation verification failed (non-fatal): %s", exc)
+
+        logger.info(
+            "INTENT_AWARE | intent=%s | temperature=%.2f | top_p=%.2f | tokens_generated=%d",
+            intent_result.intent.value,
+            classified.generation_params.temperature,
+            classified.generation_params.top_p,
+            token_count,
+        )
+
+        yield FinishEvent(
+            finish_reason="stop",
+            completion_tokens=token_count,
+        )
+
+    # -- shared pipeline step methods --------------------------------------
+
+    def _step_classify(
+        self,
+        query_text: str,
+        source_id: Optional[str],
+        intent_override: Optional[str],
+        no_generate: bool,
+        profiler: Optional[Any] = None,
+    ) -> _ClassifyResult:
+        """Classify intent, apply collection guard, resolve retrieval/gen params."""
+        config = self._model_config
+
+        if profiler:
+            with profiler.span("Intent classification"):
+                intent_result = self._classify_intent(
+                    query_text=query_text,
+                    intent_override=intent_override,
+                    no_generate=no_generate,
+                )
+        else:
+            intent_result = self._classify_intent(
+                query_text=query_text,
+                intent_override=intent_override,
+                no_generate=no_generate,
+            )
+
+        logger.info(
+            "Classified intent: %s (confidence=%.2f, method=%s)",
+            intent_result.intent.value,
+            intent_result.confidence,
+            intent_result.method,
+        )
+
+        before_guard = intent_result
+        intent_result, force_collection = self._apply_collection_guard(
+            query_text=query_text,
+            source_id=source_id,
+            intent_override=intent_override,
+            intent_result=intent_result,
+        )
+
         retrieval_params = resolve_retrieval_params(config, intent_result.intent.value)
         generation_params = resolve_generation_params(intent_result.intent.value)
 
@@ -1182,92 +1256,97 @@ class RagEngine:
             config.mode,
         )
 
-
-        if should_stop():
-            yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled")
-            yield FinishEvent(finish_reason="error")
-            return
-
-        extra_instructions: Optional[str] = None
         bypass_retrieval = is_low_information_query(query_text)
 
-        # -- retrieval paths -----------------------------------------------
-        context = ""
-        results: list[RetrievalResult] = []
-        source_ids: list[str] = []
-        context_docs: list[str] = []
-        generator_preload_future: Optional[concurrent.futures.Future[MlxGenerator]] = None
+        return _ClassifyResult(
+            intent_result=intent_result,
+            before_guard_intent=before_guard,
+            retrieval_params=retrieval_params,
+            generation_params=generation_params,
+            force_collection=force_collection,
+            bypass_retrieval=bypass_retrieval,
+        )
 
-        if bypass_retrieval:
-            yield StatusEvent(status="Query is unclear — asking for clarification...")
+    def _step_retrieve(
+        self,
+        query_text: str,
+        source_id: Optional[str],
+        classified: _ClassifyResult,
+        retrieval_engine: Any,
+        cite: bool,
+        no_generate: bool,
+        profiler: Optional[Any] = None,
+    ) -> _RetrieveResult:
+        """Execute the retrieval phase — bypass, collection summary, or hybrid search."""
+        config = self._model_config
+        model_id = self._cfg.model or config.llm_model
+
+        extra_instructions: Optional[str] = None
+        context = ""
+        results: list = []
+        source_ids: list = []
+        context_docs: list = []
+        retrieval_metrics = None
+        generator_preload_future = None
+
+        if classified.bypass_retrieval:
             if cite:
+                logger.info(
+                    "Auto-disabling citations: no retrieval context for unclear query"
+                )
                 cite = False
             extra_instructions = (
                 "The user query is unclear or nonsensical. Ask a concise clarifying "
                 "question first, and optionally suggest 2-3 concrete ways they can rephrase it."
             )
 
-        elif intent_result.intent == Intent.COLLECTION:
-            yield StatusEvent(status="Fetching collection summaries...")
+        elif classified.intent_result.intent == Intent.COLLECTION:
             context, source_ids, cite = self._handle_collection(
                 config=config,
                 model_id=model_id,
-                no_generate=False,
+                no_generate=no_generate,
                 citations_enabled=cite,
             )
-            if force_collection:
+            if classified.force_collection:
                 extra_instructions = (
                     "If the question asks which source/document matches a criterion, "
                     "name the matching source IDs explicitly in the first sentence, "
                     "then justify briefly from the summaries. If none match, say that clearly."
                 )
             if context is None:
-                yield TextTokenEvent(token="No documents found in the database.")
-                yield FinishEvent(finish_reason="stop")
-                return
-            if should_stop():
-                yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled during collection summary retrieval")
-                yield FinishEvent(finish_reason="error")
-                return
+                return _RetrieveResult(
+                    context=None,
+                    results=[],
+                    source_ids=[],
+                    context_docs=[],
+                    cite=cite,
+                    extra_instructions=extra_instructions,
+                    retrieval_metrics=None,
+                    generator_preload_future=None,
+                )
 
         else:
-            yield StatusEvent(status="Searching knowledge base...")
-            generator_preload_future = self._start_generator_preload()
-            results = retrieval_engine.search(
-                query_text, source_id=source_id,
-                params=retrieval_params,
-                retrieval_budget=config.retrieval_budget,
-                intent=intent_result.intent.value,
-            )
-            # -- emit detailed retrieval step statuses ---------------------
-            if results:
-                m = results[0].metrics
-                if m:
-                    t = m.timing
-                    d = m.deduplication
-                    th = m.threshold
-                    n_raw = d.children_before_dedup
-                    yield StatusEvent(
-                        status=f"Hybrid search: {n_raw} results in {t.hybrid_search_ms:.0f}ms"
+            if not no_generate:
+                generator_preload_future = self._start_generator_preload()
+
+            if profiler:
+                with profiler.span("Retrieval (hybrid search + rerank)"):
+                    results = retrieval_engine.search(
+                        query_text,
+                        source_id=source_id,
+                        params=classified.retrieval_params,
+                        retrieval_budget=config.retrieval_budget,
+                        intent=classified.intent_result.intent.value,
                     )
-                    if d.parents_deduplicated > 0:
-                        yield StatusEvent(
-                            status=(
-                                f"Deduplication: {n_raw} → {d.children_after_dedup} docs"
-                                f" ({d.parents_deduplicated} duplicates removed)"
-                            )
-                        )
-                    if m.reranker.items_reranked > 0:
-                        yield StatusEvent(
-                            status=(
-                                f"Reranker: scored {m.reranker.items_reranked} docs in {t.rerank_ms:.0f}ms"
-                                f" → {th.items_after_threshold} passed"
-                                + (" (safety net)" if th.safety_net_triggered else "")
-                            )
-                        )
-                    yield StatusEvent(
-                        status=f"Retrieved {len(results)} relevant passage{'s' if len(results) != 1 else ''}"
-                    )
+            else:
+                results = retrieval_engine.search(
+                    query_text,
+                    source_id=source_id,
+                    params=classified.retrieval_params,
+                    retrieval_budget=config.retrieval_budget,
+                    intent=classified.intent_result.intent.value,
+                )
+
             source_ids = sorted(
                 {
                     r.metadata.get("source_id")
@@ -1280,201 +1359,150 @@ class RagEngine:
                 for r in results
                 if (r.parent_text if r.parent_text else r.text)
             ]
-            if should_stop():
-                yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled after retrieval")
-                yield FinishEvent(finish_reason="error")
-                return
 
-        # Emit sources
-        if source_ids:
-            yield SourcesEvent(source_ids=source_ids)
+        retrieval_metrics = results[0].metrics if results and results[0].metrics else None
 
-        # -- BASELINE: retrieval results logging ---------------------------
         _scores = [r.score for r in results] if results else []
         logger.info(
             "INTENT_AWARE | intent=%s | retrieval_results=%d | top_score=%.4f | low_score=%.4f | "
             "params: top_k_dense=%d top_k_fused=%d top_k_rerank=%d top_k_final=%d threshold=%.4f",
-            intent_result.intent.value,
+            classified.intent_result.intent.value,
             len(results),
             max(_scores) if _scores else 0.0,
             min(_scores) if _scores else 0.0,
-            retrieval_params.top_k_dense,
-            retrieval_params.top_k_fused,
-            retrieval_params.top_k_rerank,
-            retrieval_params.top_k_final,
-            retrieval_params.reranker_threshold,
+            classified.retrieval_params.top_k_dense,
+            classified.retrieval_params.top_k_fused,
+            classified.retrieval_params.top_k_rerank,
+            classified.retrieval_params.top_k_final,
+            classified.retrieval_params.reranker_threshold,
         )
 
-        if should_stop():
-            yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled")
-            yield FinishEvent(finish_reason="error")
-            return
+        return _RetrieveResult(
+            context=context,
+            results=results,
+            source_ids=source_ids,
+            context_docs=context_docs,
+            cite=cite,
+            extra_instructions=extra_instructions,
+            retrieval_metrics=retrieval_metrics,
+            generator_preload_future=generator_preload_future,
+        )
 
-        # -- release retrieval models for LLM headroom ---------------------
-        retrieval_engine = None
-        self._release_retrieval_models()
-        if should_stop():
-            yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled after model cleanup")
-            yield FinishEvent(finish_reason="error")
-            return
+    def _step_pack_budget(
+        self,
+        retrieved: _RetrieveResult,
+        config: ModelConfig,
+        generator: Optional[Any],
+    ) -> _PackResult:
+        """Pack docs into the token budget and format citations.
 
-        # -- token budget packing ------------------------------------------
+        When *generator* is ``None`` (the ``no_generate`` path) the docs are
+        formatted without token budgeting — using :func:`_dedupe_context` so
+        both code paths get deduplication.
+        """
         source_legend: Optional[str] = None
-        result_metadatas: list[dict] = (
-            [r.metadata for r in results if (r.parent_text if r.parent_text else r.text)]
-            if context_docs and results
+        result_metadatas: list = (
+            [
+                r.metadata
+                for r in retrieved.results
+                if (r.parent_text if r.parent_text else r.text)
+            ]
+            if retrieved.context_docs and retrieved.results
             else []
         )
-        generator: Optional[MlxGenerator] = None
-        citation_list: list[dict[str, object]] = []
-        packed_retrieval_results: list[RetrievalResult] = []
+        citation_list: list = []
+        packed_retrieval_results: list = []
+        pack_result_obj = None
+        packed_metadatas: list = []
+        context = retrieved.context
+        cite = retrieved.cite
+        budget_metrics = None
 
-        if context_docs:
-            generator = self._consume_preloaded_generator(generator_preload_future)
-
-            yield StatusEvent(status="Packing token budget...")
-            pack_result = enforce_token_budget(
-                docs=context_docs,
+        if generator is not None and retrieved.context_docs:
+            pack_result_obj = enforce_token_budget(
+                docs=retrieved.context_docs,
                 max_tokens=config.retrieval_budget,
                 tokenizer=generator.tokenizer,
                 consecutive_fail_threshold=3,
                 allow_truncation=True,
                 log=logger,
             )
-            # -- budget summary status ------------------------------------
-            n_packed = len(pack_result.packed_docs)
-            used_tok = pack_result.used_tokens
-            budget_pct = f"{100 * used_tok / config.retrieval_budget:.0f}%" if config.retrieval_budget else "n/a"
-            _budget_extras = []
-            if pack_result.skipped_count:
-                _budget_extras.append(f"{pack_result.skipped_count} skipped")
-            if pack_result.truncated_count:
-                _budget_extras.append(f"{pack_result.truncated_count} truncated")
-            _extra_str = f" ({', '.join(_budget_extras)})" if _budget_extras else ""
-            yield StatusEvent(
-                status=f"Budget: {n_packed} docs, {used_tok:,} tokens ({budget_pct} of budget){_extra_str}"
-            )
-
             packed_metadatas = [
                 result_metadatas[i]
-                for i in pack_result.packed_indices
+                for i in pack_result_obj.packed_indices
                 if i < len(result_metadatas)
             ]
 
             if cite and packed_metadatas:
                 context, source_mapping = format_context_with_citations(
-                    texts=pack_result.packed_docs, metadatas=packed_metadatas
+                    texts=pack_result_obj.packed_docs, metadatas=packed_metadatas
                 )
                 source_legend = build_source_legend(source_mapping)
 
-                # Build citation list for the frontend
-                for ci, pack_idx in enumerate(pack_result.packed_indices):
-                    if pack_idx >= len(results):
+                for ci, pack_idx in enumerate(pack_result_obj.packed_indices):
+                    if pack_idx >= len(retrieved.results):
                         continue
-                    r = results[pack_idx]
+                    r = retrieved.results[pack_idx]
                     packed_retrieval_results.append(r)
-                    citation_list.append({
-                        "index": ci + 1,
-                        "source_id": r.metadata.get("source_id", ""),
-                        "chunk_id": r.child_id,
-                        "page_number": r.metadata.get("page_number"),
-                        "display_page": r.metadata.get("display_page"),
-                        "header_path": r.metadata.get("header_path", ""),
-                        "chunk_text": r.text if r.text else "",
-                    })
-                if citation_list:
-                    yield CitationListEvent(citations=citation_list)
+                    citation_list.append(
+                        {
+                            "index": ci + 1,
+                            "source_id": r.metadata.get("source_id", ""),
+                            "chunk_id": r.child_id,
+                            "page_number": r.metadata.get("page_number"),
+                            "display_page": r.metadata.get("display_page"),
+                            "header_path": r.metadata.get("header_path", ""),
+                            "chunk_text": r.text if r.text else "",
+                        }
+                    )
+            elif cite:
+                logger.info(
+                    "Auto-disabling citations: packed context missing metadata"
+                )
+                cite = False
+            else:
+                context = "\n\n".join(pack_result_obj.packed_docs)
+
+            budget_metrics = BudgetMetrics(
+                budget_tokens=config.retrieval_budget,
+                used_tokens=pack_result_obj.used_tokens,
+                utilization_pct=(
+                    100 * pack_result_obj.used_tokens / config.retrieval_budget
+                    if config.retrieval_budget > 0
+                    else 0
+                ),
+                avg_doc_tokens=(
+                    pack_result_obj.used_tokens / len(pack_result_obj.packed_docs)
+                    if pack_result_obj.packed_docs
+                    else 0
+                ),
+                docs_packed=len(pack_result_obj.packed_docs),
+                docs_skipped=pack_result_obj.skipped_count,
+                docs_truncated=pack_result_obj.truncated_count,
+            )
+
+        elif retrieved.context_docs:
+            # no_generate=True path: format context without token budgeting.
+            if cite and result_metadatas:
+                context, source_mapping = format_context_with_citations(
+                    texts=retrieved.context_docs, metadatas=result_metadatas
+                )
+                source_legend = build_source_legend(source_mapping)
             elif cite:
                 cite = False
             else:
-                context = "\n\n".join(pack_result.packed_docs)
+                context = _dedupe_context(retrieved.context_docs)
 
-        elif not context and not bypass_retrieval and intent_result.intent != Intent.COLLECTION:
-            # No context retrieved and not bypassing — try with existing context
-            pass
-
-        # -- build prompt ---------------------------------------------------
-        if should_stop():
-            yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled before prompt build")
-            yield FinishEvent(finish_reason="error")
-            return
-        yield StatusEvent(status="Building prompt...")
-        messages = build_messages(
-            context,
-            query_text,
-            intent=intent_result.intent,
-            extra_instructions=extra_instructions,
-            citations_enabled=cite,
+        return _PackResult(
+            context=context,
+            cite=cite,
             source_legend=source_legend,
-            mode=config.mode,
-            retrieval_budget=config.retrieval_budget,
-        )
-
-        # -- generate with streaming tokens --------------------------------
-        if generator is None:
-            generator = self._consume_preloaded_generator(generator_preload_future)
-
-        gen_config = GenerationConfig(
-            max_tokens=self._generation_max_tokens,
-            context_window=config.context_window,
-        )
-
-        yield StatusEvent(status="Generating answer...")
-
-        token_count = 0
-        answer_tokens: list[str] = []
-
-        for token in generator.generate_chat_stream(
-            messages, config=gen_config, should_stop=should_stop,
-            temperature=generation_params.temperature,
-            top_p=generation_params.top_p,
-        ):
-            if should_stop():
-                yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled during generation")
-                yield FinishEvent(finish_reason="error")
-                return
-            token_count += 1
-            answer_tokens.append(token)
-            yield TextTokenEvent(token=token)
-
-        # -- post-hoc citation highlight verification --------------------------
-        # If citations were emitted, verify that highlight anchors are correct.
-        # Re-emit an updated CitationListEvent with highlight_text for any
-        # citations whose referenced content falls outside the child chunk.
-        if cite and citation_list and packed_retrieval_results:
-            full_answer = "".join(answer_tokens)
-            try:
-                highlight_map = compute_highlight_texts(full_answer, packed_retrieval_results)
-                if highlight_map:
-                    updated_citations: list[dict[str, object]] = []
-                    for cit in citation_list:
-                        cit_copy = dict(cit)
-                        cit_idx = cit_copy.get("index")
-                        if isinstance(cit_idx, int) and cit_idx in highlight_map:
-                            cit_copy["highlight_text"] = highlight_map[cit_idx]
-                        updated_citations.append(cit_copy)
-                    yield CitationListEvent(citations=updated_citations)
-                    logger.info(
-                        "Citation verification: corrected %d/%d citations",
-                        len(highlight_map),
-                        len(citation_list),
-                    )
-            except Exception as exc:
-                logger.warning("Citation verification failed (non-fatal): %s", exc)
-
-        # -- INTENT_AWARE: generation logging ------------------------------
-        logger.info(
-            "INTENT_AWARE | intent=%s | temperature=%.2f | top_p=%.2f | tokens_generated=%d",
-            intent_result.intent.value,
-            generation_params.temperature,
-            generation_params.top_p,
-            token_count,
-        )
-
-        # -- finish ---------------------------------------------------------
-        yield FinishEvent(
-            finish_reason="stop",
-            completion_tokens=token_count,
+            result_metadatas=result_metadatas,
+            budget_metrics=budget_metrics,
+            citation_list=citation_list,
+            packed_retrieval_results=packed_retrieval_results,
+            pack_result=pack_result_obj,
+            packed_metadatas=packed_metadatas,
         )
 
     # -- internal pipeline helpers -----------------------------------------
