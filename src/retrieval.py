@@ -4,7 +4,6 @@ import heapq
 import logging
 import re
 import time
-from collections import OrderedDict
 from dataclasses import dataclass
 from operator import itemgetter
 from typing import Any, Optional
@@ -22,16 +21,6 @@ from .storage import StorageEngine
 
 logger = logging.getLogger(__name__)
 
-_BOILERPLATE_PATTERNS = (
-    "as an ai",
-    "as a language model",
-    "i do not have moral beliefs",
-    "i cannot be considered",
-)
-_BOILERPLATE_REGEX = re.compile(
-    "|".join(re.escape(pattern) for pattern in _BOILERPLATE_PATTERNS),
-    re.IGNORECASE,
-)
 
 
 @dataclass(frozen=True)
@@ -90,10 +79,6 @@ def _resolve_sub_threshold_policy(
     if intent_key in {"ANALYZE", "COMPARE", "CRITIQUE", "SUMMARIZE", "OVERVIEW", "EXPLAIN"}:
         return "analytical", _SUB_THRESHOLD_ANALYTICAL
     return "default", _SUB_THRESHOLD_ANALYTICAL
-
-
-def _is_boilerplate(text: str) -> bool:
-    return bool(_BOILERPLATE_REGEX.search(text))
 
 
 def format_chunk_for_citation(
@@ -179,30 +164,20 @@ class RetrievalEngine:
         self._embedding_model = embedding_model
         self._reranker = reranker
         self._config = config
-        self._query_cache: OrderedDict[str, list[float]] = OrderedDict()
-        self._query_cache_max_size = 100
+        # NOTE: This engine is instantiated per-request (see rag_engine.py query() /
+        # _query_events_impl()), so no query embedding cache is needed.  If a
+        # long-lived engine is introduced later, consider adding a cache keyed on
+        # (model_id, query.strip()) with an LRU eviction policy.
 
-    def _get_query_embedding(self, query: str) -> list[float]:
-        cached = self._query_cache.get(query)
-        if cached is not None:
-            self._query_cache.move_to_end(query)
-            return cached
-
+    @staticmethod
+    def _encode_query(embedding_model: Any, query: str) -> list[float]:
+        """Encode a single query string and return a normalised float vector."""
         try:
-            embeddings = self._embedding_model.encode(
-                [query],
-                normalize_embeddings=True,
-            )
+            embeddings = embedding_model.encode([query], normalize_embeddings=True)
             embedding = embeddings[0].tolist() if hasattr(embeddings[0], "tolist") else list(embeddings[0])
-            embedding = [float(value) for value in embedding]
+            return [float(v) for v in embedding]
         except Exception as exc:  # pragma: no cover - dependency runtime
             raise RuntimeError("Embedding model encode failed.") from exc
-
-        self._query_cache[query] = embedding
-        self._query_cache.move_to_end(query)
-        if len(self._query_cache) > self._query_cache_max_size:
-            self._query_cache.popitem(last=False)
-        return embedding
 
     def _hybrid_search(
         self,
@@ -214,7 +189,7 @@ class RetrievalEngine:
         """Single-call hybrid search via LanceDB (vector ANN + FTS BM25 + RRF)."""
         if not query.strip():
             raise ValueError("query must be a non-empty string.")
-        query_vector = self._get_query_embedding(query)
+        query_vector = self._encode_query(self._embedding_model, query)
 
         return self._storage.hybrid_search(
             query_text=query,
@@ -230,13 +205,19 @@ class RetrievalEngine:
         bm25_query: str,
         top_k: int,
         source_id: Optional[str] = None,
+        query_vector: Optional[list[float]] = None,
     ) -> list[dict[str, Any]]:
-        """Hybrid search with separate queries for embedding and BM25."""
+        """Hybrid search with separate queries for embedding and BM25.
+
+        When *query_vector* is supplied the embedding encode step is skipped;
+        the caller is responsible for timing that encode separately.
+        """
         if not embedding_query.strip():
             raise ValueError("embedding_query must be a non-empty string.")
         if not bm25_query.strip():
             raise ValueError("bm25_query must be a non-empty string.")
-        query_vector = self._get_query_embedding(embedding_query)
+        if query_vector is None:
+            query_vector = self._encode_query(self._embedding_model, embedding_query)
 
         return self._storage.hybrid_search(
             query_text=bm25_query,
@@ -249,10 +230,18 @@ class RetrievalEngine:
     def _deduplicate_by_parent(
         items: list[dict[str, Any]],
         top_k: int,
+        max_children_per_parent: int = 2,
     ) -> tuple[list[dict[str, Any]], DeduplicationMetrics]:
-        """Keep highest-scored child per unique parent_id (runs before reranking)."""
+        """Keep up to *max_children_per_parent* highest-scored children per parent_id.
+
+        The result is trimmed to *top_k* by score so the caller's budget is
+        unchanged.  The default of 2 sends a richer candidate set to the
+        reranker while still avoiding the long-tail of low-scoring siblings.
+        Pass ``max_children_per_parent=1`` for the original one-per-parent
+        behaviour.
+        """
         before_count = len(items)
-        seen_parents: dict[str, dict[str, Any]] = {}
+        parent_children: dict[str, list[dict[str, Any]]] = {}
         no_parent_items: list[dict[str, Any]] = []
 
         for item in items:
@@ -265,12 +254,26 @@ class RetrievalEngine:
                 no_parent_items.append(item)
                 continue
 
-            if parent_id not in seen_parents:
-                seen_parents[parent_id] = item
-            elif item.get("score", 0) > seen_parents[parent_id].get("score", 0):
-                seen_parents[parent_id] = item
+            children = parent_children.setdefault(parent_id, [])
+            if len(children) < max_children_per_parent:
+                children.append(item)
+                children.sort(key=lambda x: x.get("score", 0), reverse=True)
+            elif item.get("score", 0) > children[-1].get("score", 0):
+                children[-1] = item
+                children.sort(key=lambda x: x.get("score", 0), reverse=True)
 
-        deduplicated = list(seen_parents.values()) + no_parent_items
+        multi_parent_count = sum(1 for ch in parent_children.values() if len(ch) > 1)
+        extra_children = sum(len(ch) - 1 for ch in parent_children.values() if len(ch) > 1)
+        if multi_parent_count > 0:
+            logger.debug(
+                "Dedup (max_per_parent=%d): %d parents had >1 child; %d extra children "
+                "retained vs one-per-parent policy",
+                max_children_per_parent, multi_parent_count, extra_children,
+            )
+
+        deduplicated = [
+            item for children in parent_children.values() for item in children
+        ] + no_parent_items
         deduplicated_count = len(deduplicated)
         dedup_removed_count = max(0, before_count - deduplicated_count)
         top_k_limited = heapq.nlargest(top_k, deduplicated, key=itemgetter("score"))
@@ -363,6 +366,10 @@ class RetrievalEngine:
 
         reranker_enabled = bool(cfg.reranker_enabled) if cfg else self._reranker is not None
         context_expansion_enabled = bool(cfg.context_expansion_enabled) if cfg else True
+        if params is not None:
+            _max_children = params.max_children_per_parent
+        else:
+            _max_children = cfg.max_children_per_parent if cfg else 2
 
         timing = TimingMetrics()
         total_start = time.perf_counter()
@@ -371,8 +378,10 @@ class RetrievalEngine:
         _embedding_q = embedding_query or query
         _bm25_q = bm25_query or query
 
+        # Encode once; reuse the vector in the hybrid-search call below so
+        # encode() is called exactly once per search() invocation.
         t0 = time.perf_counter()
-        _ = self._get_query_embedding(_embedding_q)
+        _query_vector = self._encode_query(self._embedding_model, _embedding_q)
         timing.query_embedding_ms = (time.perf_counter() - t0) * 1000
 
         # Stage 1: LanceDB native hybrid search (replaces dense + sparse + RRF)
@@ -382,6 +391,7 @@ class RetrievalEngine:
             bm25_query=_bm25_q,
             top_k=k_fused,
             source_id=source_id,
+            query_vector=_query_vector,
         )
         timing.hybrid_search_ms = (time.perf_counter() - t0) * 1000
         # sparse_search_ms and rrf_fusion_ms are zero — LanceDB does it all in one call
@@ -391,7 +401,7 @@ class RetrievalEngine:
 
         # Stage 2: Deduplicate by parent
         t0 = time.perf_counter()
-        deduped, dedup_metrics = self._deduplicate_by_parent(fused, k_fused)
+        deduped, dedup_metrics = self._deduplicate_by_parent(fused, k_fused, max_children_per_parent=_max_children)
         timing.dedup_ms = (time.perf_counter() - t0) * 1000
         logger.debug(f"Early dedup: {dedup_metrics.children_before_dedup} -> {dedup_metrics.children_after_dedup} ({dedup_metrics.reduction_pct:.1f}% reduction)")
 
@@ -578,14 +588,12 @@ class RetrievalEngine:
                         sub_threshold_policy.max_additional_chunks,
                     )
 
-        # Stage 6: Final dedup + boilerplate filter
+        # Stage 6: Final dedup (removes any remaining duplicate children/parents
+        # after threshold expansion before committing to the output list)
         final: list[dict[str, Any]] = []
         seen_parents: set[str] = set()
         seen_children: set[str] = set()
         for item in reranked:
-            text_for_filter = item.get("rerank_text") or item.get("text") or ""
-            if _is_boilerplate(text_for_filter):
-                continue
             child_id = item.get("id")
             if isinstance(child_id, str):
                 if child_id in seen_children:

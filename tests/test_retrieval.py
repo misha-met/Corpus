@@ -114,13 +114,13 @@ class TestHybridSearch:
 
 class TestDeduplication:
     def test_dedup_keeps_highest_score(self):
-        """Should keep the child with highest score per parent_id."""
+        """Should keep the child with highest score per parent_id (one-per-parent mode)."""
         items = [
             {"id": "c1", "score": 0.9, "metadata": {"parent_id": "p1"}},
             {"id": "c2", "score": 0.5, "metadata": {"parent_id": "p1"}},
             {"id": "c3", "score": 0.8, "metadata": {"parent_id": "p2"}},
         ]
-        deduped, metrics = RetrievalEngine._deduplicate_by_parent(items, top_k=10)
+        deduped, metrics = RetrievalEngine._deduplicate_by_parent(items, top_k=10, max_children_per_parent=1)
         ids = [d["id"] for d in deduped]
         assert "c1" in ids  # higher score for p1
         assert "c2" not in ids
@@ -131,7 +131,7 @@ class TestDeduplication:
             {"id": f"c{i}", "score": float(i), "metadata": {"parent_id": "p1"}}
             for i in range(5)
         ]
-        deduped, metrics = RetrievalEngine._deduplicate_by_parent(items, top_k=10)
+        deduped, metrics = RetrievalEngine._deduplicate_by_parent(items, top_k=10, max_children_per_parent=1)
         assert metrics.children_before_dedup == 5
         assert metrics.children_after_dedup == 1
         assert metrics.reduction_pct > 0
@@ -153,6 +153,64 @@ class TestDeduplication:
         ]
         deduped, _ = RetrievalEngine._deduplicate_by_parent(items, top_k=3)
         assert len(deduped) <= 3
+
+    def test_dedup_two_children_per_parent_default(self):
+        """Default max_children_per_parent=2: both top children from same parent are kept."""
+        items = [
+            {"id": "c1", "score": 0.9, "metadata": {"parent_id": "p1"}},
+            {"id": "c2", "score": 0.85, "metadata": {"parent_id": "p1"}},
+            {"id": "c3", "score": 0.5, "metadata": {"parent_id": "p1"}},
+            {"id": "c4", "score": 0.82, "metadata": {"parent_id": "p2"}},
+        ]
+        deduped, metrics = RetrievalEngine._deduplicate_by_parent(items, top_k=10)
+        ids = [d["id"] for d in deduped]
+        assert "c1" in ids
+        assert "c2" in ids   # second-best sibling kept under default=2
+        assert "c3" not in ids  # third sibling dropped
+        assert "c4" in ids
+        assert metrics.children_before_dedup == 4
+        assert metrics.children_after_dedup == 3  # 2 from p1 + 1 from p2
+
+    def test_dedup_diversity_when_budget_allows(self):
+        """With top_k=3 and max_children_per_parent=2, second sibling enters the list."""
+        items = [
+            {"id": "a1", "score": 0.9,  "metadata": {"parent_id": "pA"}},
+            {"id": "a2", "score": 0.85, "metadata": {"parent_id": "pA"}},
+            {"id": "a3", "score": 0.5,  "metadata": {"parent_id": "pA"}},
+            {"id": "b1", "score": 0.82, "metadata": {"parent_id": "pB"}},
+        ]
+        # With max=2, top_k=3: a1 (0.9), a2 (0.85), b1 (0.82)
+        deduped, _ = RetrievalEngine._deduplicate_by_parent(items, top_k=3, max_children_per_parent=2)
+        ids = [d["id"] for d in deduped]
+        assert ids == ["a1", "a2", "b1"]
+
+    def test_dedup_displacement_when_budget_tight(self):
+        """When top_k=2, the second sibling displaces the lower-scored other-parent chunk."""
+        items = [
+            {"id": "a1", "score": 0.9,  "metadata": {"parent_id": "pA"}},
+            {"id": "a2", "score": 0.85, "metadata": {"parent_id": "pA"}},
+            {"id": "a3", "score": 0.5,  "metadata": {"parent_id": "pA"}},
+            {"id": "b1", "score": 0.82, "metadata": {"parent_id": "pB"}},
+        ]
+        # With max=2, top_k=2: a1 (0.9), a2 (0.85) — b1 displaced
+        deduped, _ = RetrievalEngine._deduplicate_by_parent(items, top_k=2, max_children_per_parent=2)
+        ids = [d["id"] for d in deduped]
+        assert "a1" in ids
+        assert "a2" in ids
+        assert "b1" not in ids
+
+    def test_dedup_one_per_parent_baseline(self):
+        """max_children_per_parent=1 reproduces old one-per-parent behaviour."""
+        items = [
+            {"id": "a1", "score": 0.9,  "metadata": {"parent_id": "pA"}},
+            {"id": "a2", "score": 0.85, "metadata": {"parent_id": "pA"}},
+            {"id": "b1", "score": 0.82, "metadata": {"parent_id": "pB"}},
+        ]
+        deduped, _ = RetrievalEngine._deduplicate_by_parent(items, top_k=3, max_children_per_parent=1)
+        ids = [d["id"] for d in deduped]
+        assert "a1" in ids
+        assert "a2" not in ids  # only best child kept
+        assert "b1" in ids
 
     def test_dedup_empty_list(self):
         deduped, metrics = RetrievalEngine._deduplicate_by_parent([], top_k=10)
@@ -182,30 +240,6 @@ class TestReranking:
         reranked, _ = retrieval_engine._rerank("Chomsky language grammar", items)
         scores = [r["rerank_score"] for r in reranked]
         assert scores == sorted(scores, reverse=True)
-
-    def test_boilerplate_filtered_in_search_stage(self, retrieval_engine: RetrievalEngine, monkeypatch):
-        """Boilerplate is filtered in final search stage, not _rerank()."""
-        def _fake_hybrid_search_decoupled(*, embedding_query, bm25_query, top_k, source_id=None):
-            return [
-                {
-                    "id": "boiler",
-                    "text": "As an AI language model, I cannot be considered a person",
-                    "score": 0.9,
-                    "metadata": {"parent_id": "p1", "source_id": "test_doc_linguistics"},
-                },
-                {
-                    "id": "normal",
-                    "text": "Chomsky language theory and generative grammar",
-                    "score": 0.8,
-                    "metadata": {"parent_id": "p2", "source_id": "test_doc_linguistics"},
-                },
-            ]
-
-        monkeypatch.setattr(retrieval_engine, "_hybrid_search_decoupled", _fake_hybrid_search_decoupled)
-        results = retrieval_engine.search("language", collect_metrics=False)
-        ids = [r.child_id for r in results]
-        assert "boiler" not in ids
-        assert "normal" in ids
 
     def test_rerank_empty_items(self, retrieval_engine: RetrievalEngine):
         reranked, scores = retrieval_engine._rerank("test", [])
@@ -326,7 +360,7 @@ class TestThresholdFiltering:
 
         token_rich_text = "word " * 15
 
-        def _fake_hybrid_search_decoupled(*, embedding_query, bm25_query, top_k, source_id=None):
+        def _fake_hybrid_search_decoupled(*, embedding_query, bm25_query, top_k, source_id=None, query_vector=None):
             return [
                 {"id": "a1", "text": token_rich_text, "score": 0.9, "metadata": {"parent_id": "pa1", "source_id": "source_a"}},
                 {"id": "b1", "text": token_rich_text, "score": 0.8, "metadata": {"parent_id": "pb1", "source_id": "source_b"}},
@@ -381,7 +415,7 @@ class TestThresholdFiltering:
 
         token_rich_text = "word " * 15
 
-        def _fake_hybrid_search_decoupled(*, embedding_query, bm25_query, top_k, source_id=None):
+        def _fake_hybrid_search_decoupled(*, embedding_query, bm25_query, top_k, source_id=None, query_vector=None):
             return [
                 {"id": "a1", "text": token_rich_text, "score": 0.9, "metadata": {"parent_id": "pa1", "source_id": "source_a"}},
                 {"id": "b1", "text": token_rich_text, "score": 0.8, "metadata": {"parent_id": "pb1", "source_id": "source_b"}},

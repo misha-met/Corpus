@@ -33,6 +33,7 @@ class ModelConfig:
     reranker_enabled: bool = True
     context_expansion_enabled: bool = True
     system_ram_gb: float = 0.0
+    max_children_per_parent: int = 2
 
 
 # ── Intent-aware parameter overrides ─────────────────────────────────────────
@@ -62,6 +63,7 @@ class ResolvedRetrievalParams:
     top_k_final: int
     reranker_threshold: float
     reranker_min_docs: int
+    max_children_per_parent: int = 2
 
 
 INTENT_RETRIEVAL_OVERRIDES: dict[str, IntentRetrievalOverrides] = {
@@ -106,6 +108,7 @@ def resolve_retrieval_params(mode_config: ModelConfig, intent: str) -> ResolvedR
             if overrides.reranker_min_docs is not None
             else mode_config.reranker_min_docs
         ),
+        max_children_per_parent=mode_config.max_children_per_parent,
     )
 
 
