@@ -67,7 +67,9 @@ class ResolvedRetrievalParams:
 
 
 INTENT_RETRIEVAL_OVERRIDES: dict[str, IntentRetrievalOverrides] = {
-    "FACTUAL":    IntentRetrievalOverrides(top_k_dense_scale=0.7, top_k_fused_scale=0.5, top_k_final_scale=1.0, reranker_threshold_scale=1.3),
+    # FACTUAL: stricter threshold (1.3×) + min_docs=1 so a single high-confidence
+    # fact is not padded with low-quality backfill chunks.
+    "FACTUAL":    IntentRetrievalOverrides(top_k_dense_scale=0.7, top_k_fused_scale=0.5, top_k_final_scale=1.0, reranker_threshold_scale=1.3, reranker_min_docs=1),
     "SUMMARIZE":  IntentRetrievalOverrides(top_k_dense_scale=1.0, top_k_final_scale=1.0),
     "OVERVIEW":   IntentRetrievalOverrides(top_k_dense_scale=1.2, top_k_final_scale=1.0),
     "EXPLAIN":    IntentRetrievalOverrides(top_k_dense_scale=1.0, top_k_final_scale=1.0),

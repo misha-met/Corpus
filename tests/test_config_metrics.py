@@ -13,6 +13,7 @@ from src.config import (
     _auto_select_mode,
     _get_mode_config,
     select_mode_config,
+    resolve_retrieval_params,
 )
 from src.metrics import (
     BudgetMetrics,
@@ -291,3 +292,46 @@ class TestThresholdMetrics:
             min_docs=3,
         )
         assert t.safety_net_triggered is True
+
+
+# ===========================================================================
+# Intent retrieval parameter overrides
+# ===========================================================================
+
+class TestIntentRetrievalOverrides:
+    """Tests for resolve_retrieval_params intent-specific overrides."""
+
+    def test_factual_min_docs_is_one(self):
+        """FACTUAL intent should resolve reranker_min_docs=1 regardless of the
+        mode base value, to avoid padding a single high-confidence fact with
+        irrelevant backfill chunks."""
+        base = _get_mode_config("regular", ram_gb=48.0)
+        params = resolve_retrieval_params(base, "FACTUAL")
+        assert params.reranker_min_docs == 1, (
+            f"Expected reranker_min_docs=1 for FACTUAL intent, got {params.reranker_min_docs}"
+        )
+
+    def test_factual_min_docs_overrides_higher_base(self):
+        """Even a mode with reranker_min_docs=4 must be reduced to 1 for FACTUAL."""
+        base = _get_mode_config("regular", ram_gb=64.0)  # 64 GB tier has min_docs=4
+        assert base.reranker_min_docs == 4, "Pre-condition: 64 GB base has min_docs=4"
+        params = resolve_retrieval_params(base, "FACTUAL")
+        assert params.reranker_min_docs == 1
+
+    def test_non_factual_uses_base_min_docs(self):
+        """Non-FACTUAL intents without an explicit override keep the mode default."""
+        base = _get_mode_config("regular", ram_gb=48.0)
+        for intent in ("OVERVIEW", "SUMMARIZE", "EXPLAIN", "ANALYZE", "COMPARE", "CRITIQUE"):
+            params = resolve_retrieval_params(base, intent)
+            assert params.reranker_min_docs == base.reranker_min_docs, (
+                f"Intent {intent} should not override min_docs, "
+                f"got {params.reranker_min_docs} (expected {base.reranker_min_docs})"
+            )
+
+    def test_factual_threshold_scale_unchanged(self):
+        """Confirm the threshold scale for FACTUAL is preserved alongside the new
+        min_docs override (regression guard against accidentally clearing it)."""
+        base = _get_mode_config("regular", ram_gb=48.0)
+        params = resolve_retrieval_params(base, "FACTUAL")
+        expected_threshold = base.reranker_threshold * 1.3
+        assert abs(params.reranker_threshold - expected_threshold) < 1e-9
