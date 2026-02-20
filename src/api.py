@@ -666,13 +666,53 @@ async def list_sources():
     return SourceListResponse(sources=sources)
 
 
+async def _post_ingest_snapshot(
+    engine: object,
+    source_id: str,
+    file_path: str,
+) -> None:
+    """Create text snapshot and update summary record with file paths.
+
+    Called after a successful ingest from both ``ingest_source()`` and
+    ``upload_source()``.
+    """
+    from .source_cache import save_snapshot
+
+    storage = engine.storage  # type: ignore[union-attr]
+
+    # Create text snapshot for /content endpoint
+    snapshot_path = ""
+    try:
+        parent_texts = storage.get_parent_texts_by_source(source_id=source_id)
+        if parent_texts:
+            full_text = "\n\n".join(parent_texts)
+            snapshot_path = await asyncio.to_thread(
+                save_snapshot, source_id, full_text
+            )
+    except Exception as snap_exc:
+        logger.warning("Failed to create snapshot for %s: %s", source_id, snap_exc)
+
+    # Update the summary record with file paths (schema v2)
+    try:
+        summaries = storage.get_source_summaries()
+        summary_text = summaries.get(source_id, "")
+        if summary_text:
+            storage.upsert_source_summary(
+                source_id=source_id,
+                summary=summary_text,
+                source_path=str(Path(file_path).resolve()),
+                snapshot_path=snapshot_path,
+            )
+    except Exception as path_exc:
+        logger.warning("Failed to update source paths for %s: %s", source_id, path_exc)
+
+
 @app.post("/api/sources/ingest", response_model=IngestResponse)
 async def ingest_source(request: IngestRequest):
     """Ingest a document (PDF or Markdown) into the RAG store.
 
     Also creates a text snapshot for the ``/content`` endpoint.
     """
-    from .source_cache import save_snapshot
 
     file_path = request.file_path
     source_id = request.source_id
@@ -698,34 +738,7 @@ async def ingest_source(request: IngestRequest):
             summarize=request.summarize,
         )
 
-        # Create text snapshot for /content endpoint
-        snapshot_path = ""
-        try:
-            # Collect parent texts for the snapshot
-            storage = engine.storage  # type: ignore[union-attr]
-            parent_texts = storage.get_parent_texts_by_source(source_id=source_id)
-            if parent_texts:
-                full_text = "\n\n".join(parent_texts)
-                snapshot_path = await asyncio.to_thread(
-                    save_snapshot, source_id, full_text
-                )
-        except Exception as snap_exc:
-            logger.warning("Failed to create snapshot for %s: %s", source_id, snap_exc)
-
-        # Update the summary record with file paths (schema v2)
-        try:
-            storage = engine.storage  # type: ignore[union-attr]
-            summaries = storage.get_source_summaries()
-            summary_text = summaries.get(source_id, "")
-            if summary_text:
-                storage.upsert_source_summary(
-                    source_id=source_id,
-                    summary=summary_text,
-                    source_path=str(Path(file_path).resolve()),
-                    snapshot_path=snapshot_path,
-                )
-        except Exception as path_exc:
-            logger.warning("Failed to update source paths for %s: %s", source_id, path_exc)
+        await _post_ingest_snapshot(engine, source_id, file_path)
 
         return IngestResponse(
             source_id=result.source_id,
@@ -775,7 +788,6 @@ async def upload_source(
     - ``source_id``: Optional custom ID (auto-generated from filename if empty)
     - ``summarize``: Whether to generate a summary (default true)
     """
-    from .source_cache import save_snapshot
 
     # --- Validate file extension ---
     filename = file.filename or "unknown"
@@ -827,33 +839,7 @@ async def upload_source(
             summarize=summarize,
         )
 
-        # Create text snapshot for /content endpoint
-        snapshot_path = ""
-        try:
-            storage = engine.storage  # type: ignore[union-attr]
-            parent_texts = storage.get_parent_texts_by_source(source_id=sid)
-            if parent_texts:
-                full_text = "\n\n".join(parent_texts)
-                snapshot_path = await asyncio.to_thread(
-                    save_snapshot, sid, full_text
-                )
-        except Exception as snap_exc:
-            logger.warning("Failed to create snapshot for %s: %s", sid, snap_exc)
-
-        # Update the summary record with file paths (schema v2)
-        try:
-            storage = engine.storage  # type: ignore[union-attr]
-            summaries = storage.get_source_summaries()
-            summary_text = summaries.get(sid, "")
-            if summary_text:
-                storage.upsert_source_summary(
-                    source_id=sid,
-                    summary=summary_text,
-                    source_path=str(dest.resolve()),
-                    snapshot_path=snapshot_path,
-                )
-        except Exception as path_exc:
-            logger.warning("Failed to update source paths for %s: %s", sid, path_exc)
+        await _post_ingest_snapshot(engine, sid, str(dest))
 
         return IngestResponse(
             source_id=result.source_id,
