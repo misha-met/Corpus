@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { sourceApi, type SourceInfo } from "@/lib/api-client";
 import { IngestModal, type UploadRequest } from "@/components/ingest-modal";
+import { saveCitationMeta, deleteCitationMeta } from "@/lib/citation-meta-store";
 import { CitationPanelReader } from "@/components/citation-viewer-modal";
 import { File } from "@/components/assistant-ui/file";
 import { useAppState, useAppDispatch } from "@/context/app-context";
@@ -86,6 +87,12 @@ export function SourcePanel({
     (reqs: UploadRequest[]) => {
       setShowIngestModal(false);
       if (reqs.length === 0) return;
+      // Persist any citation references provided at ingest time
+      for (const req of reqs) {
+        if (req.citationRef) {
+          saveCitationMeta(req.sourceId, req.citationRef);
+        }
+      }
       setUploadQueue((prev) => [...prev, ...reqs]);
     },
     []
@@ -198,6 +205,7 @@ export function SourcePanel({
 
     try {
       await sourceApi.deleteSource(sourceId);
+      deleteCitationMeta(sourceId);
       setSources((prev) => prev.filter((s) => s.source_id !== sourceId));
       if (activeSourceId === sourceId) {
         setActiveSourceId(null);

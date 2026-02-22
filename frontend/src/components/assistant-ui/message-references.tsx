@@ -4,8 +4,9 @@ import { useState, useMemo, useCallback } from "react";
 import { useAuiState } from "@assistant-ui/react";
 import { useAppState, useAppDispatch } from "@/context/app-context";
 import { groupCitations } from "@/lib/group-citations";
+import { formatFootnotes, formatHarvardBibliography } from "@/lib/format-citations";
 import { sourceApi } from "@/lib/api-client";
-import { ChevronDownIcon, ChevronRightIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronRightIcon, Copy, CheckCheck } from "lucide-react";
 
 export function MessageReferences() {
     const messageId = useAuiState((s) => s.message.id);
@@ -83,8 +84,28 @@ export function MessageReferences() {
         [chunkCache, expandedSources]
     );
 
+    // Only the green (actually-cited) citations, in citation-number order
+    const citedCitations = useMemo(
+        () => citations.filter((c) => citedNumbers.size === 0 || citedNumbers.has(c.number)),
+        [citations, citedNumbers]
+    );
+
     const totalChunks = citations.length;
     const totalSources = grouped.length;
+
+    // Copy-to-clipboard state: null | "footnote" | "harvard"
+    const [copied, setCopied] = useState<"footnote" | "harvard" | null>(null);
+
+    function handleCopy(style: "footnote" | "harvard") {
+        const text =
+            style === "footnote"
+                ? formatFootnotes(citedCitations)
+                : formatHarvardBibliography(citedCitations);
+        navigator.clipboard.writeText(text).then(() => {
+            setCopied(style);
+            setTimeout(() => setCopied(null), 2000);
+        });
+    }
 
     if (grouped.length === 0 || isRunning) {
         return null;
@@ -92,20 +113,56 @@ export function MessageReferences() {
 
     return (
         <div className="mt-2 mb-1 w-full flex flex-col items-start border-t border-white/10 pt-2 pb-1 text-sm transition-all duration-200">
-            <button
-                onClick={toggleDrawer}
-                className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground outline-none group w-fit transition-colors"
-            >
-                {isDrawerOpen ? (
-                    <ChevronDownIcon className="size-4 shrink-0 transition-transform" />
-                ) : (
-                    <ChevronRightIcon className="size-4 shrink-0 transition-transform" />
+            <div className="flex items-center gap-2 w-full">
+                <button
+                    onClick={toggleDrawer}
+                    className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground outline-none group flex-1 min-w-0 transition-colors"
+                >
+                    {isDrawerOpen ? (
+                        <ChevronDownIcon className="size-4 shrink-0 transition-transform" />
+                    ) : (
+                        <ChevronRightIcon className="size-4 shrink-0 transition-transform" />
+                    )}
+                    <span className="font-medium truncate">
+                        References ({totalSources} source{totalSources !== 1 ? "s" : ""},{" "}
+                        {totalChunks} chunk{totalChunks !== 1 ? "s" : ""})
+                    </span>
+                </button>
+
+                {/* Copy buttons — only shown when there are cited passages */}
+                {citedCitations.length > 0 && (
+                    <div className="flex items-center gap-1 shrink-0">
+                        <button
+                            type="button"
+                            onClick={() => handleCopy("footnote")}
+                            title="Copy as academic footnotes"
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors
+                                text-muted-foreground border-white/10 hover:text-foreground hover:border-white/30"
+                        >
+                            {copied === "footnote" ? (
+                                <CheckCheck className="size-3 text-green-400" />
+                            ) : (
+                                <Copy className="size-3" />
+                            )}
+                            Footnotes
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => handleCopy("harvard")}
+                            title="Copy as Harvard bibliography"
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors
+                                text-muted-foreground border-white/10 hover:text-foreground hover:border-white/30"
+                        >
+                            {copied === "harvard" ? (
+                                <CheckCheck className="size-3 text-green-400" />
+                            ) : (
+                                <Copy className="size-3" />
+                            )}
+                            Harvard
+                        </button>
+                    </div>
                 )}
-                <span className="font-medium">
-                    References ({totalSources} source{totalSources !== 1 ? "s" : ""},{" "}
-                    {totalChunks} chunk{totalChunks !== 1 ? "s" : ""})
-                </span>
-            </button>
+            </div>
 
             {isDrawerOpen && (
                 <div className="w-full mt-3 flex flex-col gap-3 pl-2 sm:pl-4">

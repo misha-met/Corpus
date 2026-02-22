@@ -7,6 +7,10 @@ export interface UploadRequest {
   file: File;
   sourceId: string;
   summarize: boolean;
+  /** Optional citation reference string for Harvard/footnote copy feature.
+   *  e.g. "Smith, J. et al. (2024) 'Climate Change Review'"
+   *  Stored in localStorage keyed by source_id. */
+  citationRef?: string;
 }
 
 interface IngestModalProps {
@@ -30,6 +34,8 @@ function sanitizeSourceId(filename: string): string {
 export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
   const [files, setFiles] = useState<File[]>([]);
   const [sourceIds, setSourceIds] = useState<string[]>([]);
+  const [citationRefs, setCitationRefs] = useState<string[]>([]);
+  const [showCitationRefs, setShowCitationRefs] = useState(false);
   const [summarize, setSummarize] = useState(true);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -77,6 +83,7 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
 
       setFiles(valid);
       setSourceIds(valid.map((f) => sanitizeSourceId(f.name)));
+      setCitationRefs(valid.map(() => ""));
       setValidationError(null);
     },
     [validateFile]
@@ -115,6 +122,7 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
       file,
       sourceId: normalizedSourceIds[idx],
       summarize,
+      citationRef: citationRefs[idx]?.trim() || undefined,
     }));
 
     onStartUpload(reqs);
@@ -256,6 +264,83 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {/* Citation reference — optional, collapsible */}
+          {files.length > 0 && (
+            <div>
+              <button
+                type="button"
+                onClick={() => setShowCitationRefs((v) => !v)}
+                className="flex items-center gap-1.5 text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors mb-1"
+              >
+                <svg
+                  className={`w-3 h-3 shrink-0 transition-transform ${showCitationRefs ? "rotate-90" : ""}`}
+                  fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                </svg>
+                Citation reference
+                <span className="ml-1 text-[10px] px-1.5 py-px rounded bg-white/8 text-[var(--muted-foreground)]">optional</span>
+              </button>
+
+              {showCitationRefs && (
+                <div className="space-y-2 pl-1">
+                  {/* Format hint */}
+                  <div className="px-3 py-2.5 bg-[var(--secondary)] border border-[var(--border)] rounded-lg text-[11px] text-[var(--muted-foreground)] leading-relaxed space-y-1">
+                    <p className="font-semibold text-[var(--foreground)]">Harvard author-date format</p>
+                    <p>Enter the full reference as you want it to appear in citations:</p>
+                    <code className="block mt-1 font-mono text-[10.5px] bg-black/30 px-2 py-1 rounded text-white/70">
+                      Smith, J. et al. (2024) &apos;Title of Work&apos;
+                    </code>
+                    <p className="mt-1 text-[var(--muted-foreground)]/70">
+                      Leave blank to use the filename as the reference.
+                      You can also add this later — the reference is stored
+                      locally and used whenever you copy citations.
+                    </p>
+                  </div>
+
+                  {files.length <= 1 ? (
+                    <input
+                      type="text"
+                      value={citationRefs[0] ?? ""}
+                      onChange={(e) =>
+                        setCitationRefs((prev) => {
+                          const next = [...prev];
+                          next[0] = e.target.value;
+                          return next;
+                        })
+                      }
+                      placeholder="e.g. Smith, J. et al. (2024) 'Climate Change Review'"
+                      className="w-full px-3 py-2 bg-[var(--secondary)] border border-[var(--border)] rounded-lg text-sm text-[var(--foreground)] placeholder-[var(--muted-foreground)] focus:outline-none focus:ring-1 focus:ring-white/20 focus:border-transparent transition-colors"
+                    />
+                  ) : (
+                    <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
+                      {files.map((file, idx) => (
+                        <div key={`citref-${file.name}-${idx}`}>
+                          <label className="block text-[11px] text-[var(--muted-foreground)] mb-1 truncate" title={file.name}>
+                            {file.name}
+                          </label>
+                          <input
+                            type="text"
+                            value={citationRefs[idx] ?? ""}
+                            onChange={(e) =>
+                              setCitationRefs((prev) => {
+                                const next = [...prev];
+                                next[idx] = e.target.value;
+                                return next;
+                              })
+                            }
+                            placeholder="e.g. Smith, J. (2024) 'Title'"
+                            className="w-full px-3 py-1.5 bg-[var(--secondary)] border border-[var(--border)] rounded-lg text-sm text-[var(--foreground)] placeholder-[var(--muted-foreground)] focus:outline-none focus:ring-1 focus:ring-white/20 focus:border-transparent"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
