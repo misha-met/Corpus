@@ -177,10 +177,15 @@ Two-stage classifier with heuristic-first design:
 Intent-aware message builder producing chat-format messages:
 
 - **System prompt:** Core rules (context-only, specific answers, paragraph formatting) + intent-specific instructions
-- **8 instruction profiles:** Each defines `task`, `format`, `tone` (e.g., ANALYZE = "6-8 focused paragraphs, 60-100 words each, analytical, objective, scholarly")
-- **Citation rules:** When enabled, adds mandatory `[N]` inline citation format
-- **Source legend:** Maps source IDs to display names when they differ
-- **Context-sparsity warning:** Injects an explicit anti-hallucination warning when retrieved context fills <10% of retrieval budget
+- **12 instruction profiles:** Each defines `task`, `format`, `tone`. Profiles: SUMMARIZE, EXPLAIN, ANALYZE, COMPARE, CRITIQUE, FACTUAL, COLLECTION, EXTRACT, TIMELINE, HOW_TO, QUOTE_EVIDENCE, and OVERVIEW (fallback alias).
+  - `EXTRACT` → numbered/bulleted list or table; exhaustive entity extraction; ends with "Total: N items found."
+  - `TIMELINE` → `[DATE] — event (1-2 sentences)` format; `→` for causal links; gap note appended.
+  - `HOW_TO` → numbered steps with imperative phrasing; sub-steps as indented bullets; closes with outcome sentence.
+  - `QUOTE_EVIDENCE` → block-quote format (`> "exact quote"`) each followed by one relevance sentence; max 5 quotes.
+- **Deep Research mode:** `INTENT_INSTRUCTIONS_DEEP_RESEARCH` dict mirrors `INTENT_INSTRUCTIONS_REGULAR`; resolved via `_get_intent_instructions(mode)`.
+- **Citation rules:** When enabled, adds mandatory `[N]` inline citation format; passes `PASSAGE N` labeling into context. (Always on via UI)
+- **Source legend:** Maps source IDs to display names when they differ.
+- **Context-sparsity warning:** Injects an explicit anti-hallucination warning when retrieved context fills <10% of retrieval budget.
 - **Output:** `[{role: "system", content: ...}, {role: "user", content: context + question}]`
 
 ### 3.10 RAG Engine (`src/rag_engine.py`)
@@ -191,8 +196,10 @@ Central orchestrator consumed by both CLI and API:
 - **`query()`**: Synchronous path returning `QueryResult` (answer, intent, citations, metrics, latency)
 - **`query_events()`**: Streaming path yielding `QueryEvent` objects (status, intent, sources, citations, tokens, errors, finish)
 - **`ingest()`**: Ingests document, embeds chunks, optionally summarizes
-- **Output sanitization:** `_sanitize_output()` strips instruction leakage ("Important:", "Task:", "Format:", "Tone:"), filler phrases, and deduplicates repeated halves (>85% similarity)
-- **Decoupled query expansion:** `_expand_query()` appends intent terms for BM25 retrieval only; embedding query remains the original user text
+- **Output sanitization:** `_sanitize_output()` strips instruction leakage ("Important:", "Task:", "Format:", "Tone:"), filler phrases, and deduplicates repeated halves (>85% similarity). Retrieval jargon normalization (chunk/vector-search references) was removed; the prompt now enforces this directly via system instructions.
+- **Unified query pipeline:** `query()` and `query_events()` share a single `_query_pipeline()` implementation; the synchronous path collects events from the async generator rather than duplicating logic.
+- **Query expansion removed:** Static BM25 query expansion terms (`_expand_query()`) have been eliminated. Retrieval operates directly on the original user query.
+- **Memory-aware generation:** A constrained-RAM path adjusts context budget and generation parameters when system memory is critically low.
 - **Offline mode:** `_enable_offline_if_cached()` sets `HF_HUB_OFFLINE=1` when all models are cached locally
 - **Metal cache management:** Explicit `mx.clear_cache()` to release GPU memory between phases
 - **Hallucination guardrail signal:** `_check_novel_proper_nouns()` logs warnings when generated output contains many proper nouns absent from retrieved context
@@ -222,6 +229,7 @@ FastAPI application with streaming support:
 | `/api/sources/{id}` | DELETE | Delete source + all chunks + cache |
 | `/api/sources/{id}/content` | GET | Full document text (original -> snapshot fallback) |
 | `/api/sources/{id}/chunk/{cid}` | GET | Chunk detail for citation viewer |
+| `/api/sources/{id}/chunks` | GET | Batch chunk fetch by comma-separated IDs (`?ids=a,b,c`) |
 
 **Concurrency model:** Single-user lock (`chat_lock`) for exclusive access. Background thread executor runs `query_events()`, pushes events to asyncio.Queue via `loop.call_soon_threadsafe()`. Client disconnect detection via `should_stop` callback.
 
@@ -268,13 +276,15 @@ Page (app/page.tsx)
     AppContent
       SourcePanel (30% width)
         Source list with select/expand/delete
-        IngestModal (drag-drop upload)
+        IngestModal (drag-drop upload, optional citation reference input)
         CitationViewerModal (overlay)
           DocumentRenderer
             MarkdownRenderer | PlainTextRenderer
       ChatPanel (70% width)
         Message list (user blue / assistant gray bubbles)
           ChatMarkdown (citation-aware react-markdown)
+          MessageReferences (cited/uncited visual indicators, copy-as-citation)
+        IntentSelector (explicit intent override dropdown)
         Input bar with source count badge + send/stop toggle
 ```
 
@@ -293,12 +303,18 @@ Page (app/page.tsx)
 
 ### 4.4 API Client (`lib/api-client.ts`)
 
-- `sourceApi` singleton -- typed methods for all source CRUD operations
+- `sourceApi` singleton -- typed methods for all source CRUD operations, including new `getChunkBatch(sourceId, ids[])` for fetching multiple chunks in one call
 - `queryStreaming()` -- AsyncGenerator yielding `StreamEvent` objects from SSE
 - Direct backend URL for uploads (bypasses Next.js dev proxy ~30s timeout)
 - `StreamEvent.data` typed as `Record<string, unknown>` with runtime guard for non-object JSON
 
-### 4.5 Key Frontend Patterns
+### 4.5 Citation Utilities (`lib/`)
+
+- **`citation-meta-store.ts`:** localStorage persistence for user-provided citation reference strings (keyed by `source_id`). Used by the copy-as-citation feature. Populated at ingest time via an optional text field in `IngestModal`; cleared on source deletion.
+- **`format-citations.ts`:** Formats a citation into footnote style or Harvard style from stored metadata + page numbers. Falls back to filename stem if no reference string was saved.
+- **`group-citations.ts`:** Groups raw `[N]` citation indices from a response into deduped, ordered reference lists for the `MessageReferences` component.
+
+### 4.6 Key Frontend Patterns
 
 - **Sequential upload queue:** Processes uploads one at a time to avoid timeouts, with per-file status
 - **Citation linking:** `ChatMarkdown` converts `[CHUNK N]` / `[N]` patterns to clickable citation links
@@ -341,6 +357,8 @@ Legacy mode names (`high`, `efficiency`, `power-fast`, etc.) are mapped to curre
 | `top_k_final` | 5 | 5 | 8 | 8 |
 | `reranker_threshold` | 0.05 | 0.05 | 0.04 | 0.04 |
 | `reranker_min_docs` | 3 | 3 | 4 | 4 |
+
+**Note:** `FACTUAL` intent overrides `reranker_min_docs` to **1**. This prevents below-threshold guard rails from pulling in loosely related chunks when the query is a narrow factual lookup. Below-threshold expansion is also scoped to sources that already have at least one above-threshold hit, preventing expansion from sources with zero relevant material.
 | Reranker enabled | Yes | Yes | Yes | Yes |
 | Context expansion | Yes | Yes | Yes | Yes |
 
@@ -372,6 +390,17 @@ The system builds a source legend when source IDs differ from display names.
 ### Streaming Citation Events
 
 During streaming query execution, a structured citation list is emitted as a `CitationListEvent` so the frontend can bind numbered references to source/chunk metadata. The frontend `ChatMarkdown` component converts `[CHUNK N]` and `[N]` patterns into clickable citation links that open the `CitationViewerModal` with fuzzy text highlighting.
+
+### Citation Reference Metadata
+
+The `IngestModal` exposes an optional "Citation reference" text field. Whatever the user enters is persisted in `localStorage` via `citation-meta-store.ts` (key: `dh-citation-meta-v1`). This is used by `format-citations.ts` to produce properly formatted footnote or Harvard-style citations when the user clicks "Copy as citation" in `MessageReferences`. If no reference string was stored, the formatter falls back to the source filename stem + page numbers.
+
+### MessageReferences Component
+
+Replaces the earlier inline reference display with a dedicated `MessageReferences` component rendered below each assistant message:
+- Shows all sources cited in the response with a **cited** (green) vs **uncited** (dimmed) visual indicator
+- Clicking a reference opens the `CitationViewerModal` at the relevant passage
+- "Copy as citation" button triggers the formatter for footnote or Harvard output
 
 ---
 
@@ -450,8 +479,8 @@ source_cache.save_snapshot() -> data/source_cache/
 | `storage.py` | ~500 | LanceDB tables, hybrid search, FTS management |
 | `generator.py` | ~760 | MLX text generation, streaming, token budget packing |
 | `reranker.py` | ~425 | Jina v3 MLX listwise reranker |
-| `intent.py` | ~680 | Heuristic + LLM intent classification |
-| `generation.py` | ~280 | Intent-aware prompt/message building |
+| `intent.py` | ~820 | Heuristic + LLM intent classification (12 intents) |
+| `generation.py` | ~430 | Intent-aware prompt/message building (12 profiles) |
 | `embeddings.py` | ~150 | MLX embedding model wrapper |
 | `config.py` | ~260 | Mode configs, RAM detection, auto-scaling |
 | `ingest.py` | ~430 | PDF/Markdown parsing, chunking |
@@ -476,10 +505,15 @@ source_cache.save_snapshot() -> data/source_cache/
 | `components/chat-panel.tsx` | Chat interface, streaming, citation handling |
 | `components/source-panel.tsx` | Source management, upload queue, view content |
 | `components/citation-viewer-modal.tsx` | Full document viewer with citation highlight |
-| `components/ingest-modal.tsx` | Drag-drop upload with validation |
+| `components/ingest-modal.tsx` | Drag-drop upload with optional citation reference input |
 | `components/chat-markdown.tsx` | Citation-aware markdown rendering |
 | `components/markdown-renderer.tsx` | Markdown display with section scroll |
 | `components/document-renderer.tsx` | Format router (markdown vs plain text) |
+| `components/assistant-ui/intent-selector.tsx` | Explicit intent override dropdown |
+| `components/assistant-ui/message-references.tsx` | Per-message reference list with cited/uncited indicators |
+| `lib/citation-meta-store.ts` | localStorage persistence for user citation reference strings |
+| `lib/format-citations.ts` | Footnote + Harvard citation formatters |
+| `lib/group-citations.ts` | Citation index grouping and deduplication |
 
 ---
 
