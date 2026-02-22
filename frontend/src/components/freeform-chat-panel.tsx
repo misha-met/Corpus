@@ -139,8 +139,13 @@ export function FreeformChatPanel({
     viewportRef.current?.scrollTo({ top: viewportRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
-  // Focus textarea on mount
-  useEffect(() => { textareaRef.current?.focus(); }, []);
+  // Focus textarea on mount + reset scrollTop so placeholder is never clipped
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.scrollTop = 0;
+    el.focus();
+  }, []);
 
   // ── Auto-resize textarea ───────────────────────────────────────────────────
   const resizeTextarea = useCallback(() => {
@@ -148,9 +153,21 @@ export function FreeformChatPanel({
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 128)}px`;
+    el.scrollTop = 0;
   }, []);
 
   useEffect(() => { resizeTextarea(); }, [inputValue, resizeTextarea]);
+
+  // Re-run resize when the panel transitions from hidden → visible.
+  // The panel is always mounted but toggled via display:none ("hidden" class),
+  // so scrollHeight = 0 while hidden — ResizeObserver fires when it reappears.
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => { resizeTextarea(); });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [resizeTextarea]);
 
   // ── Restore session ────────────────────────────────────────────────────────
   useEffect(() => {

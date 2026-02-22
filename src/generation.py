@@ -22,10 +22,10 @@ Rules:
 5. Stop immediately after your final sentence."""
 
 _INGEST_SUMMARY_QUESTION = (
-    "Start with one sentence (20-30 words) identifying the document."
     "Write a 3-4 paragraph summary of this document. "
     "Start the first paragraph by explaining what the document is — "
     "its type (e.g. book, report, article), its subject matter, and its scope or purpose. "
+    "Open with one clear sentence (20-30 words) that names the document and states its main subject. "
     "Use the middle paragraphs to describe the main topics, arguments, or findings covered. "
     "Close with a short paragraph noting the document's relevance or usefulness for research."
 )
