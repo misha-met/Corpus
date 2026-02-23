@@ -99,6 +99,80 @@ async function* freeformStreaming(
 }
 
 // ---------------------------------------------------------------------------
+// AI title generation
+// ---------------------------------------------------------------------------
+
+/**
+ * Ask the 30B model for a 2-3 word title summarising the conversation.
+ * Returns an empty string on any failure so the caller can fall back silently.
+ */
+async function generateTitleFromConversation(
+  messages: FreeChatMessage[],
+): Promise<string> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const titlePromptMessages = [
+      ...messages.map((m) => ({ role: m.role, content: m.content })),
+      {
+        role: "user" as const,
+        content:
+          "Give a 2-3 word title that summarises this conversation. Reply with ONLY the title, no punctuation, no explanation, nothing else.",
+      },
+    ];
+
+    const res = await fetch(`${BACKEND_BASE}/api/freeform/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: titlePromptMessages, model: "regular" }),
+      signal: controller.signal,
+    });
+
+    if (!res.ok || !res.body) return "";
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let fullText = "";
+    let finished = false;
+
+    while (!finished) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split(/\r?\n\r?\n/);
+      buffer = blocks.pop() ?? "";
+      for (const block of blocks) {
+        if (!block.trim()) continue;
+        const lines = block.split(/\r?\n/);
+        let evt = "message";
+        let dat = "";
+        for (const l of lines) {
+          if (l.startsWith("event:")) evt = l.slice(6).trim();
+          else if (l.startsWith("data:")) dat = l.slice(5).trimStart();
+        }
+        if (evt === "token" && dat) {
+          try {
+            const parsed = JSON.parse(dat);
+            if (typeof parsed.text === "string") fullText += parsed.text;
+          } catch { /* skip */ }
+        } else if (evt === "done") {
+          finished = true;
+          break;
+        }
+      }
+    }
+
+    // Strip quotes, asterisks, markdown, newlines; trim; cap at 50 chars
+    return fullText.replace(/["'*#\n\r]/g, "").trim().slice(0, 50) || "";
+  } catch {
+    return "";
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Props
 // ---------------------------------------------------------------------------
 
@@ -131,6 +205,7 @@ export function FreeformChatPanel({
   const messagesRef = useRef<FreeChatMessage[]>([]);
   const sessionIdRef = useRef<string>(crypto.randomUUID());
   const isRestoredRef = useRef(false);
+  const titleGeneratedRef = useRef(false);
   const lastInsertedRef = useRef("");
   const lastChunkRef = useRef<{ text: string; at: number } | null>(null);
 
@@ -203,6 +278,27 @@ export function FreeformChatPanel({
       createdAt: now,
       updatedAt: now,
     }).catch(console.error);
+
+    // After the first complete exchange, generate an AI 2-3 word title once
+    const hasUser = msgs.some((m) => m.role === "user");
+    const hasAssistant = msgs.some(
+      (m) => m.role === "assistant" && m.content.trim().length > 0,
+    );
+    if (hasUser && hasAssistant && !titleGeneratedRef.current) {
+      titleGeneratedRef.current = true;
+      const sessionId = sessionIdRef.current;
+      generateTitleFromConversation(msgs)
+        .then((aiTitle) => {
+          if (!aiTitle) return;
+          loadSession(sessionId)
+            .then((existing) => {
+              if (!existing) return;
+              saveSession({ ...existing, title: aiTitle }).catch(console.error);
+            })
+            .catch(console.error);
+        })
+        .catch(console.error);
+    }
   }, []);
 
   const startNewConversation = useCallback(() => {
@@ -210,6 +306,7 @@ export function FreeformChatPanel({
     setErrorText("");
     sessionIdRef.current = crypto.randomUUID();
     isRestoredRef.current = false;
+    titleGeneratedRef.current = false;
     setInputValue("");
     requestAnimationFrame(() => textareaRef.current?.focus());
   }, []);
