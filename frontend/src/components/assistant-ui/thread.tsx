@@ -7,6 +7,8 @@ import { MessageReferences } from "@/components/assistant-ui/message-references"
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { TypewriterText } from "@/components/ui/typewriter-text";
+import { useAppState } from "@/context/app-context";
 import { useSpeechToText } from "@/hooks/useSpeechToText";
 import { cn } from "@/lib/utils";
 import {
@@ -86,13 +88,17 @@ const ThreadScrollToBottom: FC = () => {
 };
 
 const ThreadWelcome: FC = () => {
+  const { chatMode } = useAppState();
   return (
     <div className="aui-thread-welcome-root mx-auto my-auto flex w-full max-w-(--thread-max-width) grow flex-col">
       <div className="aui-thread-welcome-center flex w-full grow flex-col items-center justify-center">
         <div className="aui-thread-welcome-message flex size-full flex-col justify-center px-4">
-          <h1 className="aui-thread-welcome-message-inner font-semibold text-2xl">
-            Hello there!
-          </h1>
+          <TypewriterText
+            key={chatMode}
+            text="Hello there!"
+            typingSpeed={80}
+            className="aui-thread-welcome-message-inner font-semibold text-2xl"
+          />
           <p className="aui-thread-welcome-message-inner text-muted-foreground text-xl">
             How can I help you today?
           </p>

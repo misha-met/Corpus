@@ -13,6 +13,8 @@ import {
 } from "lucide-react";
 import { useSpeechToText } from "@/hooks/useSpeechToText";
 import { cn } from "@/lib/utils";
+import { TypewriterText } from "@/components/ui/typewriter-text";
+import { useAppState } from "@/context/app-context";
 import {
   saveSession,
   loadSession,
@@ -113,6 +115,7 @@ export function FreeformChatPanel({
   restoredSessionId,
   restoredMessages,
 }: FreeformChatPanelProps) {
+  const { chatMode } = useAppState();
   const [messages, setMessages] = useState<FreeChatMessage[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -406,9 +409,12 @@ export function FreeformChatPanel({
           <div className="mx-auto my-auto flex w-full max-w-(--thread-max-width) grow flex-col">
             <div className="flex w-full grow flex-col items-center justify-center">
               <div className="flex size-full flex-col justify-center px-4">
-                <h1 className="fade-in slide-in-from-bottom-1 animate-in fill-mode-both font-semibold text-2xl duration-200">
-                  General chat
-                </h1>
+                <TypewriterText
+                  key={chatMode}
+                  text="General chat"
+                  typingSpeed={80}
+                  className="font-semibold text-2xl"
+                />
                 <p className="fade-in slide-in-from-bottom-1 animate-in fill-mode-both text-muted-foreground text-xl delay-75 duration-200">
                   No documents — answers from model knowledge only
                 </p>

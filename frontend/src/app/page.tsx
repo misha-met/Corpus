@@ -22,6 +22,7 @@ import { useAppDispatch, useAppState } from "@/context/app-context";
 import { parseCustomEvent } from "@/lib/event-parser";
 import type { ChatSession } from "@/lib/session-store";
 import type { FreeChatMessage } from "@/lib/session-store";
+import { Plus } from "lucide-react";
 
 function MessageIdTracker() {
   const dispatch = useAppDispatch();
@@ -37,6 +38,42 @@ function MessageIdTracker() {
   }, [lastAssistantMessageId, dispatch]);
 
   return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RagArea — owns the chat runtime + Thread so it can be re-keyed for new chat.
+// ─────────────────────────────────────────────────────────────────────────────
+interface RagAreaProps {
+  selectedSourceIds: string[];
+  intentOverride: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  onData: (dataPart: any) => void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  onFinish: (message: any) => void;
+}
+
+function RagArea({ selectedSourceIds, intentOverride, onData, onFinish }: RagAreaProps) {
+  const runtime = useChatRuntime({
+    transport: new AssistantChatTransport({
+      api: "/api/chat",
+      body: {
+        data: {
+          citations_enabled: true,
+          source_ids: selectedSourceIds,
+          intent_override: intentOverride,
+        },
+      },
+    }),
+    onData,
+    onFinish,
+  });
+
+  return (
+    <AssistantRuntimeProvider runtime={runtime}>
+      <MessageIdTracker />
+      <Thread />
+    </AssistantRuntimeProvider>
+  );
 }
 
 /**
@@ -64,9 +101,24 @@ export default function Page() {
   // History panel
   const [showHistory, setShowHistory] = useState(false);
 
+  // New chat reset keys
+  const [ragKey, setRagKey] = useState(0);
+  const [freeformKey, setFreeformKey] = useState(0);
+
   // Restored freeform session state (passed to FreeformChatPanel)
   const [restoredSessionId, setRestoredSessionId] = useState<string | null>(null);
   const [restoredMessages, setRestoredMessages] = useState<FreeChatMessage[] | null>(null);
+
+  /** Start a fresh chat in the current mode */
+  const handleNewChat = useCallback(() => {
+    if (chatMode === "rag") {
+      setRagKey((k) => k + 1);
+    } else {
+      setFreeformKey((k) => k + 1);
+      setRestoredSessionId(null);
+      setRestoredMessages(null);
+    }
+  }, [chatMode]);
 
   /** Handle session restore from history panel */
   const handleRestoreSession = useCallback(
@@ -169,35 +221,8 @@ export default function Page() {
     dispatch({ type: "QUERY_FINISHED" });
   }, [dispatch]);
 
-  // useChatRuntime points at /api/chat which next.config.ts rewrites to
-  // http://127.0.0.1:8000/api/chat — no CORS issues, no extra proxy route needed.
-  // Passes all standard useChat options through to the underlying useChat hook.
-  //
-  // body is passed to AssistantChatTransport (HttpChatTransportInitOptions.body)
-  // and merged into every request.  The backend ChatRequest.data field reads it.
-  //   - citations_enabled: always true so the backend injects citation prompt rules
-  //   - source_ids: the user-selected source filter (empty array = all sources)
-  //   - intent_override: "auto" means automatic classification; otherwise uses the
-  //     user-selected intent mode from the IntentSelector in the Composer
-  const runtime = useChatRuntime({
-    transport: new AssistantChatTransport({
-      api: "/api/chat",
-      body: {
-        data: {
-          citations_enabled: true,
-          source_ids: selectedSourceIds,
-          intent_override: intentOverride,
-        },
-      },
-    }),
-    onData: handleData,
-    onFinish: handleFinish,
-  });
-
   return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <MessageIdTracker />
-      <div className="flex flex-col h-dvh bg-background text-foreground overflow-hidden">
+    <div className="flex flex-col h-dvh bg-background text-foreground overflow-hidden">
 
         {/* ── Top bar: mode tabs + history button ─────────────────────── */}
         <header className="flex items-center gap-2 px-4 py-2 border-b shrink-0" style={{ borderBottomColor: "#1e1e1e" }}>
@@ -234,6 +259,16 @@ export default function Page() {
 
           {/* Spacer */}
           <div className="flex-1" />
+
+          {/* New Chat button */}
+          <button
+            onClick={handleNewChat}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors text-gray-500 hover:text-gray-300 hover:bg-[#1e1e1e]"
+            title="New chat"
+          >
+            <Plus className="w-3.5 h-3.5 shrink-0" />
+            New Chat
+          </button>
 
           {/* History button */}
           <button
@@ -304,7 +339,13 @@ export default function Page() {
                 transition: "opacity 220ms ease",
               }}
             >
-              <Thread />
+              <RagArea
+                key={ragKey}
+                selectedSourceIds={selectedSourceIds}
+                intentOverride={intentOverride as string}
+                onData={handleData}
+                onFinish={handleFinish}
+              />
             </div>
             <div
               className="absolute inset-0"
@@ -315,6 +356,7 @@ export default function Page() {
               }}
             >
               <FreeformChatPanel
+                key={freeformKey}
                 restoredSessionId={restoredSessionId}
                 restoredMessages={restoredMessages}
               />
@@ -329,6 +371,5 @@ export default function Page() {
           />
         </div>
       </div>
-    </AssistantRuntimeProvider>
   );
 }
