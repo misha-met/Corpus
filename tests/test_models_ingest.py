@@ -29,6 +29,7 @@ from src.ingest import (
     _Section,
     clean_ocr_artifacts,
     ingest_markdown,
+    _sample_context,
 )
 from tests.conftest import Timer, get_test_logger
 
@@ -421,3 +422,38 @@ class TestIngestLatency:
             f"child_split: {len(children)} children in {t.result.elapsed_ms:.2f}ms"
         )
         assert t.result.elapsed_ms < 500
+
+
+# ===========================================================================
+# _sample_context
+# ===========================================================================
+
+class TestSampleContext:
+    def test_short_text_unchanged(self):
+        text = "hello world"
+        assert _sample_context(text, 12_000) == text
+
+    def test_exact_limit_unchanged(self):
+        text = "x" * 12_000
+        assert _sample_context(text, 12_000) == text
+
+    def test_long_text_truncated_to_limit(self):
+        text = "a" * 30_000
+        result = _sample_context(text, 12_000)
+        # Three thirds of 4000 chars each + two "\n\n[...]\n\n" separators (10 chars each) = 12020
+        assert len(result) <= 12_100
+
+    def test_long_text_contains_separator(self):
+        text = "a" * 30_000
+        result = _sample_context(text, 12_000)
+        assert "[...]" in result
+
+    def test_long_text_starts_with_head(self):
+        text = "START" + "a" * 29_995
+        result = _sample_context(text, 12_000)
+        assert result.startswith("START")
+
+    def test_long_text_ends_with_tail(self):
+        text = "a" * 29_995 + "FINISH"
+        result = _sample_context(text, 12_000)
+        assert result.endswith("FINISH")

@@ -4,7 +4,7 @@ import { useState, useMemo, useCallback } from "react";
 import { useAuiState } from "@assistant-ui/react";
 import { useAppState, useAppDispatch } from "@/context/app-context";
 import { groupCitations } from "@/lib/group-citations";
-import { formatFootnotes, formatHarvardBibliography } from "@/lib/format-citations";
+import { formatFootnotesWithText, formatHarvardBibliography } from "@/lib/format-citations";
 import { sourceApi } from "@/lib/api-client";
 import { ChevronDownIcon, ChevronRightIcon, Copy, CheckCheck } from "lucide-react";
 
@@ -97,10 +97,19 @@ export function MessageReferences() {
     const [copied, setCopied] = useState<"footnote" | "harvard" | null>(null);
 
     function handleCopy(style: "footnote" | "harvard") {
-        const text =
-            style === "footnote"
-                ? formatFootnotes(citedCitations)
-                : formatHarvardBibliography(citedCitations);
+        let text: string;
+        if (style === "footnote") {
+            // Extract the raw message body text (same approach as citedNumbers above)
+            const bodyText = (messageParts ?? [])
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                .filter((p: any) => p.type === "text")
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                .map((p: any) => p.text ?? "")
+                .join("");
+            text = formatFootnotesWithText(bodyText, citedCitations);
+        } else {
+            text = formatHarvardBibliography(citedCitations);
+        }
         navigator.clipboard.writeText(text).then(() => {
             setCopied(style);
             setTimeout(() => setCopied(null), 2000);

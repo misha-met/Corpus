@@ -55,7 +55,7 @@ class TestModeConfig:
         assert config.context_window == 64_000
         assert config.retrieval_budget == 32_000
         assert config.top_k_dense == 100
-        assert config.top_k_rerank == 20
+        assert config.top_k_rerank == 30
         assert config.top_k_final == 5
 
     def test_regular_mode_64gb(self):
@@ -66,7 +66,7 @@ class TestModeConfig:
         assert config.top_k_dense == 200
         assert config.top_k_sparse == 200
         assert config.top_k_fused == 100
-        assert config.top_k_rerank == 40
+        assert config.top_k_rerank == 55
         assert config.top_k_final == 8
         assert config.reranker_threshold == 0.04
         assert config.reranker_min_docs == 4
@@ -82,7 +82,7 @@ class TestModeConfig:
         assert config.top_k_dense == 400
         assert config.top_k_sparse == 400
         assert config.top_k_fused == 200
-        assert config.top_k_rerank == 60
+        assert config.top_k_rerank == 80
         # final docs matched to Regular mode's signal-to-noise sweet spot
         assert config.top_k_final == 8
         assert config.reranker_threshold == 0.04

@@ -16,6 +16,23 @@ logger = logging.getLogger(__name__)
 # Maximum characters of parent text to feed into summary generation.
 _SUMMARY_CONTEXT_CHAR_LIMIT = 12_000
 
+
+def _sample_context(text: str, limit: int) -> str:
+    """Return a representative sample of *text* up to *limit* characters.
+
+    If the text is within the limit it is returned unchanged.  Otherwise the
+    head, middle, and tail thirds are joined with a '[...]' separator so the
+    summary model sees the beginning, a mid-document slice, and the end.
+    """
+    if len(text) <= limit:
+        return text
+    third = limit // 3
+    head = text[:third]
+    mid_center = len(text) // 2
+    middle = text[mid_center - third // 2 : mid_center + third // 2]
+    tail = text[-third:]
+    return "\n\n[...]\n\n".join([head, middle, tail])
+
 HEADER_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 
 PARENT_MIN_TOKENS = 1000
@@ -512,8 +529,7 @@ def ingest_file_to_storage(
         if generator is None:
             raise ValueError("summary_generator is required when summarize=True")
         context = "\n\n".join(parent.text for parent in parents)
-        if len(context) > _SUMMARY_CONTEXT_CHAR_LIMIT:
-            context = context[:_SUMMARY_CONTEXT_CHAR_LIMIT]
+        context = _sample_context(context, _SUMMARY_CONTEXT_CHAR_LIMIT)
         messages = build_ingest_summary_messages(context)
         summary = generator.generate_chat(messages)
         storage.upsert_source_summary(source_id=source_id, summary=summary)

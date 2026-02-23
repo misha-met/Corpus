@@ -84,7 +84,7 @@ class MlxEmbeddingModel:
 
         return input_ids, attention_mask
 
-    def _embed_batch(self, texts: list[str]) -> np.ndarray:
+    def _embed_batch(self, texts: list[str], normalize: bool = True) -> np.ndarray:
         if not texts:
             return np.zeros((0, 0), dtype=np.float32)
 
@@ -111,7 +111,17 @@ class MlxEmbeddingModel:
         pooled = (hidden * mask_mx[..., None]).sum(axis=1) / denom
         pooled = pooled.astype(mx.float32)
         mx.eval(pooled)
-        pooled_np = np.asarray(pooled.tolist(), dtype=np.float32)
+
+        if normalize:
+            norms = mx.sqrt(mx.sum(pooled * pooled, axis=1, keepdims=True))
+            norms = mx.maximum(norms, mx.array(1e-12))
+            pooled = pooled / norms
+            mx.eval(pooled)
+
+        try:
+            pooled_np = np.array(pooled, copy=False)
+        except Exception:
+            pooled_np = np.asarray(pooled.tolist(), dtype=np.float32)
 
         if pooled_np.ndim != 2:
             raise RuntimeError("MLX embedding pooling produced invalid shape.")
@@ -139,11 +149,7 @@ class MlxEmbeddingModel:
 
         for start in range(0, len(batch_texts), effective_batch_size):
             end = start + effective_batch_size
-            pooled = self._embed_batch(batch_texts[start:end])
-            if normalize_embeddings and pooled.size > 0:
-                norms = np.linalg.norm(pooled, axis=1, keepdims=True)
-                norms = np.clip(norms, 1e-12, None)
-                pooled = pooled / norms
+            pooled = self._embed_batch(batch_texts[start:end], normalize=normalize_embeddings)
             vectors.extend(pooled.astype(np.float32).tolist())
 
         return vectors

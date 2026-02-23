@@ -680,12 +680,12 @@ def enforce_token_budget(
     max_tokens: int,
     tokenizer: Any,
     *,
-    consecutive_fail_threshold: int = 3,
+    consecutive_fail_threshold: int = 3,  # deprecated — no longer drives loop termination
     allow_truncation: bool = True,
     min_doc_tokens: int = 50,
     log: Optional[logging.Logger] = None,
 ) -> BudgetPackResult:
-    """Greedy token budget packing with early termination on consecutive failures."""
+    """Greedy token budget packing with early termination when budget is exhausted."""
     log = log or logger
     packed: list[str] = []
     packed_indices: list[int] = []
@@ -693,6 +693,7 @@ def enforce_token_budget(
     skipped = 0
     truncated = 0
     consecutive_fails = 0
+    effective_floor = max(min_doc_tokens, 20)
 
     for i, doc in enumerate(docs):
         if not doc or not doc.strip():
@@ -722,8 +723,11 @@ def enforce_token_budget(
 
         skipped += 1
         consecutive_fails += 1
-        if consecutive_fails >= consecutive_fail_threshold:
-            log.info(f"Budget packing stopped: {consecutive_fails} consecutive docs exceeded remaining budget")
+        if remaining < effective_floor:
+            log.info(f"Budget packing stopped: remaining budget {remaining} < floor {effective_floor}")
+            break
+        if skipped > len(docs) // 2:
+            log.info(f"Budget packing stopped: {skipped} skipped docs exceed half of {len(docs)} total")
             break
 
     pct = f"{100 * used_tokens / max_tokens:.1f}%" if max_tokens else "n/a"

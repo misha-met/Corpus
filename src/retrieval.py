@@ -21,6 +21,9 @@ from .storage import StorageEngine
 
 logger = logging.getLogger(__name__)
 
+# Approximate subword expansion: BPE tokenizers produce ~1.35 tokens per whitespace word.
+# Applied to retrieval budget estimates only. Do NOT change ingest chunking tokenizer.
+_WORD_TO_TOKEN_RATIO: float = 1.35
 
 
 @dataclass(frozen=True)
@@ -313,7 +316,7 @@ class RetrievalEngine:
         raw_scores = [float(s) for s in scores]
         
         reranked = [
-            {**item, "rerank_score": float(score)}
+            {**item, "rerank_score": float(score), "score": float(score)}
             for item, score in zip(items, scores)
         ]
         reranked.sort(key=itemgetter("rerank_score"), reverse=True)
@@ -399,24 +402,24 @@ class RetrievalEngine:
         timing.rrf_fusion_ms = 0.0
         logger.info("LanceDB hybrid search returned %d hits in %.3fms", len(fused), timing.hybrid_search_ms)
 
-        # Stage 2: Deduplicate by parent
-        t0 = time.perf_counter()
-        deduped, dedup_metrics = self._deduplicate_by_parent(fused, k_fused, max_children_per_parent=_max_children)
-        timing.dedup_ms = (time.perf_counter() - t0) * 1000
-        logger.debug(f"Early dedup: {dedup_metrics.children_before_dedup} -> {dedup_metrics.children_after_dedup} ({dedup_metrics.reduction_pct:.1f}% reduction)")
-
-        # Stage 3: Rerank (child chunks only; parent expansion happens later)
+        # Stage 2: Rerank before dedup (reranker sees raw fusion candidates)
         t0 = time.perf_counter()
         if reranker_enabled:
-            to_rerank = deduped[:k_rerank]
+            to_rerank = fused[:k_rerank]
             reranked, raw_scores = self._rerank(query, to_rerank)
         else:
-            reranked = deduped
+            reranked = fused
             raw_scores = []
         timing.rerank_ms = (time.perf_counter() - t0) * 1000
 
         # Preserve full reranked pool for sub-threshold expansion (Fix 8)
         all_reranked = list(reranked)
+
+        # Stage 3: Deduplicate by parent (post-rerank, uses reranker scores via "score")
+        t0 = time.perf_counter()
+        reranked, dedup_metrics = self._deduplicate_by_parent(reranked, top_k=len(reranked), max_children_per_parent=_max_children)
+        timing.dedup_ms = (time.perf_counter() - t0) * 1000
+        logger.debug(f"Parent dedup (post-rerank): {dedup_metrics.children_before_dedup} -> {dedup_metrics.children_after_dedup} ({dedup_metrics.reduction_pct:.1f}% reduction)")
         threshold = float(reranker_threshold)  # default; updated by adaptive logic below
         above_threshold_results: list[dict[str, Any]] = []
 
@@ -511,7 +514,7 @@ class RetrievalEngine:
             )
 
             def _est_tokens(text: str) -> int:
-                return len(text.split())
+                return int(len(text.split()) * _WORD_TO_TOKEN_RATIO)
 
             # Estimate tokens for the candidates that would be selected under current k_final
             candidates_for_final = reranked[:k_final]

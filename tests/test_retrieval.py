@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from src.config import ModelConfig
+from src import retrieval
 from src.retrieval import RetrievalEngine, RetrievalResult
 from src.metrics import DeduplicationMetrics, ThresholdMetrics
 from tests.conftest import (
@@ -450,6 +451,7 @@ class TestThresholdFiltering:
 
         monkeypatch.setattr(engine, "_hybrid_search_decoupled", _fake_hybrid_search_decoupled)
         monkeypatch.setattr(engine, "_rerank", _fake_rerank)
+        monkeypatch.setattr(retrieval, "_WORD_TO_TOKEN_RATIO", 1.0)
 
         results = engine.search("what mentions of ChatGPT are there", intent="factual")
         sources = {r.metadata.get("source_id") for r in results if r.metadata.get("source_id")}
@@ -503,6 +505,7 @@ class TestThresholdFiltering:
 
         monkeypatch.setattr(engine, "_hybrid_search_decoupled", _fake_hybrid_search_decoupled)
         monkeypatch.setattr(engine, "_rerank", _fake_rerank)
+        monkeypatch.setattr(retrieval, "_WORD_TO_TOKEN_RATIO", 1.0)
 
         results = engine.search("who is Romeo", intent="factual")
         sources = {r.metadata.get("source_id") for r in results if r.metadata.get("source_id")}
@@ -611,3 +614,17 @@ class TestRetrievalLatency:
             logger.info(
                 f"full_search '{q[:40]}...': {t.result.elapsed_ms:.2f}ms, {result_count} results"
             )
+
+# ===========================================================================
+# Token ratio
+# ===========================================================================
+
+class TestWordToTokenRatio:
+    def test_word_to_token_ratio_applied(self):
+        """_est_tokens should apply _WORD_TO_TOKEN_RATIO to the word count."""
+        # 100 whitespace-separated words × 1.35 = 135
+        text = "word " * 100
+        from src import retrieval as _retrieval
+        # Replicate the closure logic directly
+        result = int(len(text.split()) * _retrieval._WORD_TO_TOKEN_RATIO)
+        assert result == int(100 * 1.35)

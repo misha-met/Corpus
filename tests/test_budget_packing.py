@@ -55,24 +55,38 @@ class TestGreedyPacking:
         result = enforce_token_budget(docs, max_tokens=25, tokenizer=mock_tokenizer)
         assert result.packed_docs[0].startswith("first")
 
-    def test_pack_consecutive_fail_stop(self, mock_tokenizer: MockTokenizer):
-        """Packing should stop after 3 consecutive failures."""
-        # Budget is 5 tokens, all docs are 20 tokens each
+    def test_pack_exhausted_budget_stops(self, mock_tokenizer: MockTokenizer):
+        """Packing should stop when remaining budget < effective_floor."""
+        # Budget is 5 tokens, all docs are 20 tokens each — remaining will be < effective_floor (max(50,20)=50)
         docs = ["word " * 20 for _ in range(10)]
         result = enforce_token_budget(
             docs, max_tokens=5, tokenizer=mock_tokenizer,
             consecutive_fail_threshold=3, allow_truncation=False,
         )
-        # Should stop early due to consecutive failures
-        assert result.consecutive_fails >= 3
+        # Should stop early because remaining < effective_floor
+        assert result.skipped_count < len(docs)  # did not scan all docs
 
-    def test_pack_custom_fail_threshold(self, mock_tokenizer: MockTokenizer):
+    def test_pack_half_skipped_stops_early(self, mock_tokenizer: MockTokenizer):
+        # More than len(docs) // 2 are oversized — secondary escape should trigger
         docs = ["word " * 20 for _ in range(10)]
         result = enforce_token_budget(
             docs, max_tokens=5, tokenizer=mock_tokenizer,
             consecutive_fail_threshold=2, allow_truncation=False,
         )
-        assert result.consecutive_fails >= 2
+        # half of 10 = 5, so the secondary guard kicks in no later than after 6 skips
+        assert result.skipped_count <= 6
+
+    def test_pack_skips_large_and_packs_small(self, mock_tokenizer: MockTokenizer):
+        """Regression: large docs interspersed should not stop packing of small docs."""
+        large = "word " * 200  # 200 tokens — won't fit
+        small = "word " * 5    # 5 tokens — will fit
+        docs = [large] * 3 + [small] * 10
+        result = enforce_token_budget(
+            docs, max_tokens=60, tokenizer=mock_tokenizer,
+            allow_truncation=False,
+        )
+        # All 10 small docs should be packed (budget = 60, 10 × 5 = 50 tokens)
+        assert len(result.packed_docs) == 10
 
     def test_pack_empty_docs(self, mock_tokenizer: MockTokenizer):
         result = enforce_token_budget([], max_tokens=100, tokenizer=mock_tokenizer)

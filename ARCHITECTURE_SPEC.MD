@@ -105,11 +105,11 @@ query_text
 [2. LanceDB Hybrid Search] -- vector ANN + BM25 FTS + RRF fusion
   |                           returns top_k_fused candidates
   v
-[3. Parent Dedup] -- keep highest-scored child per parent_id
-  |
-  v
-[4. Rerank] -- Jina v3 listwise reranker
+[3. Rerank] -- Jina v3 listwise reranker
   |             replaces fusion score with cosine similarity score
+  v
+[4. Parent Dedup] -- keep highest-scored child per parent_id (uses reranker scores)
+  |
   v
 [5. Threshold Filter] -- adaptive threshold + safety net: min_docs guaranteed
   |
@@ -353,7 +353,7 @@ Legacy mode names (`high`, `efficiency`, `power-fast`, etc.) are mapped to curre
 |-----------|-------------------|-------------------|-----------------|---------------|
 | `top_k_dense` | 100 | 100 | 200 | 400 |
 | `top_k_fused` | 50 | 50 | 100 | 200 |
-| `top_k_rerank` | 20 | 20 | 40 | 60 |
+| `top_k_rerank` | 30 | 30 | 55 | 80 |
 | `top_k_final` | 5 | 5 | 8 | 8 |
 | `reranker_threshold` | 0.05 | 0.05 | 0.04 | 0.04 |
 | `reranker_min_docs` | 3 | 3 | 4 | 4 |

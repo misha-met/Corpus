@@ -376,6 +376,26 @@ const AssistantMessage: FC = () => {
 
 const AssistantActionBar: FC = () => {
   const isRunning = useAuiState((s) => s.message.status?.type === "running");
+  const messageText = useAuiState((s) =>
+    s.message.parts.reduce((acc: string, part) => {
+      if (part.type !== "text") return acc;
+      if (!("text" in part) || typeof (part as { text?: unknown }).text !== "string") return acc;
+      return acc + (part as { text: string }).text;
+    }, ""),
+  );
+  const [isCleanlyCopied, setIsCleanlyCopied] = useState(false);
+
+  const handleCleanCopy = useCallback(() => {
+    // Strip [N] citation markers and collapse any resulting double spaces
+    const clean = messageText
+      .replace(/\s*\[\d+\]\s*/g, " ")
+      .replace(/ {2,}/g, " ")
+      .trim();
+    navigator.clipboard.writeText(clean).then(() => {
+      setIsCleanlyCopied(true);
+      setTimeout(() => setIsCleanlyCopied(false), 2000);
+    });
+  }, [messageText]);
 
   return (
     <ActionBarPrimitive.Root
@@ -384,16 +404,9 @@ const AssistantActionBar: FC = () => {
       className="aui-assistant-action-bar-root col-start-3 row-start-2 -ml-1 flex gap-1 text-muted-foreground data-floating:absolute data-floating:rounded-md data-floating:border data-floating:bg-background data-floating:p-1 data-floating:shadow-sm"
     >
       {!isRunning && (
-        <ActionBarPrimitive.Copy asChild>
-          <TooltipIconButton tooltip="Copy" side="top">
-            <AuiIf condition={(s) => s.message.isCopied}>
-              <CheckIcon />
-            </AuiIf>
-            <AuiIf condition={(s) => !s.message.isCopied}>
-              <CopyIcon />
-            </AuiIf>
-          </TooltipIconButton>
-        </ActionBarPrimitive.Copy>
+        <TooltipIconButton tooltip="Copy" side="top" onClick={handleCleanCopy}>
+          {isCleanlyCopied ? <CheckIcon /> : <CopyIcon />}
+        </TooltipIconButton>
       )}
       {!isRunning && (
         <ActionBarPrimitive.Reload asChild>
