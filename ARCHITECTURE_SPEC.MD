@@ -267,6 +267,8 @@ Thin wrapper around `RagEngine` for terminal workflows:
 - **Styling:** Tailwind CSS 4 with dark theme (`bg-gray-950`, blue accents)
 - **State management:** React Context + useReducer (dual-context pattern: state + dispatch)
 - **Streaming:** AsyncGenerator consuming SSE events from `/api/query`
+- **Freeform chat mode:** Lightweight, session-persistent chat mode that preserves conversation history, unsent drafts, and per-session editable context; optimized for exploratory, back-and-forth browsing and quick note-style interactions.
+- **Theme toggle (UI):** Small user-accessible toggle to switch visual themes.
 
 ### 4.2 Component Tree
 
@@ -332,9 +334,9 @@ Current active modes (`VALID_MODES`) with RAM-aware scaling in `regular`:
 
 | Mode | LLM Model | Context Window | Retrieval Budget | RAM |
 |------|-----------|----------------|------------------|-----|
-| `regular` (32-47GB) | Qwen3-30B-A3B-Instruct-2507-4bit | 16K | 8K | 32GB+ |
-| `regular` (48-63GB) | Qwen3-30B-A3B-Instruct-2507-4bit | 64K | 32K | 48GB+ |
-| `regular` (64GB+) | Qwen3-30B-A3B-Instruct-2507-4bit | 64K | 48K | 64GB+ |
+| `regular` (32-47GB) | Qwen3.5-35B-A3B-Instruct-2507-4bit | 16K | 8K | 32GB+ |
+| `regular` (48-63GB) | Qwen3.5-35B-A3B-Instruct-2507-4bit | 64K | 32K | 48GB+ |
+| `regular` (64GB+) | Qwen3.5-35B-A3B-Instruct-2507-4bit | 64K | 48K | 64GB+ |
 | `power-deep-research` | Qwen3-Next-80B-A3B-Instruct-4bit | 48K | 40K | 64GB+ |
 
 All modes share: Qwen3-Embedding-0.6B-4bit-DWQ (embeddings) + jinaai/jina-reranker-v3-mlx (reranker).
