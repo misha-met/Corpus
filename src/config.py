@@ -130,7 +130,7 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
 
     # Shared model stack per mode (fields identical across RAM tiers)
     _REGULAR_MODELS = dict(
-        llm_model="mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
+        llm_model="NexVeridian/Qwen3.5-35B-A3B-4bit",
         embedding_model="mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
         reranker_model="jinaai/jina-reranker-v3-mlx",
         embedding_device="cpu",

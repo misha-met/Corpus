@@ -108,7 +108,7 @@ export default function Page() {
     { id: "beams",     label: "Beams" },
     { id: "meteors",   label: "Meteors" },
     { id: "rain",      label: "Rain" },
-    { id: "mesh",      label: "Mesh Gradient" },
+    { id: "mesh",      label: "Gradient" },
     { id: "paths",     label: "Paths" },
     { id: "starfield", label: "Starfield" },
     { id: "particles", label: "Particles" },
