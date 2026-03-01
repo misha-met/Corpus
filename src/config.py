@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import platform
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dc_replace
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -103,18 +103,12 @@ INTENT_GENERATION_PARAMS_REGULAR: dict[str, IntentGenerationParams] = {
 }
 
 INTENT_GENERATION_PARAMS_DEEP_RESEARCH: dict[str, IntentGenerationParams] = {
-    "FACTUAL":        IntentGenerationParams(temperature=0.5, top_p=0.7, top_k=20, min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0, enable_thinking=False),
-    "SUMMARIZE":      IntentGenerationParams(temperature=0.7, top_p=0.8, top_k=20, min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0, enable_thinking=False),
-    "EXPLAIN":        IntentGenerationParams(temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0, enable_thinking=True),
-    "ANALYZE":        IntentGenerationParams(temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0, enable_thinking=True),
-    "COMPARE":        IntentGenerationParams(temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0, enable_thinking=True),
-    "CRITIQUE":       IntentGenerationParams(temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0, enable_thinking=True),
-    "COLLECTION":     IntentGenerationParams(temperature=0.7, top_p=0.8, top_k=20, min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0, enable_thinking=False),
-    "OVERVIEW":       IntentGenerationParams(temperature=0.7, top_p=0.8, top_k=20, min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0, enable_thinking=False),
-    "EXTRACT":        IntentGenerationParams(temperature=0.5, top_p=0.7, top_k=20, min_p=0.0, presence_penalty=0.0, repetition_penalty=1.0, enable_thinking=False),
-    "TIMELINE":       IntentGenerationParams(temperature=0.5, top_p=0.7, top_k=20, min_p=0.0, presence_penalty=1.0, repetition_penalty=1.0, enable_thinking=False),
-    "HOW_TO":         IntentGenerationParams(temperature=0.7, top_p=0.8, top_k=20, min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0, enable_thinking=False),
-    "QUOTE_EVIDENCE": IntentGenerationParams(temperature=0.3, top_p=0.6, top_k=20, min_p=0.0, presence_penalty=0.0, repetition_penalty=1.0, enable_thinking=False),
+    **INTENT_GENERATION_PARAMS_REGULAR,
+    # Deep research overrides: higher temperature + thinking enabled
+    "EXPLAIN":  _dc_replace(INTENT_GENERATION_PARAMS_REGULAR["EXPLAIN"],  temperature=1.0, top_p=0.95, enable_thinking=True),
+    "ANALYZE":  _dc_replace(INTENT_GENERATION_PARAMS_REGULAR["ANALYZE"],  temperature=1.0, top_p=0.95, enable_thinking=True),
+    "COMPARE":  _dc_replace(INTENT_GENERATION_PARAMS_REGULAR["COMPARE"],  temperature=1.0, top_p=0.95, enable_thinking=True),
+    "CRITIQUE": _dc_replace(INTENT_GENERATION_PARAMS_REGULAR["CRITIQUE"], temperature=1.0, top_p=0.95, enable_thinking=True),
 }
 
 
@@ -301,12 +295,6 @@ def get_system_ram_gb() -> float:
     return _detect_ram_gb()
 
 
-def _auto_select_mode(ram_gb: float) -> str:
-    # Both tiers (32GB and 64GB+) use 'regular' mode; RAM-aware config branching
-    # happens inside _get_mode_config() to provide different parameters
-    return "regular"
-
-
 def select_mode_config(*, manual_mode: Optional[str] = None) -> ModelConfig:
     """Select configuration based on mode with CLI > env var > auto precedence."""
     # Detect system RAM
@@ -317,7 +305,7 @@ def select_mode_config(*, manual_mode: Optional[str] = None) -> ModelConfig:
     source = "cli" if manual_mode else "env" if os.getenv("RAG_MODE") else "auto"
     
     if not mode:
-        mode = _auto_select_mode(ram_gb)
+        mode = "regular"
         source = "auto"
         logger.info(f"Auto-selected mode '{mode}' based on {ram_gb:.0f}GB detected RAM")
 

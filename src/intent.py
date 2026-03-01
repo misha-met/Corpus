@@ -366,7 +366,9 @@ _COMPARATIVE_STRUCTURES: list[re.Pattern] = [
     re.compile(r"\brelate\s+to\b", re.IGNORECASE),
 ]
 
-_EXTRACTION_STRUCTURES: list[re.Pattern] = [
+# Patterns that indicate a factual extraction query (boosts FACTUAL intent).
+# Compare with _EXTRACT_STRUCTURES which boosts the dedicated EXTRACT intent.
+_FACTUAL_EXTRACTION_PATTERNS: list[re.Pattern] = [
     re.compile(r"\bextract\b", re.IGNORECASE),
     re.compile(r"\blist\s+all\s+(names?|dates?|years?|titles?|authors?|citations?)\b", re.IGNORECASE),
     re.compile(r"\bgive\s+me\s+the\s+(dates?|years?|names?|citations?)\b", re.IGNORECASE),
@@ -452,7 +454,7 @@ def _apply_structural_intent_signals(query: str, scores: dict[Intent, int]) -> N
     if any(pattern.search(normalized) for pattern in _COMPARATIVE_STRUCTURES):
         scores[Intent.COMPARE] += 2
 
-    if any(pattern.search(normalized) for pattern in _EXTRACTION_STRUCTURES):
+    if any(pattern.search(normalized) for pattern in _FACTUAL_EXTRACTION_PATTERNS):
         scores[Intent.FACTUAL] += 3
 
     if any(pattern.search(normalized) for pattern in _SUMMARIZATION_STRUCTURES):
@@ -597,9 +599,11 @@ def _detect_why_specificity(query: str) -> tuple[Optional[str], Optional[str]]:
     return entity, match.group(1)
 
 
-def _classify_heuristic(query: str) -> IntentResult:
-    """Classify intent using regex pattern matching + structural signals."""
-    normalized_query = _normalize_for_intent(query)
+def _compute_intent_scores(normalized_query: str) -> tuple[dict["Intent", int], bool]:
+    """Score each intent from regex patterns and structural signals.
+
+    Returns (scores, analyze_bias).
+    """
     scores: dict[Intent, int] = {intent: 0 for intent in Intent}
     for intent, patterns in _INTENT_PATTERNS.items():
         for pattern in patterns:
@@ -608,9 +612,7 @@ def _classify_heuristic(query: str) -> IntentResult:
 
     _apply_structural_intent_signals(normalized_query, scores)
 
-    # ---- noun-phrase de-boost ----
-    # "Chomsky's critique", "the critique of X" → the word "critique" is a
-    # noun, NOT an instruction to critique.
+    # Noun-phrase de-boost: "Chomsky's critique" is a noun, not an instruction
     if scores[Intent.CRITIQUE] > 0:
         noun_critique = re.search(
             r"(?:\b\w+(?:'s|s)\s+|(?:the|a|an|this|that|his|her|their|its)\s+)critique\b",
@@ -618,10 +620,7 @@ def _classify_heuristic(query: str) -> IntentResult:
         )
         if noun_critique:
             scores[Intent.CRITIQUE] = max(0, scores[Intent.CRITIQUE] - 1)
-            logger.debug(
-                "De-boosted CRITIQUE: 'critique' appears as noun phrase (%s)",
-                noun_critique.group(),
-            )
+            logger.debug("De-boosted CRITIQUE: noun phrase (%s)", noun_critique.group())
 
     analyze_bias = _is_technical_how_why(normalized_query)
     if analyze_bias:
@@ -632,18 +631,16 @@ def _classify_heuristic(query: str) -> IntentResult:
         else:
             scores[Intent.ANALYZE] += 2
 
+    return scores, analyze_bias
+
+
+def _apply_tiebreaks(scores: dict["Intent", int]) -> tuple["Intent", int]:
+    """Apply tie-break rules and return (best_intent, best_score)."""
     best_intent = max(scores, key=lambda k: scores[k])
     best_score = scores[best_intent]
-
-    if best_score == 0:
-        return IntentResult(intent=Intent.OVERVIEW, confidence=0.40, method="fallback")
-
     matching_intents = [i for i, s in scores.items() if s > 0]
 
-    # ---- Tie-break rules ----
-
-    # New dedicated intents (EXTRACT, TIMELINE, HOW_TO, QUOTE_EVIDENCE) take
-    # priority over all old tie-break rules when they have the highest score.
+    # Dedicated intents take priority when they have the highest score
     _dedicated_intents = (Intent.EXTRACT, Intent.TIMELINE, Intent.HOW_TO, Intent.QUOTE_EVIDENCE)
     _dedicated_best_score = max(scores[i] for i in _dedicated_intents)
     _dedicated_wins = _dedicated_best_score > 0 and _dedicated_best_score >= max(
@@ -651,7 +648,7 @@ def _classify_heuristic(query: str) -> IntentResult:
         scores[Intent.SUMMARIZE], scores[Intent.ANALYZE],
     )
 
-    # COMPARE/CRITIQUE wins over weak ANALYZE evidence.
+    # COMPARE/CRITIQUE wins over weak ANALYZE evidence
     if best_intent == Intent.ANALYZE and (
         scores[Intent.ANALYZE] <= 1
         and (scores[Intent.COMPARE] > 0 or scores[Intent.CRITIQUE] > 0)
@@ -663,20 +660,17 @@ def _classify_heuristic(query: str) -> IntentResult:
             best_intent = Intent.CRITIQUE
             best_score = scores[Intent.CRITIQUE]
 
-    # COLLECTION wins ties with SUMMARIZE ("Summarize all documents").
-    # Guard: do not apply if a dedicated extraction/procedural intent has won.
+    # COLLECTION wins ties with SUMMARIZE
     if (
         not _dedicated_wins
         and Intent.COLLECTION in matching_intents
         and Intent.SUMMARIZE in matching_intents
+        and scores[Intent.COLLECTION] >= scores[Intent.SUMMARIZE]
     ):
-        if scores[Intent.COLLECTION] >= scores[Intent.SUMMARIZE]:
-            best_intent = Intent.COLLECTION
-            best_score = scores[Intent.COLLECTION]
+        best_intent = Intent.COLLECTION
+        best_score = scores[Intent.COLLECTION]
 
     # COLLECTION wins ties with FACTUAL for document-selection queries
-    # ("which document is about X" should be COLLECTION, not FACTUAL).
-    # Guard: do not apply if a dedicated extraction/procedural intent has won.
     if (
         not _dedicated_wins
         and Intent.COLLECTION in matching_intents
@@ -686,7 +680,7 @@ def _classify_heuristic(query: str) -> IntentResult:
         best_intent = Intent.COLLECTION
         best_score = scores[Intent.COLLECTION]
 
-    # COMPARE wins ties with CRITIQUE ("similarity in Chomsky's critique").
+    # COMPARE wins ties with CRITIQUE
     if (
         scores[Intent.COMPARE] > 0
         and scores[Intent.CRITIQUE] > 0
@@ -696,7 +690,16 @@ def _classify_heuristic(query: str) -> IntentResult:
         best_score = scores[Intent.COMPARE]
         scores[Intent.CRITIQUE] = 0
 
-    # Recalculate after tie-breaks.
+    return best_intent, best_score
+
+
+def _compute_confidence(
+    scores: dict["Intent", int],
+    best_intent: "Intent",
+    best_score: int,
+    analyze_bias: bool,
+) -> float:
+    """Compute confidence from score distribution and analysis bias."""
     matching_intents = [i for i, s in scores.items() if s > 0]
 
     if len(matching_intents) > 1 and best_score == 1:
@@ -709,9 +712,23 @@ def _classify_heuristic(query: str) -> IntentResult:
     if best_intent in (Intent.ANALYZE, Intent.COMPARE, Intent.CRITIQUE) and analyze_bias:
         confidence = min(0.95, confidence + 0.15)
 
-    # ---- Why-question specificity override (Fix 6) ----
-    # "Why does [Character] [action]?" → FACTUAL (asks for specific cause)
-    # "Why is the theme of fate important?" → stays ANALYZE
+    return confidence
+
+
+def _classify_heuristic(query: str) -> IntentResult:
+    """Classify intent using regex pattern matching + structural signals."""
+    normalized_query = _normalize_for_intent(query)
+
+    scores, analyze_bias = _compute_intent_scores(normalized_query)
+
+    best_intent = max(scores, key=lambda k: scores[k])
+    if scores[best_intent] == 0:
+        return IntentResult(intent=Intent.OVERVIEW, confidence=0.40, method="fallback")
+
+    best_intent, best_score = _apply_tiebreaks(scores)
+    confidence = _compute_confidence(scores, best_intent, best_score, analyze_bias)
+
+    # Why-question specificity override (Fix 6)
     if best_intent in (Intent.ANALYZE, Intent.EXPLAIN) and re.match(
         r"^\s*why\b", query, re.IGNORECASE
     ):
