@@ -365,124 +365,31 @@ def _encode_event(event: QueryEvent) -> Optional[str]:
 _SENTINEL = object()
 
 
-async def _chat_stream_generator(
-    request: Request,
-    chat_request: ChatRequest,
+async def _stream_from_events(
+    producer_fn,
     stop_event: threading.Event,
+    *,
+    keepalive: bool = True,
+    request: Request | None = None,
 ) -> AsyncGenerator[str, None]:
-    """Generate AI SDK UI message stream lines from query_events.
+    """Shared AI SDK v6 stream consumer.
 
-    Runs ``RagEngine.query_events()`` in a background thread. Events are
-    pushed into an ``asyncio.Queue`` via ``loop.call_soon_threadsafe`` and
-    consumed here for encoding and yielding.
+    Runs *producer_fn* in a background thread.  *producer_fn(queue, loop)*
+    must push ``QueryEvent`` instances into *queue* and finally push
+    ``_SENTINEL``.
+
+    Handles keepalive pings, reasoning/text block tracking, error recovery,
+    and clean producer shutdown — eliminating the copy-pasted boilerplate
+    that was in ``_chat_stream_generator`` and ``_query_stream_generator``.
     """
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
 
-    # --- Extract query parameters ---
-    last_message = chat_request.messages[-1]
-    query_text = last_message.get_text().strip()
+    def _wrapped_producer() -> None:
+        producer_fn(queue, loop)
 
-    if not query_text:
-        yield encode_message_start(f"msg-{uuid.uuid4()}")
-        yield encode_error("Empty query")
-        yield encode_finish_step("error")
-        yield encode_finish_message("error")
-        yield encode_done()
-        return
+    producer_task = loop.run_in_executor(None, _wrapped_producer)
 
-    # AI SDK v6: message-start must precede all message content including annotations.
-    # A unique ID is required — a hardcoded constant causes a collision on the second message.
-    msg_id = f"msg-{uuid.uuid4()}"
-    yield encode_message_start(msg_id)
-
-    # Send an immediate chunk so the client gets a first byte before model loading.
-    # _get_engine() in the producer can take 30–60+ seconds on first request.
-    logger.info("Chat stream: sending initial status (engine may load next)")
-    yield annotation_status("Loading RAG engine…")
-
-    source_id = None
-    citations_enabled = None
-    request_mode = "regular"
-    intent_override = None
-    if chat_request.data:
-        # Support both source_ids (plural, from frontend) and source_id (singular, legacy).
-        # The engine only supports single source_id filtering; if exactly one source
-        # is selected, pass it through.  Otherwise pass None (use all sources).
-        source_ids = chat_request.data.get("source_ids")
-        if isinstance(source_ids, list) and len(source_ids) == 1:
-            source_id = source_ids[0]
-        elif not source_ids:
-            source_id = chat_request.data.get("source_id")
-        if "citations_enabled" in chat_request.data:
-            citations_enabled = bool(chat_request.data["citations_enabled"])
-        # Intent override: "auto" or None means use automatic classification
-        raw_intent = chat_request.data.get("intent_override")
-        if raw_intent and raw_intent != "auto":
-            intent_override = str(raw_intent)
-
-    # Extract mode from AI SDK config.modelName (sent by the ModelSelector component)
-    frontend_config = (chat_request.model_extra or {}).get("config") or {}
-    frontend_model_name = frontend_config.get("modelName", "regular")
-    request_mode = _FRONTEND_MODE_MAP.get(frontend_model_name, "regular")
-    # Intent override from modelContext (per-request, reliable) takes priority over body.data.
-    mc_intent = frontend_config.get("intentOverride")
-    if mc_intent and mc_intent != "auto":
-        intent_override = str(mc_intent)
-
-    # Extract enable_thinking from frontend config (tri-state: None=auto, True=on, False=off)
-    raw_enable_thinking = frontend_config.get("enableThinking")
-    if raw_enable_thinking is None:
-        # Also check body.data for legacy support
-        if chat_request.data:
-            raw_enable_thinking = chat_request.data.get("enable_thinking")
-    enable_thinking: Optional[bool] = None
-    if raw_enable_thinking is True:
-        enable_thinking = True
-    elif raw_enable_thinking is False:
-        enable_thinking = False
-
-    logger.info("Chat request: frontend model=%r → backend mode=%r, intent_override=%r, enable_thinking=%r", frontend_model_name, request_mode, intent_override, enable_thinking)
-
-    # Pin the engine reference before spawning the producer thread (H2).
-    # This prevents a concurrent mode swap from closing the engine mid-stream.
-    pinned_engine = await asyncio.to_thread(_get_engine, request_mode)
-
-    # --- Producer: runs in thread, pushes events to queue ---
-    def _producer() -> None:
-        try:
-            logger.info("Chat producer: thread started")
-            engine = pinned_engine
-            logger.info("Chat producer: using pinned engine, starting query_events")
-            for event in engine.query_events(
-                query_text,
-                source_id=source_id,
-                citations_enabled=citations_enabled,
-                intent_override=intent_override,
-                should_stop=lambda: stop_event.is_set(),
-                enable_thinking=enable_thinking,
-            ):
-                loop.call_soon_threadsafe(queue.put_nowait, event)
-        except Exception as exc:
-            logger.exception("query_events producer error: %s", exc)
-            error_event = ErrorEvent(
-                code="INTERNAL", message=f"{type(exc).__name__}: {exc}"
-            )
-            finish_event = FinishEvent(finish_reason="error")
-            loop.call_soon_threadsafe(queue.put_nowait, error_event)
-            loop.call_soon_threadsafe(queue.put_nowait, finish_event)
-        finally:
-            loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
-
-    # Start producer in thread
-    producer_task = loop.run_in_executor(None, _producer)
-
-    # --- Consumer: read events from queue, encode, yield ---
-    # Use a timeout so we can yield keepalive bytes during long model loads and avoid client timeout
-    first_event = True
-    keepalive_interval = _KEEPALIVE_INTERVAL_S
-
-    # Track streaming block state (AI SDK v6 text-start/delta/end and reasoning-start/delta/end)
     text_id = "text-0"
     reasoning_id = "reasoning-0"
     in_text_block = False
@@ -490,35 +397,38 @@ async def _chat_stream_generator(
 
     try:
         while True:
+            if request is not None and await request.is_disconnected():
+                stop_event.set()
+                return
+
             try:
-                event = await asyncio.wait_for(queue.get(), timeout=keepalive_interval)
+                timeout = _KEEPALIVE_INTERVAL_S if keepalive else None
+                event = await asyncio.wait_for(queue.get(), timeout=timeout)
             except asyncio.TimeoutError:
                 yield ": ping\n\n"
                 continue
+
             if event is _SENTINEL:
+                if in_reasoning_block:
+                    yield encode_reasoning_end(reasoning_id)
+                if in_text_block:
+                    yield encode_text_end(text_id)
                 break
-            if first_event:
-                logger.info("Chat consumer: first event from producer (stream connected)")
-                first_event = False
 
             if isinstance(event, ThinkingTokenEvent):
-                # Open reasoning block on first thinking token
                 if not in_reasoning_block:
                     yield encode_reasoning_start(reasoning_id)
                     in_reasoning_block = True
                 yield encode_reasoning_delta(event.token, reasoning_id)
             elif isinstance(event, TextTokenEvent):
-                # Close reasoning block when answer tokens begin
                 if in_reasoning_block:
                     yield encode_reasoning_end(reasoning_id)
                     in_reasoning_block = False
-                # Open text block on first answer token
                 if not in_text_block:
                     yield encode_text_start(text_id)
                     in_text_block = True
                 yield encode_text_delta(event.token, text_id)
             else:
-                # Close any open blocks before non-streaming events (citations, finish, etc.)
                 if in_reasoning_block:
                     yield encode_reasoning_end(reasoning_id)
                     in_reasoning_block = False
@@ -531,28 +441,113 @@ async def _chat_stream_generator(
 
     except asyncio.CancelledError:
         stop_event.set()
-        logger.info("Chat stream consumer cancelled")
+        logger.info("Stream consumer cancelled")
     except Exception as exc:
-        logger.exception("Chat stream consumer error: %s", exc)
+        logger.exception("Stream consumer error: %s", exc)
         if in_reasoning_block:
             yield encode_reasoning_end(reasoning_id)
-            in_reasoning_block = False
         if in_text_block:
             yield encode_text_end(text_id)
-            in_text_block = False
         yield annotation_error("INTERNAL", str(exc))
         yield encode_error(str(exc))
         yield encode_finish_step("error")
         yield encode_finish_message("error")
     finally:
         stop_event.set()
-        # Wait for producer thread to finish
         try:
             await asyncio.wait_for(producer_task, timeout=_PRODUCER_CLEANUP_TIMEOUT_S)
         except (asyncio.TimeoutError, Exception):
             pass
 
-    # Terminal frame required by AI SDK v6
+
+async def _chat_stream_generator(
+    request: Request,
+    chat_request: ChatRequest,
+    stop_event: threading.Event,
+) -> AsyncGenerator[str, None]:
+    """Generate AI SDK UI message stream lines from query_events.
+
+    Delegates the queue/producer/consumer/cleanup boilerplate to
+    ``_stream_from_events``.
+    """
+    # --- Extract query parameters ---
+    last_message = chat_request.messages[-1]
+    query_text = last_message.get_text().strip()
+
+    if not query_text:
+        yield encode_message_start(f"msg-{uuid.uuid4()}")
+        yield encode_error("Empty query")
+        yield encode_finish_step("error")
+        yield encode_finish_message("error")
+        yield encode_done()
+        return
+
+    msg_id = f"msg-{uuid.uuid4()}"
+    yield encode_message_start(msg_id)
+
+    logger.info("Chat stream: sending initial status (engine may load next)")
+    yield annotation_status("Loading RAG engine…")
+
+    source_id = None
+    citations_enabled = None
+    request_mode = "regular"
+    intent_override = None
+    if chat_request.data:
+        source_ids = chat_request.data.get("source_ids")
+        if isinstance(source_ids, list) and len(source_ids) == 1:
+            source_id = source_ids[0]
+        elif not source_ids:
+            source_id = chat_request.data.get("source_id")
+        if "citations_enabled" in chat_request.data:
+            citations_enabled = bool(chat_request.data["citations_enabled"])
+        raw_intent = chat_request.data.get("intent_override")
+        if raw_intent and raw_intent != "auto":
+            intent_override = str(raw_intent)
+
+    frontend_config = (chat_request.model_extra or {}).get("config") or {}
+    frontend_model_name = frontend_config.get("modelName", "regular")
+    request_mode = _FRONTEND_MODE_MAP.get(frontend_model_name, "regular")
+    mc_intent = frontend_config.get("intentOverride")
+    if mc_intent and mc_intent != "auto":
+        intent_override = str(mc_intent)
+
+    raw_enable_thinking = frontend_config.get("enableThinking")
+    if raw_enable_thinking is None:
+        if chat_request.data:
+            raw_enable_thinking = chat_request.data.get("enable_thinking")
+    enable_thinking: Optional[bool] = None
+    if raw_enable_thinking is True:
+        enable_thinking = True
+    elif raw_enable_thinking is False:
+        enable_thinking = False
+
+    logger.info("Chat request: frontend model=%r → backend mode=%r, intent_override=%r, enable_thinking=%r", frontend_model_name, request_mode, intent_override, enable_thinking)
+
+    pinned_engine = await asyncio.to_thread(_get_engine, request_mode)
+
+    def _producer(queue: asyncio.Queue, loop: asyncio.AbstractEventLoop) -> None:
+        try:
+            for event in pinned_engine.query_events(
+                query_text,
+                source_id=source_id,
+                citations_enabled=citations_enabled,
+                intent_override=intent_override,
+                should_stop=lambda: stop_event.is_set(),
+                enable_thinking=enable_thinking,
+            ):
+                loop.call_soon_threadsafe(queue.put_nowait, event)
+        except Exception as exc:
+            logger.exception("query_events producer error: %s", exc)
+            loop.call_soon_threadsafe(queue.put_nowait, ErrorEvent(
+                code="INTERNAL", message=f"{type(exc).__name__}: {exc}",
+            ))
+            loop.call_soon_threadsafe(queue.put_nowait, FinishEvent(finish_reason="error"))
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
+
+    async for chunk in _stream_from_events(_producer, stop_event, keepalive=True, request=request):
+        yield chunk
+
     yield encode_done()
 
 
@@ -751,24 +746,19 @@ async def _query_stream_generator(
     stop_event: threading.Event,
 ) -> AsyncGenerator[str, None]:
     """Generate AI SDK UI message stream lines from ``RagEngine.query_events()``."""
-    queue: asyncio.Queue = asyncio.Queue()
-    loop = asyncio.get_running_loop()
-
     source_id = None
     if query_request.source_ids and len(query_request.source_ids) == 1:
         source_id = query_request.source_ids[0]
 
-    # Resolve and pin engine reference to avoid mid-stream swap (H2).
     request_mode = _FRONTEND_MODE_MAP.get(query_request.mode, query_request.mode) if query_request.mode else None
     pinned_engine = await asyncio.to_thread(_get_engine, request_mode)
 
-    def _producer() -> None:
+    def _producer(queue: asyncio.Queue, loop: asyncio.AbstractEventLoop) -> None:
         try:
-            engine = pinned_engine
             _intent_override = query_request.intent_override
             if _intent_override == "auto":
                 _intent_override = None
-            for event in engine.query_events(
+            for event in pinned_engine.query_events(
                 query_request.query,
                 source_id=source_id,
                 citations_enabled=query_request.citations_enabled,
@@ -778,69 +768,17 @@ async def _query_stream_generator(
                 loop.call_soon_threadsafe(queue.put_nowait, event)
         except Exception as exc:
             logger.exception("query sse producer error: %s", exc)
-            error_event = ErrorEvent(
-                code="INTERNAL", message=f"{type(exc).__name__}: {exc}"
-            )
-            finish_event = FinishEvent(finish_reason="error")
-            loop.call_soon_threadsafe(queue.put_nowait, error_event)
-            loop.call_soon_threadsafe(queue.put_nowait, finish_event)
+            loop.call_soon_threadsafe(queue.put_nowait, ErrorEvent(
+                code="INTERNAL", message=f"{type(exc).__name__}: {exc}",
+            ))
+            loop.call_soon_threadsafe(queue.put_nowait, FinishEvent(finish_reason="error"))
         finally:
             loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
 
-    producer_task = loop.run_in_executor(None, _producer)
-
-    text_id = "text-0"
-    reasoning_id = "reasoning-0"
-    in_text_block = False
-    in_reasoning_block = False
-
-    # Unique ID per response — a hardcoded constant causes a collision on the second message.
     yield encode_message_start(f"msg-{uuid.uuid4()}")
 
-    try:
-        while True:
-            if await request.is_disconnected():
-                stop_event.set()
-                return
-
-            event = await queue.get()
-            if event is _SENTINEL:
-                # Close any open blocks before ending
-                if in_reasoning_block:
-                    yield encode_reasoning_end(reasoning_id)
-                if in_text_block:
-                    yield encode_text_end(text_id)
-                break
-
-            if isinstance(event, ThinkingTokenEvent):
-                if not in_reasoning_block:
-                    yield encode_reasoning_start(reasoning_id)
-                    in_reasoning_block = True
-                yield encode_reasoning_delta(event.token, reasoning_id)
-            elif isinstance(event, TextTokenEvent):
-                if in_reasoning_block:
-                    yield encode_reasoning_end(reasoning_id)
-                    in_reasoning_block = False
-                if not in_text_block:
-                    yield encode_text_start(text_id)
-                    in_text_block = True
-                yield encode_text_delta(event.token, text_id)
-            else:
-                if in_reasoning_block:
-                    yield encode_reasoning_end(reasoning_id)
-                    in_reasoning_block = False
-                if in_text_block:
-                    yield encode_text_end(text_id)
-                    in_text_block = False
-                chunk = _encode_event(event)
-                if chunk:
-                    yield chunk
-    finally:
-        stop_event.set()
-        try:
-            await asyncio.wait_for(producer_task, timeout=_PRODUCER_CLEANUP_TIMEOUT_S)
-        except (asyncio.TimeoutError, Exception):
-            pass
+    async for chunk in _stream_from_events(_producer, stop_event, request=request):
+        yield chunk
 
     yield encode_done()
 
