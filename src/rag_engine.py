@@ -103,6 +103,7 @@ class QueryResult:
     context: str = ""
     config: Optional[ModelConfig] = None
     raw_answer: str = ""
+    prompt_messages: Optional[list[dict[str, str]]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -753,6 +754,7 @@ class RagEngine:
         intent_override: Optional[str] = None,
         citations_enabled: Optional[bool] = None,
         no_generate: bool = False,
+        dump_prompt: bool = False,
     ) -> QueryResult:
         """Execute the full RAG pipeline and return a structured result.
 
@@ -768,6 +770,9 @@ class RagEngine:
             Override citation mode. ``None`` uses the engine default.
         no_generate : bool
             If True, skip LLM generation and return only retrieved context.
+        dump_prompt : bool
+            If True, build the full prompt and return it in ``prompt_messages``
+            without running LLM generation. Useful for benchmarking.
         """
         config = self._model_config
         profiler = LatencyProfiler(enabled=self._cfg.latency)
@@ -802,8 +807,11 @@ class RagEngine:
 
         # -- intent classification + parameter resolution ------------------
         self._on_status("Classifying intent...")
+        # For dump_prompt we want full intent classification (inc. LLM fallback),
+        # so suppress no_generate so it doesn't disable the intent LLM fallback.
+        classify_no_generate = no_generate and not dump_prompt
         classified = self._step_classify(
-            query_text, source_id, intent_override, no_generate, profiler=profiler
+            query_text, source_id, intent_override, classify_no_generate, profiler=profiler
         )
         intent_result = classified.intent_result
 
@@ -817,7 +825,7 @@ class RagEngine:
 
         retrieved = self._step_retrieve(
             query_text, source_id, classified, retrieval_engine, cite,
-            no_generate=no_generate, profiler=profiler,
+            no_generate=(no_generate or dump_prompt), profiler=profiler,
         )
         cite = retrieved.cite
 
@@ -852,7 +860,10 @@ class RagEngine:
             )
 
         # -- token budget packing ------------------------------------------
-        generator = self._consume_preloaded_generator(retrieved.generator_preload_future)
+        generator = (
+            None if dump_prompt
+            else self._consume_preloaded_generator(retrieved.generator_preload_future)
+        )
         self._on_status("Packing token budget...")
         with profiler.span("Budget packing"):
             packed = self._step_pack_budget(retrieved, config, generator)
@@ -870,6 +881,22 @@ class RagEngine:
                 source_legend=packed.source_legend,
                 mode=config.mode,
                 retrieval_budget=config.retrieval_budget,
+            )
+
+        # -- dump-prompt path (no LLM generation) --------------------------
+        if dump_prompt:
+            profiler.end_wall()
+            return QueryResult(
+                answer="",
+                intent=intent_result,
+                citations_enabled=cite,
+                source_ids=retrieved.source_ids,
+                retrieval_metrics=retrieved.retrieval_metrics,
+                budget_metrics=None,
+                latency_report=profiler.format_report(),
+                context=packed.context,
+                config=config,
+                prompt_messages=messages,
             )
 
         # -- generate -------------------------------------------------------

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from .intent import Intent
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -25,7 +28,7 @@ _INGEST_SUMMARY_QUESTION = (
     "Write a 3-4 paragraph summary of this document. "
     "Start the first paragraph by explaining what the document is — "
     "its type (e.g. book, report, article), its subject matter, and its scope or purpose. "
-    "Open with one clear sentence (20-30 words) that names the document and states its main subject. "
+    "Open with 1-2 sentences that name the document and state its main subject. "
     "Use the middle paragraphs to describe the main topics, arguments, or findings covered. "
     "Close with a short paragraph noting the document's relevance or usefulness for research."
 )
@@ -40,7 +43,7 @@ def build_ingest_summary_messages(context: str) -> list[dict[str, str]]:
     """
     return [
         {"role": "system", "content": _INGEST_SUMMARY_SYSTEM},
-        {"role": "user", "content": f"Document text:\n{context}\n\nTask: {_INGEST_SUMMARY_QUESTION}\n\nSummary:"},
+        {"role": "user", "content": f"Document text:\n{context}\n\nTask: {_INGEST_SUMMARY_QUESTION}"},
     ]
 
 
@@ -52,16 +55,11 @@ _SYSTEM_MESSAGE = """You are a research assistant. Follow these rules strictly:
 
 1. Use ONLY the provided context. Do not rely on outside knowledge.
 2. Answer the user's SPECIFIC question — do not provide unrelated information.
-3. Write in SHORT, focused paragraphs (60-100 words each). Each paragraph should develop ONE idea.
-4. Start each body paragraph with a clear topic sentence.
-5. If a paragraph exceeds 100 words, split it into two paragraphs.
-6. You may synthesize ideas across multiple context chunks, even if sources don't reference each other.
-7. Only state "The provided context does not contain sufficient information" if you genuinely cannot construct ANY relevant answer. NEVER append this disclaimer after a substantive answer.
-8. Stop generating immediately after completing your answer.
-9. Do NOT include meta-commentary, self-evaluations, filler phrases, or sign-offs.
-10. Do NOT end with speculative hedges or "future possibilities" not grounded in the context.
-11. Never reference retrieval internals in your answer (for example: "chunk", "chunk numbers", "retrieved chunks", "vector search", "reranker", or "index").
-12. Refer to evidence naturally as "the text", "the passage", "the author", or "the document"."""
+3. Write in short, focused paragraphs (3-5 sentences each). One idea per paragraph.
+4. You may synthesize ideas across multiple passages even if they don't reference each other.
+5. Only say "The provided context does not contain sufficient information" if you genuinely cannot answer at all. Never append this after a substantive answer.
+6. Do not reference retrieval internals (chunks, vectors, reranker). Refer to sources as "the text", "the passage", or "the author".
+7. Stop after completing your answer. No meta-commentary, sign-offs, or filler."""
 
 _CITATION_RULES = """
 CITATION REQUIREMENTS (MANDATORY):
@@ -78,14 +76,30 @@ CITATION REQUIREMENTS (MANDATORY):
 # ---------------------------------------------------------------------------
 
 INTENT_INSTRUCTIONS_REGULAR: dict[Intent, dict[str, str]] = {
+    Intent.OVERVIEW: {
+        "task": (
+            "Provide a high-level overview of the topic covered in the context. "
+            "Identify the subject, scope, and main points without deep analysis. "
+            "Report what the source covers, not what it argues."
+        ),
+        "format": (
+            "Write 3-4 short paragraphs (3-5 sentences each). "
+            "Open with what the source is about and its scope. "
+            "Use middle paragraphs to describe the main topics or sections covered. "
+            "Close with the source's relevance or key takeaway.\n\n"
+            "Write in prose \u2014 no bullet points."
+        ),
+        "tone": "Informative and concise.",
+    },
+
     Intent.SUMMARIZE: {
         "task": (
-            "Extract the main claims and findings from the context. "
-            "Merge overlapping points. Report only what the document states."
+            "Extract and consolidate the main claims and findings from the context. "
+            "Merge overlapping points. Report only what the source states."
         ),
         "format": (
             "List 3-5 key points as bullet points. "
-            "Each bullet should be one direct sentence (15-35 words) capturing one core idea. "
+            "Each bullet should be 1-2 clear sentences capturing one core idea. "
             "When citations are enabled, follow each bullet immediately with its inline citation [N]. "
             "Do NOT add interpretation or evaluation beyond what the source states."
         ),
@@ -94,23 +108,20 @@ INTENT_INSTRUCTIONS_REGULAR: dict[Intent, dict[str, str]] = {
     
     Intent.EXPLAIN: {
         "task": (
-            "Explain the content as if teaching someone curious but with no background in this field. "
-            "Use everyday language. Avoid all jargon and technical terms. "
+            "Answer the user's question in plain, accessible language. Avoid jargon. "
             "Do NOT introduce facts, definitions, or topics not present in the context. "
-            "If the source material is already non-technical, focus on clarifying the structure "
-            "of the argument and its practical implications rather than simplifying vocabulary."
+            "If the source is already non-technical, focus on clarifying the argument's "
+            "structure and practical implications rather than just simplifying vocabulary."
         ),
         "format": (
-            "Write 3-5 short paragraphs (3-5 sentences each, maximum 80 words per paragraph). "
-            "Each paragraph should explain ONE concept or idea. "
-            "\n\n"
+            "Write 3-5 short paragraphs (3-4 sentences maximum per paragraph). "
+            "Each paragraph should explain ONE concept or idea.\n\n"
             "Structure:\n"
             "• Opening paragraph: Introduce the core concept in simple terms.\n"
             "• Middle paragraphs (2-3): Develop the explanation. Each paragraph = one sub-idea.\n"
-            "• Final paragraph: Provide a concrete takeaway or practical implication.\n"
-            "\n"
-            "CRITICAL: Include at least one analogy or everyday comparison to make the key idea concrete. "
-            "If a sentence feels too complex, break it into two shorter sentences. "
+            "• Final paragraph: Provide a concrete takeaway or practical implication.\n\n"
+            "Where possible, use an analogy or everyday comparison to make the key idea concrete. "
+            "If the context does not suggest one naturally, focus on clear, simple language instead. "
             "Stop after your final clarifying sentence — no wrap-up or meta-commentary."
         ),
         "tone": "Conversational and clear.",
@@ -118,90 +129,59 @@ INTENT_INSTRUCTIONS_REGULAR: dict[Intent, dict[str, str]] = {
     
     Intent.ANALYZE: {
         "task": (
-            "Explain the core themes, patterns, or conflicts in the context. "
-            "Go beyond description — explain WHY things are the way they are. "
-            "Highlight where ideas converge and where they diverge. "
-            "Cover a range of DISTINCT points — do not revisit the same example or argument more than once."
+            "Answer the user's analytical question using evidence from the context. "
+            "Explain causes, relationships, and significance — go beyond description to explain why."
         ),
         "format": (
-            "Write 6-8 short, focused paragraphs (60-100 words each). Use blank lines between paragraphs. "
-            "\n\n"
-            "Structure:\n"
-            "• Opening paragraph: Frame the topic and preview 2-3 key themes you'll analyze.\n"
-            "• Body paragraphs (4-6): Each paragraph develops ONE distinct theme or pattern. "
-            "Start each with a topic sentence that signals what this paragraph explores. "
-            "Use specific evidence from the context. "
-            "Use transitions between paragraphs (\"Building on this,\" \"A second theme,\" \"This tension reveals\").\n"
-            "• Closing paragraph: Synthesize what the analysis reveals, grounded in the context.\n"
-            "\n"
-            "CRITICAL RULES:\n"
-            "• Each paragraph = 60-100 words maximum. If a point needs more, split into two paragraphs.\n"
-            "• Start body paragraphs with topic sentences.\n"
-            "• Do NOT repeat points, examples, or evidence across paragraphs.\n"
-            "• Do NOT use bullet points — write in prose."
+            "Write 4-6 short paragraphs (3-5 sentences each). "
+            "Use blank lines between paragraphs.\n\n"
+            "Open by framing the question and previewing your key points. "
+            "Develop one distinct point per body paragraph, each starting with a topic sentence. "
+            "Use transitions between paragraphs (\"Building on this,\" \"A second theme,\" "
+            "\"This tension reveals\"). "
+            "Close by synthesizing what the analysis reveals.\n\n"
+            "Use topic sentences. Write in prose — no bullet points."
         ),
         "tone": "Analytical, objective, and scholarly.",
     },
     
     Intent.COMPARE: {
         "task": (
-            "Identify the two or more ideas, positions, theories, or documents being compared. "
-            "For each, state the core claim or position clearly. "
-            "Then systematically map: (1) where they agree or overlap, "
-            "(2) where they diverge or conflict, (3) what drives the differences "
-            "(e.g., differing assumptions, methods, or goals)."
+            "Answer the user's comparison question. "
+            "For each item compared, state the core claim or position clearly. "
+            "Then systematically identify where they converge, diverge, and what drives the differences."
         ),
         "format": (
-            "Write 6-8 short, focused paragraphs (60-100 words each). Use blank lines between paragraphs. "
-            "\n\n"
-            "Structure:\n"
-            "• Opening paragraph: State what is being compared and the axis of comparison. "
-            "Name the items clearly in your first sentence.\n"
-            "• Shared ground (2-3 paragraphs): Explain where they converge. "
-            "Each paragraph = ONE point of convergence. "
-            "Start each with a topic sentence. Use evidence from the context.\n"
-            "• Key differences (2-3 paragraphs): Explain where they diverge. "
-            "Each paragraph = ONE point of divergence. "
+            "Write 4-7 short paragraphs (3-5 sentences each). "
+            "Use blank lines between paragraphs.\n\n"
+            "Open by stating what is being compared and on what basis. "
+            "Then discuss convergences and divergences — one point per paragraph, "
+            "each starting with a topic sentence. Allocate paragraphs based on "
+            "where the substance is, not a fixed structure. "
             "Use transitions (\"In contrast,\" \"However,\" \"The divergence stems from\"). "
-            "Explain what drives each difference.\n"
-            "• Closing paragraph: What the comparison reveals, grounded in the context.\n"
-            "\n"
-            "CRITICAL RULES:\n"
-            "• Each paragraph = 60-100 words maximum. If explaining a complex point, split it.\n"
-            "• Start body paragraphs with topic sentences.\n"
-            "• Do NOT repeat points or examples across paragraphs.\n"
-            "• Do NOT use bullet points — write in prose."
+            "Close with what the comparison reveals.\n\n"
+            "Write in prose — no bullet points."
         ),
         "tone": "Balanced, precise, and scholarly.",
     },
     
     Intent.CRITIQUE: {
         "task": (
-            "Identify the central argument or claim the user is asking about. "
-            "Report how the text itself evaluates, defends, or challenges that argument. "
-            "Surface any critiques, objections, limitations, or counterpoints the text raises. "
+            "Answer the user's question by reporting how the text itself evaluates, defends, "
+            "or challenges the argument in question. "
+            "Surface critiques, objections, or limitations the text raises. "
             "If the text is one-sided, say so — do NOT invent counterarguments not present in the context. "
-            "You may note what the text leaves unaddressed, but label it as an omission, not a flaw. "
-            "Present a range of DISTINCT arguments — do not revisit the same point more than once."
+            "You may note what the text leaves unaddressed, but label it as an omission, not a flaw."
         ),
         "format": (
-            "Write 5-7 short, focused paragraphs (60-100 words each). Use blank lines between paragraphs. "
-            "\n\n"
-            "Structure:\n"
-            "• Opening paragraph: State the argument being examined.\n"
-            "• Strengths (2-3 paragraphs): How the text supports or defends the argument. "
-            "Each paragraph = one distinct line of support. "
-            "Start each with a topic sentence (\"The text's first defense is...\").\n"
-            "• Limitations (1-2 paragraphs): Critiques or counterpoints the text itself raises (if any). "
-            "Use transitions (\"However,\" \"A noted limitation,\" \"The text acknowledges\").\n"
-            "• Closing paragraph: Summarize the text's own position on the argument.\n"
-            "\n"
-            "CRITICAL RULES:\n"
-            "• Each paragraph = 60-100 words maximum. One point per paragraph.\n"
-            "• Start body paragraphs with topic sentences.\n"
-            "• Do NOT invent critiques not in the context.\n"
-            "• Do NOT repeat points or examples.\n"
-            "• Do NOT use bullet points — write in prose."
+            "Write 4-6 short paragraphs (3-5 sentences each). "
+            "Use blank lines between paragraphs.\n\n"
+            "Open by stating the argument being examined. "
+            "Present how the text supports or defends it, then any limitations "
+            "or counterpoints the text itself raises. If the text is one-sided, "
+            "state that directly rather than fabricating balance. "
+            "Close by summarizing the text's own position.\n\n"
+            "Write in prose — no bullet points."
         ),
         "tone": "Evaluative, text-grounded, and intellectually rigorous.",
     },
@@ -216,8 +196,10 @@ INTENT_INSTRUCTIONS_REGULAR: dict[Intent, dict[str, str]] = {
             "Do NOT provide analysis, background, or tangential information."
         ),
         "format": (
-            "Give the direct answer in 1-3 sentences. "
-            "Quote the specific passage from the context that supports your answer. "
+            "Give the direct answer concisely. "
+            "For single-fact questions, 1-3 sentences. "
+            "For multi-part questions, as many sentences as needed to cover each part. "
+            "Quote or paraphrase the specific passage that supports your answer. "
             "If the provided context does not contain the specific detail asked for, "
             "state exactly what information is missing rather than inferring or guessing. "
             "Do NOT use bullet points. Do NOT provide additional context beyond what is asked."
@@ -235,14 +217,14 @@ INTENT_INSTRUCTIONS_REGULAR: dict[Intent, dict[str, str]] = {
             "Highlight how the documents relate to each other, if applicable."
         ),
         "format": (
-            "Write 3-5 short paragraphs (60-80 words each). "
-            "\n\n"
+            "Write 3-5 short paragraphs (3-4 sentences each).\n\n"
             "Structure:\n"
-            "• Opening paragraph: Describe the overall scope and focus of the collection, including document types and date ranges where apparent.\n"
-            "• Middle paragraphs (1-3): Briefly describe each major document or topic cluster. "
+            "\u2022 Opening paragraph: Describe the overall scope and focus of the collection, "
+            "including document types and date ranges where apparent.\n"
+            "\u2022 Middle paragraphs (1-3): Briefly describe each major document or topic cluster. "
             "One paragraph per document or theme.\n"
-            "• Closing paragraph: Note common themes or connections between documents, and flag any notable gaps in coverage.\n"
-            "\n"
+            "\u2022 Closing paragraph: Note common themes or connections between documents, "
+            "and flag any notable gaps in coverage.\n\n"
             "Do NOT use bullet points. Write in prose."
         ),
         "tone": "Informative and concise.",
@@ -301,7 +283,9 @@ INTENT_INSTRUCTIONS_REGULAR: dict[Intent, dict[str, str]] = {
             "Present the steps in the order they appear in or are implied by the text. "
             "Focus on the process itself — not on conceptual background or theory. "
             "This intent is distinct from EXPLAIN: do not simply simplify vocabulary; "
-            "focus on sequence and actionable steps."
+            "focus on sequence and actionable steps. "
+            "If the context does not describe a clear process or procedure, state this directly "
+            "rather than forcing a step-by-step structure."
         ),
         "format": (
             "Present the procedure as a numbered step-by-step list. "
@@ -344,12 +328,15 @@ INTENT_INSTRUCTIONS_REGULAR: dict[Intent, dict[str, str]] = {
 }
 
 # ---------------------------------------------------------------------------
-# Deep Research mode (currently mirrors regular)
+# Deep Research mode
+# Placeholder: deep research instructions will diverge in a future iteration.
+# Currently identical to regular instructions.
 # ---------------------------------------------------------------------------
 
+# Per-intent shallow copy so that future mutations to individual intent configs
+# in this dict do not bleed back into INTENT_INSTRUCTIONS_REGULAR.
 INTENT_INSTRUCTIONS_DEEP_RESEARCH: dict[Intent, dict[str, str]] = {
-    intent: {k: v for k, v in cfg.items()}
-    for intent, cfg in INTENT_INSTRUCTIONS_REGULAR.items()
+    intent: dict(cfg) for intent, cfg in INTENT_INSTRUCTIONS_REGULAR.items()
 }
 
 # Backward-compatible alias
@@ -375,6 +362,10 @@ def _prepare_config(
 ) -> tuple[dict[str, str], str, str]:
     intent = intent or Intent.SUMMARIZE
     instructions = _get_intent_instructions(mode)
+    if intent not in instructions:
+        logger.warning(
+            "No prompt config for intent %s — falling back to SUMMARIZE", intent
+        )
     cfg = instructions.get(intent, instructions[Intent.SUMMARIZE]).copy()
     extra_block = (
         f"\nAdditional constraints: {extra_instructions.strip()}"
@@ -407,9 +398,12 @@ def build_messages(
     )
     system_block = _build_system_block(cfg, citation_block, extra_block)
 
-    # Context-sparsity warning: if context fills < 10% of retrieval budget
+    # Context-sparsity warning: if context fills < 10% of retrieval budget.
+    # Token estimate uses ×1.35 correction for subword tokenization — word-split
+    # underestimates actual token count by ~25-30% for English text.
+    # (Heuristic consistent with count_tokens() elsewhere in the codebase.)
     if retrieval_budget and retrieval_budget > 0 and context:
-        context_tokens = len(context.split())
+        context_tokens = int(len(context.split()) * 1.35)
         fill_ratio = context_tokens / retrieval_budget
         if fill_ratio < 0.10:
             sparsity_warning = (
@@ -419,18 +413,20 @@ def build_messages(
                 "If the context is insufficient to fully answer the question, clearly state "
                 "what cannot be determined."
             )
-            system_block = sparsity_warning + "\n\n" + system_block
+            # Append after the identity/rules block so the model's identity
+            # framing is always the first thing in the system message.
+            system_block = system_block + "\n\n" + sparsity_warning
 
     legend_block = f"\n\n{source_legend}" if citations_enabled and source_legend else ""
-    # Reminder injected right before "Answer:" — at the generation trigger point where
-    # model attention peaks — to combat first-run variability where citation rules
-    # buried in the system prompt are sometimes insufficiently weighted.
+    # Reminder injected at the end of the user message — at the generation trigger
+    # point where model attention peaks — to reinforce citation rules already stated
+    # in the system prompt.
     citation_reminder = (
         "\n\nIMPORTANT: You MUST include inline citation numbers [1], [2], etc. "
         "after every factual claim. Use the PASSAGE numbers from the context above."
         if citations_enabled else ""
     )
-    user_block = f"Context:\n{context}{legend_block}\n\nQuestion: {question}{citation_reminder}\n\nAnswer:"
+    user_block = f"Context:\n{context}{legend_block}\n\nQuestion: {question}{citation_reminder}"
     return [
         {"role": "system", "content": system_block},
         {"role": "user", "content": user_block}

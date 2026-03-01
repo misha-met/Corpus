@@ -609,7 +609,7 @@ class TestCollectionIntent:
             citations_enabled=False,
         )
         system = messages[0]["content"]
-        assert "never reference retrieval internals" in system.lower()
+        assert "reference retrieval internals" in system.lower()
 
     def test_collection_citations_auto_disabled(self):
         """COLLECTION intent uses summaries, so citation rules should NOT be injected."""
@@ -1040,15 +1040,16 @@ class TestNewIntentEnum:
 class TestGenerationImprovements:
     """Verify the spec-mandated improvements to existing intent instructions."""
 
-    def test_summarize_wider_bullet_range(self):
+    def test_summarize_bullet_range(self):
         from src.generation import INTENT_INSTRUCTIONS_REGULAR
         cfg = INTENT_INSTRUCTIONS_REGULAR[Intent.SUMMARIZE]
-        # Should have "15-35" not "15-25"
-        assert "15-35" in cfg["format"], (
-            "SUMMARIZE bullet range should be widened to 15-35 words"
+        # Sentence-count constraints replaced word-count constraints (plan phase 2A).
+        # SUMMARIZE bullets should now specify "1-2" sentences, not a word range.
+        assert "1-2" in cfg["format"], (
+            "SUMMARIZE format should use sentence-count constraints (1-2 sentences per bullet)"
         )
-        assert "15-25" not in cfg["format"], (
-            "Old 15-25 word range should be removed from SUMMARIZE"
+        assert "15-35" not in cfg["format"], (
+            "Word-count constraint '15-35 words' should be replaced with sentence count"
         )
 
     def test_summarize_has_no_opening_sentence_requirement(self):

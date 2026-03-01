@@ -170,6 +170,10 @@ def run() -> None:
             "critique",
             "factual",
             "collection",
+            "extract",
+            "timeline",
+            "how_to",
+            "quote_evidence",
         ],
         default=None,
         help="Override automatic intent classification",
@@ -219,6 +223,16 @@ def run() -> None:
         action="store_true",
         help="Enable detailed latency profiling",
     )
+    query_parser.add_argument(
+        "--dump-prompt",
+        action="store_true",
+        default=False,
+        help=(
+            "Print the exact prompt (system + user messages) that would be sent to the LLM, "
+            "then exit without running generation. Useful for benchmarking other models "
+            "against the same retrieval context."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -226,6 +240,8 @@ def run() -> None:
         parser.error("Conflicting flags: use only one of --cite or --no-cite.")
     if getattr(args, "fts_rebuild_batch_size", 0) < 0:
         parser.error("--fts-rebuild-batch-size must be >= 0.")
+    if getattr(args, "dump_prompt", False) and getattr(args, "no_generate", False):
+        parser.error("Conflicting flags: --dump-prompt and --no-generate are mutually exclusive.")
 
     verbose = getattr(args, "verbose", False)
 
@@ -304,7 +320,7 @@ def run() -> None:
         intent_override=args.intent,
         citations_enabled=citations,
         no_generate=args.no_generate,
-
+        dump_prompt=args.dump_prompt,
     )
 
     # -- display retrieval metrics -----------------------------------------
@@ -314,6 +330,31 @@ def run() -> None:
         print(f"[Retrieval: {format_metrics_summary(result.retrieval_metrics)}]")
     if getattr(args, "latency", False) and result.latency_report:
         print(result.latency_report)
+
+    # -- dump-prompt output ------------------------------------------------
+    if args.dump_prompt:
+        if result.prompt_messages is None:
+            print("[ERROR] No prompt was generated (pipeline may have exited early).")
+            return
+        cite_mode = "Academic" if result.citations_enabled else "Casual"
+        print(
+            f"\n[Intent: {result.intent.intent.value} | "
+            f"Confidence: {result.intent.confidence:.2f} | "
+            f"Method: {result.intent.method} | "
+            f"Citations: {cite_mode}]"
+        )
+        if result.source_ids:
+            print(f"[Sources: {', '.join(result.source_ids)}]\n")
+        sep = "=" * 72
+        for i, msg in enumerate(result.prompt_messages):
+            role = msg["role"].upper()
+            content = msg["content"]
+            print(f"{sep}")
+            print(f"[MESSAGE {i + 1} — {role}]")
+            print(sep)
+            print(content)
+        print(sep)
+        return
 
     # -- no-generate output ------------------------------------------------
     if args.no_generate:

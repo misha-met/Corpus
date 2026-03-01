@@ -1,5 +1,9 @@
 .DS_Store
 
+# Node (prevent accidentally installing packages in root)
+node_modules/
+package-lock.json
+
 # ignore the temporary example project used for new-particle-background work
 /new background/
 
