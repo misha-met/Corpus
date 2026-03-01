@@ -556,16 +556,16 @@ export function FreeformChatPanel({
               className="fade-in slide-in-from-bottom-1 relative mx-auto w-full max-w-(--thread-max-width) animate-in py-4 duration-150"
               data-role="assistant"
             >
-              <div
-                className="wrap-break-word px-4 py-3 text-foreground text-base leading-[1.65] bg-white/10 backdrop-blur-lg"
-                style={{ borderRadius: "18px 18px 18px 4px" }}
-              >
-                {isPlaceholder ? (
-                  <span className="text-muted-foreground animate-pulse">Thinking…</span>
-                ) : (
+              {isPlaceholder ? (
+                <span className="px-2 text-muted-foreground animate-pulse">Thinking…</span>
+              ) : (
+                <div
+                  className="wrap-break-word w-fit max-w-full px-4 py-3 text-foreground text-base leading-[1.65] bg-white/10 backdrop-blur-lg"
+                  style={{ borderRadius: "18px 18px 18px 4px" }}
+                >
                   <ChatMarkdown content={message.content} citations={[]} />
-                )}
-              </div>
+                </div>
+              )}
 
               {!isPlaceholder && message.content && (
                 <div className="mt-1 ml-2 flex">
