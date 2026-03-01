@@ -604,7 +604,7 @@ export function FreeformChatPanel({
 
           {/* Composer pill — identical to RAG Thread */}
           <form onSubmit={onSubmit}>
-            <div className="flex w-full items-center gap-2 rounded-full ring-1 ring-white/10 ring-inset bg-white/8 backdrop-blur-xl px-4 py-1 outline-none transition-shadow focus-within:ring-white/20">
+            <div className="flex w-full items-end gap-2 rounded-3xl ring-1 ring-white/10 ring-inset bg-white/8 backdrop-blur-xl px-4 py-1 outline-none transition-shadow focus-within:ring-white/20">
               {/* Textarea */}
               <textarea
                 ref={textareaRef}
@@ -619,7 +619,7 @@ export function FreeformChatPanel({
                 placeholder="What do you want to know?"
                 disabled={isStreaming}
                 rows={1}
-                className="max-h-32 flex-1 resize-none bg-transparent py-2 text-sm text-white outline-none placeholder:text-[#555555] focus-visible:ring-0 disabled:opacity-50 overflow-y-hidden"
+                className="max-h-40 flex-1 resize-none bg-transparent py-2 text-sm text-white outline-none placeholder:text-[#555555] focus-visible:ring-0 disabled:opacity-50 overflow-y-auto"
               />
 
               {/* Model selector */}

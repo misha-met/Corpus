@@ -257,15 +257,15 @@ export default function Page() {
       <Leva hidden />
 
         {/* ── Top bar: mode tabs + history button ─────────────────────── */}
-        <header className="relative flex items-center gap-2 px-0 py-2 justify-between w-full bg-transparent border-none shrink-0">
+        <header className="relative z-30 flex items-center gap-2 px-4 py-2 justify-between w-full bg-background/60 backdrop-blur-md border-b border-[#1e1e1e] shrink-0">
           <div className="flex items-center gap-2">
             {/* Mode tabs */}
             <button
               onClick={() => dispatch({ type: "SET_CHAT_MODE", mode: "rag" })}
-              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
                 chatMode === "rag"
-                  ? "bg-[#242424] text-gray-100 border border-[#333]"
-                  : "text-gray-500 hover:text-gray-300 hover:bg-[#1e1e1e]"
+                  ? "bg-white/15 text-white border border-white/25 shadow-sm"
+                  : "text-white/40 hover:text-white/70 hover:bg-white/8"
               }`}
             >
               {/* Document icon */}
@@ -277,10 +277,10 @@ export default function Page() {
 
             <button
               onClick={() => dispatch({ type: "SET_CHAT_MODE", mode: "freeform" })}
-              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
                 chatMode === "freeform"
-                  ? "bg-[#242424] text-gray-100 border border-[#333]"
-                  : "text-gray-500 hover:text-gray-300 hover:bg-[#1e1e1e]"
+                  ? "bg-white/15 text-white border border-white/25 shadow-sm"
+                  : "text-white/40 hover:text-white/70 hover:bg-white/8"
               }`}
             >
               {/* Chat bubble icon */}

@@ -282,13 +282,13 @@ const Composer: FC = () => {
       data-empty={isEmpty}
       data-running={isRunning}
     >
-      {/* Single-row pill */}
-      <div className="aui-composer-attachment-dropzone flex w-full items-center gap-2 rounded-full ring-1 ring-white/10 ring-inset bg-white/8 backdrop-blur-xl px-4 py-1 outline-none transition-shadow focus-within:ring-white/20">
+      {/* Input pill — grows vertically for long text */}
+      <div className="aui-composer-attachment-dropzone flex w-full items-end gap-2 rounded-3xl ring-1 ring-white/10 ring-inset bg-white/8 backdrop-blur-xl px-4 py-1 outline-none transition-shadow focus-within:ring-white/20">
         {/* Text input — grows to fill space */}
         <ComposerPrimitive.Input
           ref={inputRef}
           placeholder="What do you want to know?"
-          className="aui-composer-input max-h-32 flex-1 resize-none overflow-hidden bg-transparent py-2 text-sm text-white outline-none placeholder:text-[#555555] focus-visible:ring-0"
+          className="aui-composer-input max-h-40 flex-1 resize-none overflow-y-auto bg-transparent py-2 text-sm text-white outline-none placeholder:text-[#555555] focus-visible:ring-0"
           rows={1}
           autoFocus
           aria-label="Message input"
