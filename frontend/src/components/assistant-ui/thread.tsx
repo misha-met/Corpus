@@ -143,7 +143,7 @@ const ThreadSuggestionItem: FC = () => {
 
 
 const MODES = [
-  { id: "regular", name: "Regular", description: "Qwen3-30B-A3B" },
+  { id: "regular", name: "Regular", description: "Qwen3.5-35B-A3B" },
   { id: "deep-research", name: "Deep Research", description: "Qwen3-Next-80B-A3B" },
 ];
 
@@ -282,8 +282,16 @@ const Composer: FC = () => {
       data-empty={isEmpty}
       data-running={isRunning}
     >
-      {/* Input pill — grows vertically for long text */}
-      <div className="aui-composer-attachment-dropzone flex w-full items-end gap-2 rounded-3xl ring-1 ring-white/10 ring-inset bg-white/8 backdrop-blur-xl px-4 py-1 outline-none transition-shadow focus-within:ring-white/20">
+      {/* Input pill */}
+      <div
+        className="aui-composer-attachment-dropzone flex w-full items-end gap-2 rounded-3xl px-4 py-1 outline-none transition-shadow"
+        style={{
+          background: "rgba(255,255,255,0.04)",
+          border: "1px solid rgba(255,255,255,0.12)",
+          boxShadow: "0 2px 8px rgba(0,0,0,0.45), 0 1px 2px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.04)",
+          backdropFilter: "blur(12px)",
+        }}
+      >
         {/* Text input — grows to fill space */}
         <ComposerPrimitive.Input
           ref={inputRef}
@@ -308,14 +316,12 @@ const Composer: FC = () => {
           defaultValue="regular"
           variant="ghost"
           size="sm"
-          contentClassName="border-[#2e2e2e] bg-[#1a1a1a]"
         />
 
         {/* Intent selector — always visible, respects Auto default */}
         <IntentSelector
           variant="ghost"
           size="sm"
-          contentClassName="border-[#2e2e2e] bg-[#1a1a1a]"
         />
 
         {/* Animated 3-state button */}
@@ -612,9 +618,17 @@ const UserActionBar: FC = () => {
 const EditComposer: FC = () => {
   return (
     <MessagePrimitive.Root className="aui-edit-composer-wrapper mx-auto flex w-full max-w-(--thread-max-width) flex-col px-2 py-3">
-      <ComposerPrimitive.Root className="aui-edit-composer-root ml-auto flex w-full max-w-[85%] flex-col rounded-2xl bg-muted">
+      <ComposerPrimitive.Root
+        className="aui-edit-composer-root ml-auto flex w-full max-w-[85%] flex-col rounded-2xl"
+        style={{
+          background: "rgba(255,255,255,0.04)",
+          border: "1px solid rgba(255,255,255,0.12)",
+          boxShadow: "0 2px 8px rgba(0,0,0,0.45), 0 1px 2px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.04)",
+          backdropFilter: "blur(12px)",
+        }}
+      >
         <ComposerPrimitive.Input
-          className="aui-edit-composer-input min-h-14 w-full resize-none bg-transparent p-4 text-foreground text-sm outline-none"
+          className="aui-edit-composer-input min-h-14 w-full resize-none bg-transparent p-4 text-white text-sm outline-none placeholder:text-[#555555]"
           autoFocus
         />
         <div className="aui-edit-composer-footer mx-3 mb-3 flex items-center gap-2 self-end">

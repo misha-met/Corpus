@@ -2,15 +2,19 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChatMarkdown } from "@/components/chat-markdown";
-import * as SelectPrimitive from "@radix-ui/react-select";
 import {
   ArrowUpIcon,
   CheckIcon,
-  ChevronDownIcon,
   CopyIcon,
   MicIcon,
   SquareIcon,
 } from "lucide-react";
+import {
+  PickerRoot,
+  PickerTrigger,
+  PickerContent,
+  PickerItem,
+} from "@/components/ui/picker";
 import { useSpeechToText } from "@/hooks/useSpeechToText";
 import { cn } from "@/lib/utils";
 import { TypewriterText } from "@/components/ui/typewriter-text";
@@ -196,6 +200,7 @@ export function FreeformChatPanel({
   const [errorText, setErrorText] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState("regular");
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -535,8 +540,8 @@ export function FreeformChatPanel({
               >
                 <div className="relative col-start-2 min-w-0">
                   <div
-                    className="wrap-break-word px-4 py-3 text-white text-sm"
-                    style={{ background: "#2a2a2a", borderRadius: "18px 18px 4px 18px" }}
+                    className="wrap-break-word px-4 py-3 text-white text-sm bg-white/10 backdrop-blur-lg"
+                    style={{ borderRadius: "18px 18px 4px 18px" }}
                   >
                     <p className="whitespace-pre-wrap">{message.content}</p>
                   </div>
@@ -551,7 +556,10 @@ export function FreeformChatPanel({
               className="fade-in slide-in-from-bottom-1 relative mx-auto w-full max-w-(--thread-max-width) animate-in py-4 duration-150"
               data-role="assistant"
             >
-              <div className="wrap-break-word px-2 text-foreground text-base leading-[1.65]">
+              <div
+                className="wrap-break-word px-4 py-3 text-foreground text-base leading-[1.65] bg-white/10 backdrop-blur-lg"
+                style={{ borderRadius: "18px 18px 18px 4px" }}
+              >
                 {isPlaceholder ? (
                   <span className="text-muted-foreground animate-pulse">Thinking…</span>
                 ) : (
@@ -604,7 +612,15 @@ export function FreeformChatPanel({
 
           {/* Composer pill — identical to RAG Thread */}
           <form onSubmit={onSubmit}>
-            <div className="flex w-full items-end gap-2 rounded-3xl ring-1 ring-white/10 ring-inset bg-white/8 backdrop-blur-xl px-4 py-1 outline-none transition-shadow focus-within:ring-white/20">
+            <div
+              className="flex w-full items-end gap-2 rounded-3xl px-4 py-1 outline-none transition-shadow"
+              style={{
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid rgba(255,255,255,0.12)",
+                boxShadow: "0 2px 8px rgba(0,0,0,0.45), 0 1px 2px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.04)",
+                backdropFilter: "blur(12px)",
+              }}
+            >
               {/* Textarea */}
               <textarea
                 ref={textareaRef}
@@ -623,43 +639,30 @@ export function FreeformChatPanel({
               />
 
               {/* Model selector */}
-              <SelectPrimitive.Root value={selectedModel} onValueChange={setSelectedModel}>
-                <SelectPrimitive.Trigger className="flex items-center gap-1 h-8 px-2 text-xs font-medium text-muted-foreground bg-transparent hover:bg-accent hover:text-accent-foreground rounded-md transition-colors outline-none whitespace-nowrap shrink-0 border-0">
-                  <SelectPrimitive.Value />
-                  <SelectPrimitive.Icon asChild>
-                    <ChevronDownIcon className="h-3 w-3 opacity-50" />
-                  </SelectPrimitive.Icon>
-                </SelectPrimitive.Trigger>
-                <SelectPrimitive.Portal>
-                  <SelectPrimitive.Content
-                    className="z-50 min-w-[180px] overflow-hidden rounded-md border border-[#2e2e2e] bg-[#1a1a1a] text-foreground shadow-md"
-                    position="popper"
-                    sideOffset={8}
-                    align="end"
-                  >
-                    <SelectPrimitive.Viewport className="p-1">
-                      {MODELS.map((m) => (
-                        <SelectPrimitive.Item
-                          key={m.id}
-                          value={m.id}
-                          textValue={m.name}
-                          className="relative flex w-full cursor-default select-none items-center gap-2 rounded-lg py-2 pr-9 pl-3 text-sm outline-none focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50"
-                        >
-                          <span className="absolute right-3 flex size-4 items-center justify-center">
-                            <SelectPrimitive.ItemIndicator>
-                              <CheckIcon className="size-4" />
-                            </SelectPrimitive.ItemIndicator>
-                          </span>
-                          <SelectPrimitive.ItemText>
-                            <span className="font-medium">{m.name}</span>
-                          </SelectPrimitive.ItemText>
-                          <span className="text-xs text-muted-foreground">{m.description}</span>
-                        </SelectPrimitive.Item>
-                      ))}
-                    </SelectPrimitive.Viewport>
-                  </SelectPrimitive.Content>
-                </SelectPrimitive.Portal>
-              </SelectPrimitive.Root>
+              <PickerRoot open={pickerOpen} onOpenChange={setPickerOpen}>
+                <PickerTrigger
+                  variant="ghost"
+                  size="sm"
+                  className="text-muted-foreground"
+                  aria-label="Select model"
+                >
+                  <span className="font-medium">
+                    {MODELS.find((m) => m.id === selectedModel)?.name ?? selectedModel}
+                  </span>
+                </PickerTrigger>
+                <PickerContent className="min-w-44" align="end">
+                  {MODELS.map((m) => (
+                    <PickerItem
+                      key={m.id}
+                      selected={m.id === selectedModel}
+                      description={m.description}
+                      onClick={() => { setSelectedModel(m.id); setPickerOpen(false); }}
+                    >
+                      {m.name}
+                    </PickerItem>
+                  ))}
+                </PickerContent>
+              </PickerRoot>
 
               {/* White circle button: mic / send / stop */}
               <div className="relative shrink-0 size-9 rounded-full bg-white">

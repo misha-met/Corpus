@@ -89,9 +89,16 @@ export function HistoryPanel({ open, onClose, onRestore }: HistoryPanelProps) {
   if (!open) return null;
 
   return (
-    <aside className="flex flex-col w-72 shrink-0 border-l border-[#1e1e1e] bg-background/70 backdrop-blur-md overflow-hidden">
+    <aside
+      className="flex flex-col w-72 shrink-0 overflow-hidden backdrop-blur-xl"
+      style={{
+        background: "rgba(8,8,8,0.88)",
+        borderLeft: "1px solid rgba(255,255,255,0.10)",
+        boxShadow: "-4px 0 24px rgba(0,0,0,0.5), inset 1px 0 0 rgba(255,255,255,0.04)",
+      }}
+    >
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-[#1e1e1e] shrink-0">
+        <div className="flex items-center justify-between px-4 py-3 shrink-0" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
           <h2 className="text-sm font-semibold text-foreground tracking-wide">
             Chat History
           </h2>
@@ -107,7 +114,7 @@ export function HistoryPanel({ open, onClose, onRestore }: HistoryPanelProps) {
         </div>
 
         {/* Search */}
-        <div className="px-4 py-2 border-b border-[#1e1e1e] shrink-0">
+        <div className="px-4 py-2 shrink-0" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
           <div className="relative">
             <svg
               className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500 pointer-events-none"
@@ -122,7 +129,12 @@ export function HistoryPanel({ open, onClose, onRestore }: HistoryPanelProps) {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search conversations..."
-              className="w-full bg-[#1a1a1a] border border-[#2e2e2e] rounded-lg pl-8 pr-3 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-[#444444]"
+              className="w-full rounded-lg pl-8 pr-3 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none transition-colors"
+              style={{
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid rgba(255,255,255,0.10)",
+                boxShadow: "0 1px 4px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.03)",
+              }}
             />
           </div>
         </div>
@@ -155,7 +167,10 @@ export function HistoryPanel({ open, onClose, onRestore }: HistoryPanelProps) {
                   >
                     {/* Mode badge */}
                     <div className="flex items-center gap-2 mb-1">
-                      <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-[#252525] text-gray-500 border border-[#333]">
+                      <span
+              className="text-[9px] font-medium px-1.5 py-0.5 rounded-full text-gray-400"
+              style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.10)" }}
+            >
                         {session.mode === "freeform" ? "Non-RAG" : "RAG"}
                       </span>
                       <span className="text-[10px] text-muted-foreground">
@@ -195,8 +210,8 @@ export function HistoryPanel({ open, onClose, onRestore }: HistoryPanelProps) {
 
         {/* Footer */}
         {sessions.length > 0 && (
-          <div className="px-4 py-2 border-t border-[#1e1e1e] shrink-0">
-            <p className="text-[10px] text-muted-foreground text-center">
+          <div className="px-4 py-2 shrink-0" style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+            <p className="text-[10px] text-muted-foreground text-center" style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
               {sessions.length} saved conversation{sessions.length !== 1 ? "s" : ""}
             </p>
           </div>

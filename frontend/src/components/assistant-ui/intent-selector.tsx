@@ -1,17 +1,17 @@
 "use client";
 
-import { memo, useEffect, type ComponentPropsWithoutRef } from "react";
-import * as SelectPrimitive from "@radix-ui/react-select";
+import { memo, useEffect, useState } from "react";
 import { type VariantProps } from "class-variance-authority";
-import { CheckIcon } from "lucide-react";
 import { useAssistantApi } from "@assistant-ui/react";
 import { cn } from "@/lib/utils";
 import {
-  SelectRoot,
-  SelectTrigger,
-  SelectContent,
-  selectTriggerVariants,
-} from "@/components/ui/select";
+  PickerRoot,
+  PickerTrigger,
+  PickerContent,
+  PickerItem,
+  PickerSeparator,
+  pickerTriggerVariants,
+} from "@/components/ui/picker";
 import { useAppDispatch, useAppState } from "@/context/app-context";
 
 // ---------------------------------------------------------------------------
@@ -88,81 +88,40 @@ export const INTENT_OPTIONS: IntentOption[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// IntentSelectorItem
-// ---------------------------------------------------------------------------
-
-function IntentSelectorItem({ option }: { option: IntentOption }) {
-  return (
-    <SelectPrimitive.Item
-      value={option.id}
-      textValue={option.name}
-      className={cn(
-        "relative flex w-full cursor-default select-none items-start gap-2 rounded-lg py-2 pr-9 pl-3 text-sm outline-none",
-        "focus:bg-accent focus:text-accent-foreground",
-        "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
-      )}
-    >
-      <span className="absolute right-3 top-2.5 flex size-4 items-center justify-center">
-        <SelectPrimitive.ItemIndicator>
-          <CheckIcon className="size-4" />
-        </SelectPrimitive.ItemIndicator>
-      </span>
-      <SelectPrimitive.ItemText>
-        <span className="flex flex-col gap-0.5">
-          <span className="font-medium leading-tight">{option.name}</span>
-          <span className="text-muted-foreground text-xs leading-tight max-w-48">
-            {option.description}
-          </span>
-        </span>
-      </SelectPrimitive.ItemText>
-    </SelectPrimitive.Item>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // IntentSelector
 // ---------------------------------------------------------------------------
 
-export type IntentSelectorProps = VariantProps<typeof selectTriggerVariants> & {
+export type IntentSelectorProps = VariantProps<typeof pickerTriggerVariants> & {
   contentClassName?: string;
-} & Omit<ComponentPropsWithoutRef<typeof SelectRoot>, "value" | "onValueChange">;
+};
 
 const IntentSelectorImpl = ({
-  variant,
-  size,
+  variant = "ghost",
+  size = "sm",
   contentClassName,
-  ...forwardedProps
 }: IntentSelectorProps) => {
   const dispatch = useAppDispatch();
   const { intentOverride } = useAppState();
   const api = useAssistantApi();
+  const [open, setOpen] = useState(false);
 
-  // Register intent with the assistant runtime so it's read per-request
-  // (same pattern as ModelSelector — avoids stale closure in body.data).
-  // Cast needed because LanguageModelConfig doesn't expose custom fields;
-  // the backend reads model_extra.config.intentOverride from the raw JSON.
   useEffect(() => {
-    // Cast to `any` because LanguageModelConfig doesn't expose custom fields;
-    // the backend reads model_extra.config.intentOverride from the raw JSON.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const config = { config: { intentOverride } as any };
     return api.modelContext().register({ getModelContext: () => config });
   }, [api, intentOverride]);
 
-  const handleValueChange = (value: string) => {
-    dispatch({ type: "SET_INTENT_OVERRIDE", intentOverride: value });
+  const handleSelect = (id: string) => {
+    dispatch({ type: "SET_INTENT_OVERRIDE", intentOverride: id });
+    setOpen(false);
   };
 
   const currentOption = INTENT_OPTIONS.find((o) => o.id === intentOverride) ?? INTENT_OPTIONS[0];
   const isAuto = intentOverride === "auto";
 
   return (
-    <SelectRoot
-      value={intentOverride}
-      onValueChange={handleValueChange}
-      {...forwardedProps}
-    >
-      <SelectTrigger
+    <PickerRoot open={open} onOpenChange={setOpen}>
+      <PickerTrigger
         variant={variant}
         size={size}
         className={cn(
@@ -179,19 +138,33 @@ const IntentSelectorImpl = ({
             <span className="font-medium">{currentOption.name}</span>
           </span>
         )}
-      </SelectTrigger>
+      </PickerTrigger>
 
-      <SelectContent
-        className={cn("min-w-[220px] max-h-64 overflow-y-auto", contentClassName)}
+      <PickerContent
+        className={cn("w-64 max-h-72 overflow-y-auto", contentClassName)}
+        align="end"
       >
-        {/* Auto option at the top, separated */}
-        <IntentSelectorItem option={INTENT_OPTIONS[0]} />
-        <div className="my-1 border-t border-border/50" />
+        {/* Auto — always first */}
+        <PickerItem
+          selected={intentOverride === INTENT_OPTIONS[0].id}
+          description={INTENT_OPTIONS[0].description}
+          onClick={() => handleSelect(INTENT_OPTIONS[0].id)}
+        >
+          {INTENT_OPTIONS[0].name}
+        </PickerItem>
+        <PickerSeparator />
         {INTENT_OPTIONS.slice(1).map((option) => (
-          <IntentSelectorItem key={option.id} option={option} />
+          <PickerItem
+            key={option.id}
+            selected={intentOverride === option.id}
+            description={option.description}
+            onClick={() => handleSelect(option.id)}
+          >
+            {option.name}
+          </PickerItem>
         ))}
-      </SelectContent>
-    </SelectRoot>
+      </PickerContent>
+    </PickerRoot>
   );
 };
 

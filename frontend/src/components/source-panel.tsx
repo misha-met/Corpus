@@ -288,7 +288,14 @@ export function SourcePanel({
       <div className="px-4 pt-3 pb-2">
         <button
           onClick={() => setShowIngestModal(true)}
-          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-[#1e1e1e] hover:bg-[#252525] border border-[#2a2a2a] hover:border-[#333333] rounded-xl text-sm text-white font-medium transition-colors"
+          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm text-white/80 hover:text-white font-medium transition-all"
+          style={{
+            background: "rgba(255,255,255,0.04)",
+            border: "1px solid rgba(255,255,255,0.10)",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.04)",
+          }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.07)"; }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.04)"; }}
         >
           <svg
             className="w-4 h-4"
@@ -477,7 +484,14 @@ export function SourcePanel({
 
                 {isActive && (
                   <div className="mt-3 pl-11 pr-1 space-y-2">
-                    <div className="rounded-xl border border-[#2a2a2a] bg-[#141414] px-3 py-2.5 max-h-40 overflow-y-auto text-xs text-muted-foreground prose prose-invert prose-xs max-w-none [&_p]:leading-relaxed [&_p]:my-1 [&_li]:my-0 [&_ul]:my-1">
+                    <div
+                      className="rounded-xl px-3 py-2.5 max-h-40 overflow-y-auto text-xs text-muted-foreground prose prose-invert prose-xs max-w-none [&_p]:leading-relaxed [&_p]:my-1 [&_li]:my-0 [&_ul]:my-1"
+                      style={{
+                        background: "rgba(255,255,255,0.03)",
+                        border: "1px solid rgba(255,255,255,0.08)",
+                        boxShadow: "inset 0 1px 4px rgba(0,0,0,0.4)",
+                      }}
+                    >
                       {source.ingestState === "queued" || source.ingestState === "ingesting"
                         ? <p>{source.ingestState === "queued" ? "In Ingest Queue" : "Ingesting..."}</p>
                         : <MarkdownRenderer content={source.summary?.trim() || "No summary available for this source."} />}
@@ -485,7 +499,11 @@ export function SourcePanel({
                     {!isPending && (
                       <button
                         onClick={(e) => handleViewFullText(source.source_id, e)}
-                        className="px-3 py-1.5 text-xs rounded-lg bg-[#1e1e1e] hover:bg-[#252525] border border-[#2a2a2a] hover:border-[#333333] text-[#d0d0d0] transition-colors"
+                        className="px-3 py-1.5 text-xs rounded-lg text-[#d0d0d0] transition-all"
+                        style={{
+                          background: "rgba(255,255,255,0.04)",
+                          border: "1px solid rgba(255,255,255,0.10)",
+                        }}
                       >
                         View full text
                       </button>

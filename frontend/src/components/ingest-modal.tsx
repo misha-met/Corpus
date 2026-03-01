@@ -139,11 +139,16 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
       <div
         ref={modalRef}
         tabIndex={-1}
-        className="bg-[var(--card)] border border-[var(--border)] rounded-2xl shadow-2xl w-full max-w-md mx-4 outline-none"
+        className="rounded-2xl w-full max-w-md mx-4 outline-none backdrop-blur-xl"
+        style={{
+          background: "rgba(10,10,10,0.92)",
+          border: "1px solid rgba(255,255,255,0.10)",
+          boxShadow: "0 24px 64px rgba(0,0,0,0.8), 0 4px 16px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.06)",
+        }}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--border)]">
+        <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
           <h2 className="text-sm font-semibold text-[var(--foreground)]">
             Add Source Document
           </h2>
@@ -170,7 +175,7 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
                 ? "border-white/50 bg-white/8"
                 : files.length > 0
                 ? "border-white/25 bg-white/4"
-                : "border-[var(--border)] hover:border-[#3a3a3a] bg-[var(--secondary)]"
+                : "hover:border-white/20"
             }`}
           >
             <input
@@ -234,7 +239,8 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
                   })
                 }
                 placeholder="Auto-generated from filename"
-                className="w-full px-3 py-2 bg-[var(--secondary)] border border-[var(--border)] rounded-lg text-sm text-[var(--foreground)] placeholder-[var(--muted-foreground)] focus:outline-none focus:ring-1 focus:ring-white/20 focus:border-transparent transition-colors"
+                className="w-full px-3 py-2 rounded-lg text-sm text-[var(--foreground)] placeholder-[var(--muted-foreground)] focus:outline-none transition-colors"
+                style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }}
               />
               <p className="mt-1 text-[11px] text-[var(--muted-foreground)]/60">
                 Unique identifier. Letters, numbers, hyphens, underscores.
@@ -259,7 +265,8 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
                           return next;
                         })
                       }
-                      className="w-full px-3 py-1.5 bg-[var(--secondary)] border border-[var(--border)] rounded-lg text-sm text-[var(--foreground)] placeholder-[var(--muted-foreground)] focus:outline-none focus:ring-1 focus:ring-white/20 focus:border-transparent"
+                      className="w-full px-3 py-1.5 rounded-lg text-sm text-[var(--foreground)] placeholder-[var(--muted-foreground)] focus:outline-none"
+                      style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }}
                     />
                   </div>
                 ))}
@@ -288,7 +295,10 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
               {showCitationRefs && (
                 <div className="space-y-2 pl-1">
                   {/* Format hint */}
-                  <div className="px-3 py-2.5 bg-[var(--secondary)] border border-[var(--border)] rounded-lg text-[11px] text-[var(--muted-foreground)] leading-relaxed space-y-1">
+                  <div
+                    className="px-3 py-2.5 rounded-lg text-[11px] text-[var(--muted-foreground)] leading-relaxed space-y-1"
+                    style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)" }}
+                  >
                     <p className="font-semibold text-[var(--foreground)]">Harvard author-date format</p>
                     <p>Enter the full reference as you want it to appear in citations:</p>
                     <code className="block mt-1 font-mono text-[10.5px] bg-black/30 px-2 py-1 rounded text-white/70">
@@ -313,7 +323,8 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
                         })
                       }
                       placeholder="e.g. Smith, J. et al. (2024) 'Climate Change Review'"
-                      className="w-full px-3 py-2 bg-[var(--secondary)] border border-[var(--border)] rounded-lg text-sm text-[var(--foreground)] placeholder-[var(--muted-foreground)] focus:outline-none focus:ring-1 focus:ring-white/20 focus:border-transparent transition-colors"
+                      className="w-full px-3 py-2 rounded-lg text-sm text-[var(--foreground)] placeholder-[var(--muted-foreground)] focus:outline-none transition-colors"
+                      style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }}
                     />
                   ) : (
                     <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
@@ -333,7 +344,8 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
                               })
                             }
                             placeholder="e.g. Smith, J. (2024) 'Title'"
-                            className="w-full px-3 py-1.5 bg-[var(--secondary)] border border-[var(--border)] rounded-lg text-sm text-[var(--foreground)] placeholder-[var(--muted-foreground)] focus:outline-none focus:ring-1 focus:ring-white/20 focus:border-transparent"
+                            className="w-full px-3 py-1.5 rounded-lg text-sm text-[var(--foreground)] placeholder-[var(--muted-foreground)] focus:outline-none"
+                            style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }}
                           />
                         </div>
                       ))}
@@ -364,7 +376,7 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-[var(--border)]">
+        <div className="flex items-center justify-end gap-3 px-6 py-4" style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
           <button
             onClick={onClose}
             className="px-4 py-2 text-sm text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-white/5 rounded-lg transition-colors"
