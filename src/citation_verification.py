@@ -51,7 +51,6 @@ def _extract_claims(answer_text: str) -> dict[int, list[str]]:
     """
     claims: dict[int, list[str]] = {}
 
-    # Split into sentences using boundary pattern
     sentences = _SENTENCE_END.split(answer_text)
 
     for sentence in sentences:
@@ -59,10 +58,8 @@ def _extract_claims(answer_text: str) -> dict[int, list[str]]:
         if not sentence:
             continue
 
-        # Find all citation markers in this sentence
         for m in _CITATION_MARKER.finditer(sentence):
             cit_num = int(m.group(1))
-            # Strip all citation markers from the sentence for clean stems
             clean = _CITATION_MARKER.sub('', sentence).strip()
             if clean:
                 claims.setdefault(cit_num, []).append(clean)

@@ -13,7 +13,6 @@ from .storage import StorageEngine
 
 logger = logging.getLogger(__name__)
 
-# Maximum characters of parent text to feed into summary generation.
 _SUMMARY_CONTEXT_CHAR_LIMIT = 12_000
 
 

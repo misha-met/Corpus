@@ -330,7 +330,6 @@ def select_mode_config(*, manual_mode: Optional[str] = None) -> ModelConfig:
             f"Set RAG_MODE env var or use --mode flag."
         )
     
-    # Get RAM-aware configuration
     config = _get_mode_config(mode, ram_gb)
     
     logger.info(

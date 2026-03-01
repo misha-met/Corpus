@@ -152,7 +152,7 @@ class _PackResult:
 
 
 # ---------------------------------------------------------------------------
-# Output sanitisation helpers (moved from cli.py)
+# Output sanitisation helpers
 # ---------------------------------------------------------------------------
 
 _INSTRUCTION_PATTERNS = [
