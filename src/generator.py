@@ -673,7 +673,6 @@ class MlxGenerator:
                         yield {"type": "answer", "text": accumulated}
                         visible_count += len(accumulated)
                         accumulated = ""
-                    break
 
                     # Enforce visible token cap (approximate — character-based)
                     if visible_cap is not None and visible_count >= visible_cap * 4:
@@ -683,6 +682,8 @@ class MlxGenerator:
                         )
                         # Flush remainder as-is and stop
                         return
+
+                    break
 
         # Flush remainder
         if accumulated:

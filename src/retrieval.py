@@ -592,9 +592,10 @@ class RetrievalEngine:
                     )
 
         # Stage 6: Final dedup (removes any remaining duplicate children/parents
-        # after threshold expansion before committing to the output list)
+        # after threshold expansion before committing to the output list).
+        # Respects the same max_children_per_parent limit used in earlier dedup.
         final: list[dict[str, Any]] = []
-        seen_parents: set[str] = set()
+        parent_counts: dict[str, int] = {}
         seen_children: set[str] = set()
         for item in reranked:
             child_id = item.get("id")
@@ -607,9 +608,10 @@ class RetrievalEngine:
                 metadata = {}
             parent_id = metadata.get("parent_id")
             if isinstance(parent_id, str):
-                if parent_id in seen_parents:
+                count = parent_counts.get(parent_id, 0)
+                if count >= _max_children:
                     continue
-                seen_parents.add(parent_id)
+                parent_counts[parent_id] = count + 1
             final.append(item)
             if len(final) >= k_final:
                 break

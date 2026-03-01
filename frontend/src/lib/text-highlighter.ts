@@ -31,16 +31,10 @@ export function findBestMatch(
   const h = normalise(haystack);
   const n = normalise(needle);
 
-  console.log('[HIGHLIGHT DEBUG] haystack length:', h.length);
-  console.log('[HIGHLIGHT DEBUG] needle length:', n.length);
-  console.log('[HIGHLIGHT DEBUG] needle first 100:', n.slice(0, 100));
-  console.log('[HIGHLIGHT DEBUG] needle last 100:', n.slice(-100));
-
   if (!n || !h) return null;
 
   // Exact full match
   const exactIdx = h.indexOf(n);
-  console.log('[HIGHLIGHT DEBUG] exact match result:', exactIdx);
   if (exactIdx !== -1) {
     return { start: exactIdx, length: n.length };
   }
@@ -52,7 +46,6 @@ export function findBestMatch(
     const sub = n.slice(0, len);
     const idx = h.indexOf(sub);
     if (idx !== -1) {
-      console.log('[HIGHLIGHT DEBUG] prefix match at len:', len, 'of', n.length, 'idx:', idx);
       let end = idx + sub.length;
       while (end < h.length && h[end] !== " " && (end - (idx + sub.length)) < 20) {
         end++;
@@ -66,7 +59,6 @@ export function findBestMatch(
     const sub = n.slice(n.length - len);
     const idx = h.indexOf(sub);
     if (idx !== -1) {
-      console.log('[HIGHLIGHT DEBUG] suffix match at len:', len, 'of', n.length, 'idx:', idx);
       let end = idx + sub.length;
       while (end < h.length && h[end] !== " " && (end - (idx + sub.length)) < 20) {
         end++;

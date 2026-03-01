@@ -39,9 +39,6 @@ function PlainTextRenderer({
     const needleSource = highlight?.chunk_text ? "chunk_text" : "highlight_text";
     if (!searchText) return;
 
-    console.log('[HIGHLIGHT DEBUG] needle passed to highlighter, length:', searchText.length);
-    console.log('[HIGHLIGHT DEBUG] needle source:', needleSource);
-
     const timer = setTimeout(() => {
       // Try full chunk_text first, then fall back to highlight_text.
       let mark = findAndHighlight(el, searchText);
