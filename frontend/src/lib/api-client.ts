@@ -241,3 +241,89 @@ class SourceApiClient {
 }
 
 export const sourceApi = new SourceApiClient();
+
+// ---------------------------------------------------------------------------
+// QueryStreaming — legacy SSE-based RAG query streaming
+// ---------------------------------------------------------------------------
+
+export interface StreamEvent {
+  event: string;
+  data: Record<string, unknown>;
+}
+
+export interface QueryStreamOptions {
+  sourceIds?: string[];
+  citationsEnabled?: boolean;
+  signal?: AbortSignal;
+}
+
+/**
+ * Stream a RAG query as plain SSE events from /api/query.
+ *
+ * Yields objects with `event` (string) and `data` (parsed JSON object) for
+ * each SSE block received. Recognised event names include: "status",
+ * "intent", "sources", "citations", "token", "error", "complete".
+ */
+export async function* queryStreaming(
+  query: string,
+  options: QueryStreamOptions = {},
+): AsyncGenerator<StreamEvent, void, unknown> {
+  const { sourceIds, citationsEnabled = true, signal } = options;
+
+  const res = await fetch("/api/query", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      query,
+      stream: true,
+      source_ids: sourceIds ?? [],
+      citations_enabled: citationsEnabled,
+    }),
+    signal,
+  });
+
+  if (!res.ok || !res.body) {
+    yield { event: "error", data: { error: `HTTP ${res.status}` } };
+    return;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  function* parseBuffer(buf: string): Generator<StreamEvent> {
+    const blocks = buf.split(/\r?\n\r?\n/);
+    for (const block of blocks) {
+      if (!block.trim() || block.trimStart().startsWith(":")) continue;
+      const lines = block.split(/\r?\n/);
+      let evt = "message";
+      let dat = "";
+      for (const line of lines) {
+        if (line.startsWith("event:")) evt = line.slice(6).trim();
+        else if (line.startsWith("data:")) dat = line.slice(5).trimStart();
+      }
+      if (!dat) continue;
+      let parsed: Record<string, unknown>;
+      try { parsed = JSON.parse(dat) as Record<string, unknown>; } catch { parsed = {}; }
+      yield { event: evt, data: parsed };
+    }
+  }
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split(/\r?\n\r?\n/);
+      buffer = blocks.pop() ?? "";
+      const rejoined = blocks.join("\n\n");
+      yield* parseBuffer(rejoined);
+    }
+    // Flush remaining buffer
+    if (buffer.trim()) {
+      yield* parseBuffer(buffer);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
