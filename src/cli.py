@@ -183,11 +183,6 @@ def run() -> None:
         help="Minimum intent classification confidence (default: 0.6)",
     )
     query_parser.add_argument(
-        "--llm-fallback",
-        action="store_true",
-        help="Deprecated flag. LLM fallback is now default.",
-    )
-    query_parser.add_argument(
         "--no-llm-fallback",
         action="store_true",
         help="Disable LLM intent fallback (heuristic only).",

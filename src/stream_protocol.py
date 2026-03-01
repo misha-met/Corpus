@@ -97,17 +97,6 @@ def encode_reasoning_end(reasoning_id: str = "reasoning-0") -> str:
     return _encode_sse_payload({"type": "reasoning-end", "id": reasoning_id})
 
 
-# Legacy alias kept for any code still calling encode_text directly.
-# Emits all three frames inline — only safe for single-token responses.
-def encode_text(token: str) -> str:  # noqa: D401
-    """Deprecated: emit text-start + text-delta + text-end as a single call.
-
-    Prefer the stateful encode_text_start / encode_text_delta / encode_text_end
-    helpers in streaming contexts.
-    """
-    return encode_text_start() + encode_text_delta(token) + encode_text_end()
-
-
 def encode_data(payload: list[dict[str, Any]]) -> str:
     """Encode one or more custom data parts as SSE payload lines."""
     lines: list[str] = []

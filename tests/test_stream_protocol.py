@@ -25,7 +25,9 @@ from src.stream_protocol import (
     encode_error,
     encode_finish_message,
     encode_finish_step,
-    encode_text,
+    encode_text_delta,
+    encode_text_end,
+    encode_text_start,
     http_error_body,
 )
 
@@ -59,15 +61,20 @@ def _parse_sse_body(body: str) -> list[dict]:
     return events
 
 
+def _encode_text_inline(token: str) -> str:
+    """Test helper: emit text-start + text-delta + text-end as one call."""
+    return encode_text_start() + encode_text_delta(token) + encode_text_end()
+
+
 
 # ---------------------------------------------------------------------------
-# encode_text  (legacy alias: emits 3 SSE frames)
+# encode_text_start / encode_text_delta / encode_text_end
 # ---------------------------------------------------------------------------
 
 
 class TestEncodeText:
     def test_simple_token_produces_three_frames(self) -> None:
-        body = encode_text("Hello")
+        body = _encode_text_inline("Hello")
         events = _parse_sse_body(body)
         assert len(events) == 3
         assert events[0] == {"type": "text-start", "id": "text-0"}
@@ -75,27 +82,27 @@ class TestEncodeText:
         assert events[2] == {"type": "text-end", "id": "text-0"}
 
     def test_empty_string(self) -> None:
-        events = _parse_sse_body(encode_text(""))
+        events = _parse_sse_body(_encode_text_inline(""))
         assert events[1]["delta"] == ""
 
     def test_unicode_characters(self) -> None:
         text = "Héllo wörld 你好 🌍"
-        events = _parse_sse_body(encode_text(text))
+        events = _parse_sse_body(_encode_text_inline(text))
         assert events[1]["delta"] == text
 
     def test_special_json_characters(self) -> None:
         """Quotes, backslashes, and newlines must survive JSON round-trip."""
         text = 'He said "hello"\nand\\walked away'
-        events = _parse_sse_body(encode_text(text))
+        events = _parse_sse_body(_encode_text_inline(text))
         assert events[1]["delta"] == text
 
     def test_single_space(self) -> None:
-        events = _parse_sse_body(encode_text(" "))
+        events = _parse_sse_body(_encode_text_inline(" "))
         assert events[1]["delta"] == " "
 
     def test_frame_terminator(self) -> None:
         """Every SSE frame must end with \\n\\n."""
-        body = encode_text("hi")
+        body = _encode_text_inline("hi")
         for frame in body.split("\n\n"):
             if frame.strip():
                 assert frame.startswith("data: ")
@@ -345,12 +352,12 @@ class TestFullStreamSequence:
         frames.append(annotation_status("Searching knowledge base..."))
         frames.append(annotation_status("Generating answer..."))
 
-        # 2. Text tokens (using encode_text legacy helper)
-        frames.append(encode_text("The "))
-        frames.append(encode_text("theory "))
-        frames.append(encode_text("of "))
-        frames.append(encode_text("generative "))
-        frames.append(encode_text("grammar..."))
+        # 2. Text tokens (using inline text helper)
+        frames.append(_encode_text_inline("The "))
+        frames.append(_encode_text_inline("theory "))
+        frames.append(_encode_text_inline("of "))
+        frames.append(_encode_text_inline("generative "))
+        frames.append(_encode_text_inline("grammar..."))
 
         # 3. Sources
         frames.append(annotation_sources(["linguistics_doc"]))
@@ -376,8 +383,8 @@ class TestFullStreamSequence:
         frames: list[str] = []
 
         frames.append(annotation_status("Generating answer..."))
-        frames.append(encode_text("Partial "))
-        frames.append(encode_text("response"))
+        frames.append(_encode_text_inline("Partial "))
+        frames.append(_encode_text_inline("response"))
 
         # Error occurs
         frames.append(annotation_error("INTERNAL", "Model crashed"))
@@ -405,7 +412,7 @@ class TestFullStreamSequence:
         """Stream cancelled by client disconnect."""
         frames: list[str] = []
 
-        frames.append(encode_text("Partial"))
+        frames.append(_encode_text_inline("Partial"))
         frames.append(annotation_error("STREAM_CANCELLED", "Client disconnected"))
         frames.append(encode_error("Client disconnected"))
         frames.append(encode_finish_step("error"))

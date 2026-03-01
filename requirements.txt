@@ -1,7 +1,6 @@
 lancedb
 pyarrow
 pydantic
-sentence-transformers
 safetensors
 mlx-lm
 pypdf
