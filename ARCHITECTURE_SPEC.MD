@@ -24,8 +24,8 @@ The application is a **full-stack offline RAG system** designed for local-first 
 | Embeddings | `mlx-lm` via `MlxEmbeddingModel` wrapper | Mean-pooled hidden states with L2 normalization |
 | Re-ranking | `jinaai/jina-reranker-v3-mlx` | Listwise MLX-native reranker (Qwen3-0.6B backbone) |
 | Storage | `lancedb` + `pyarrow` | Vector ANN + FTS hybrid search with native RRF |
-| Backend API | `fastapi`, `uvicorn`, `sse-starlette`, `python-multipart` | SSE streaming + multipart upload |
-| Frontend | `next.js 16` (App Router), React 19, TypeScript 5 | Tailwind CSS 4, react-markdown |
+| Backend API | `fastapi`, `uvicorn`, `python-multipart` | SSE streaming + multipart upload |
+| Frontend | `next.js 16` (App Router), React 19, TypeScript 5 | Tailwind CSS 4, react-markdown, @assistant-ui/react |
 ---
 
 ## 3. Module Map
@@ -236,6 +236,8 @@ FastAPI application with streaming support:
 | `/api/sources/{id}/content` | GET | Full document text (original -> snapshot fallback) |
 | `/api/sources/{id}/chunk/{cid}` | GET | Chunk detail for citation viewer |
 | `/api/sources/{id}/chunks` | GET | Batch chunk fetch by comma-separated IDs (`?ids=a,b,c`) |
+| `/api/transcribe` | POST | Audio transcription via MLX Whisper (returns `{"text": "..."}`) |
+| `/api/freeform/chat` | POST | Freeform streaming chat (SSE, not AI SDK protocol) |
 
 **Concurrency model:** Single-user lock (`chat_lock`) for exclusive access. Background thread executor runs `query_events()`, pushes events to asyncio.Queue via `loop.call_soon_threadsafe()`. Client disconnect detection via `should_stop` callback.
 
@@ -257,7 +259,24 @@ Thin wrapper around `RagEngine` for terminal workflows:
 - `query TEXT [--source-id ID] [--cite|--no-cite] [--mode MODE] [--latency] [--intent INTENT]`
 - Prints: hardware config, retrieval metrics, answer with intent/confidence, optional latency breakdown
 
-### 3.15 Metrics & Latency (`src/metrics.py`, `src/latency.py`)
+### 3.15 Transcription (`src/transcription.py`)
+
+`WhisperTranscriber` -- MLX Whisper speech-to-text for voice input:
+
+- **Model:** `mlx-community/whisper-large-v3-turbo` (or similar), loaded lazily on first use
+- **Audio decode:** Handles WebM/WAV/MP3 via `ffmpeg` subprocess, resamples to 16kHz mono
+- **VAD (Voice Activity Detection):** Energy-based silence trimming to avoid transcribing empty audio
+- **API integration:** Exposed via `POST /api/transcribe` endpoint; returns `{"text": "..."}` JSON
+
+### 3.16 Citation Verification (`src/citation_verification.py`)
+
+`compute_highlight_texts` -- maps chunk citations to highlight-able text spans:
+
+- **Sliding window:** Extracts representative text spans from cited chunks for document highlighting
+- **Span finding:** Locates cited text within full document for precise highlight positioning
+- **Frontend integration:** Results sent as part of `CitationListEvent` for the citation viewer modal
+
+### 3.17 Metrics & Latency (`src/metrics.py`, `src/latency.py`)
 
 **Retrieval metrics:** Budget utilization, per-stage timing, reranker score distributions, threshold/safety-net stats, deduplication reduction.
 
@@ -281,40 +300,51 @@ Thin wrapper around `RagEngine` for terminal workflows:
 ```
 Page (app/page.tsx)
   AppProvider (context/app-context.tsx)
-    AppContent
-      SourcePanel (30% width)
-        Source list with select/expand/delete
-        IngestModal (drag-drop upload, optional citation reference input)
-        CitationViewerModal (overlay)
-          DocumentRenderer
-            MarkdownRenderer | PlainTextRenderer
-      ChatPanel (70% width)
-        Message list (user blue / assistant gray bubbles)
-          ChatMarkdown (citation-aware react-markdown)
-          MessageReferences (cited/uncited visual indicators, copy-as-citation)
-        IntentSelector (explicit intent override dropdown)
-        Input bar with source count badge + send/stop toggle
+    ThemeProvider (context/theme-context.tsx)
+      Mode Tabs: RAG | Freeform
+        (RAG mode)
+          AssistantRuntimeProvider + Thread (assistant-ui)
+            ChatMarkdown (citation-aware react-markdown)
+            MessageReferences (cited/uncited indicators)
+            ThinkingPanel (reasoning chain display)
+            IntentSelector (intent override dropdown)
+            ModelSelector (regular/deep-research)
+          SourcePanel (30% width)
+            Source list with select/expand/delete
+            IngestModal (drag-drop upload, citation reference)
+            CitationViewerModal (overlay)
+              DocumentRenderer → MarkdownRenderer | PlainTextRenderer
+        (Freeform mode)
+          FreeformChatPanel (session-persistent chat)
+            Thinking display (ReasoningRoot)
+            Model selector + thinking toggle
+      HistoryPanel (side drawer, session persistence)
+      Theme backgrounds (WebGL: beams, meteors, rain, mesh, paths, starfield, particles)
 ```
 
 ### 4.3 State Shape (`AppState`)
 
 ```typescript
 {
-  isBusy: boolean;           // Request in-flight
   statusMessage: string;     // Pipeline status from stream
   errorMessage: string;      // Error display
   isLockBusy: boolean;       // Server 429 status
   lastIntent: { intent, confidence, method } | null;
   lastSources: string[];     // Source IDs from latest query
+  citationsByMessage: Map<string, CitationPayload[]>; // Per-message citation data
+  activeCitation: { messageId, index } | null; // Currently viewing citation
+  thinkingSteps: Map<string, ThinkingStep[]>; // Reasoning chain per message
+  _stepCounter: number;      // Internal counter for thinking step IDs
+  currentAssistantMessageId: string | null; // Active streaming message
+  intentOverride: string | null; // User-forced intent
+  chatMode: "rag" | "freeform"; // Active UI mode
 }
 ```
 
 ### 4.4 API Client (`lib/api-client.ts`)
 
-- `sourceApi` singleton -- typed methods for all source CRUD operations, including new `getChunkBatch(sourceId, ids[])` for fetching multiple chunks in one call
-- `queryStreaming()` -- AsyncGenerator yielding `StreamEvent` objects from SSE
+- `sourceApi` singleton -- typed methods for all source CRUD operations, including `getChunkBatch(sourceId, ids[])` for fetching multiple chunks in one call
 - Direct backend URL for uploads (bypasses Next.js dev proxy ~30s timeout)
-- `StreamEvent.data` typed as `Record<string, unknown>` with runtime guard for non-object JSON
 
 ### 4.5 Citation Utilities (`lib/`)
 
@@ -329,6 +359,10 @@ Page (app/page.tsx)
 - **Fuzzy text highlighting:** `text-highlighter.ts` uses progressive degradation (full -> prefix -> suffix matching) to find and `<mark>` cited text in documents
 - **50ms streaming throttle:** Token accumulation in ref, batched state updates via setTimeout
 - **AbortController:** Stop button cancels in-flight query stream
+- **Speech-to-text:** `useSpeechToText` hook records audio via MediaRecorder, sends to `/api/transcribe` for MLX Whisper transcription, inserts result into input
+- **Conversation history:** `session-store.ts` persists chat sessions to IndexedDB with title, messages, mode, and timestamps. `HistoryPanel` drawer allows browsing, searching (debounced), and restoring previous sessions.
+- **Theme system:** `theme-context.tsx` manages background theme selection (none, beams, meteors, rain, mesh gradient, paths, starfield, particles). WebGL backgrounds rendered via `@react-three/fiber` (`components/gl/`). CSS-only fallbacks for simpler effects.
+- **Dual-mode UI:** Tab switching between RAG mode (assistant-ui Thread with retrieval pipeline) and Freeform mode (direct LLM chat with session persistence). Mode persisted per session.
 
 ---
 
@@ -502,48 +536,81 @@ source_cache.save_snapshot() -> data/source_cache/
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `api.py` | ~980 | FastAPI endpoints, SSE streaming, file upload |
-| `api_schemas.py` | ~290 | Pydantic request/response models |
-| `rag_engine.py` | ~1200 | Core orchestrator, query/ingest, output sanitization |
-| `retrieval.py` | ~400 | 6-stage hybrid search pipeline |
-| `storage.py` | ~500 | LanceDB tables, hybrid search, FTS management |
-| `generator.py` | ~760 | MLX text generation, streaming, token budget packing |
+| `api.py` | ~1310 | FastAPI endpoints, SSE streaming, file upload, freeform chat |
+| `api_schemas.py` | ~320 | Pydantic request/response models |
+| `rag_engine.py` | ~1690 | Core orchestrator, query/ingest, output sanitization |
+| `retrieval.py` | ~680 | 7-stage hybrid search pipeline |
+| `storage.py` | ~655 | LanceDB tables, hybrid search, FTS management |
+| `generator.py` | ~930 | MLX text generation, streaming, token budget packing |
 | `reranker.py` | ~425 | Jina v3 MLX listwise reranker |
-| `intent.py` | ~820 | Heuristic + LLM intent classification (12 intents) |
-| `generation.py` | ~430 | Intent-aware prompt/message building (12 profiles) |
-| `embeddings.py` | ~150 | MLX embedding model wrapper |
-| `config.py` | ~260 | Mode configs, RAM detection, auto-scaling |
-| `ingest.py` | ~430 | PDF/Markdown parsing, chunking |
+| `intent.py` | ~965 | Heuristic + LLM intent classification (12 intents) |
+| `generation.py` | ~560 | Intent-aware prompt/message building (12 profiles) |
+| `embeddings.py` | ~155 | MLX embedding model wrapper |
+| `config.py` | ~345 | Mode configs, RAM detection, auto-scaling |
+| `ingest.py` | ~530 | PDF/Markdown parsing, chunking |
 | `models.py` | ~35 | ParentChunk, ChildChunk, Metadata |
-| `stream_protocol.py` | ~215 | AI SDK Data Stream Protocol encoder |
-| `query_events.py` | ~85 | Streaming event dataclasses |
+| `stream_protocol.py` | ~250 | AI SDK Data Stream Protocol encoder |
+| `query_events.py` | ~96 | Streaming event dataclasses |
 | `metrics.py` | ~170 | Retrieval/budget metrics collection |
-| `latency.py` | ~110 | Wall-clock latency profiler |
+| `latency.py` | ~107 | Wall-clock latency profiler |
 | `source_cache.py` | ~175 | Text snapshot caching |
-| `cli.py` | ~355 | CLI entry point |
+| `citation_verification.py` | ~352 | Citation highlight text computation |
+| `transcription.py` | ~387 | MLX Whisper speech-to-text |
+| `cli.py` | ~383 | CLI entry point |
 
 ### Frontend (`frontend/src/`)
 
 | File | Purpose |
 |------|---------|
-| `app/page.tsx` | Entry point, 2-panel layout, AppProvider wrapper |
+| `app/page.tsx` | Entry point, dual-mode layout (RAG/Freeform), theme picker |
 | `app/layout.tsx` | Root layout, metadata, fonts (Geist) |
+| `app/providers.tsx` | AssistantRuntimeProvider + AI SDK integration |
+| `app/api/chat/route.ts` | Next.js API route proxying to backend `/api/chat` |
 | `app/globals.css` | Theme colors, scrollbar styling, markdown prose |
 | `context/app-context.tsx` | Global state (useReducer + dual context) |
-| `lib/api-client.ts` | Typed API client, SSE streaming generator |
+| `context/theme-context.tsx` | Theme state (WebGL background selection) |
+| `lib/api-client.ts` | Typed API client for source CRUD |
+| `lib/backend-url.ts` | Backend URL resolution |
+| `lib/event-parser.ts` | SSE event parsing utilities |
+| `lib/session-store.ts` | IndexedDB session persistence (history) |
 | `lib/text-highlighter.ts` | Fuzzy text matching, DOM highlight injection |
-| `components/chat-panel.tsx` | Chat interface, streaming, citation handling |
+| `lib/citation-meta-store.ts` | localStorage persistence for citation references |
+| `lib/format-citations.ts` | Footnote + Harvard citation formatters |
+| `lib/group-citations.ts` | Citation index grouping and deduplication |
+| `lib/utils.ts` | Shared utilities (cn, etc.) |
 | `components/source-panel.tsx` | Source management, upload queue, view content |
+| `components/freeform-chat-panel.tsx` | Freeform streaming chat with session persistence |
+| `components/history-panel.tsx` | Chat history drawer with session restore |
 | `components/citation-viewer-modal.tsx` | Full document viewer with citation highlight |
-| `components/ingest-modal.tsx` | Drag-drop upload with optional citation reference input |
+| `components/ingest-modal.tsx` | Drag-drop upload with optional citation reference |
 | `components/chat-markdown.tsx` | Citation-aware markdown rendering |
 | `components/markdown-renderer.tsx` | Markdown display with section scroll |
 | `components/document-renderer.tsx` | Format router (markdown vs plain text) |
+| `components/assistant-ui/thread.tsx` | assistant-ui Thread customization |
+| `components/assistant-ui/thinking-panel.tsx` | Reasoning chain display panel |
 | `components/assistant-ui/intent-selector.tsx` | Explicit intent override dropdown |
-| `components/assistant-ui/message-references.tsx` | Per-message reference list with cited/uncited indicators |
-| `lib/citation-meta-store.ts` | localStorage persistence for user citation reference strings |
-| `lib/format-citations.ts` | Footnote + Harvard citation formatters |
-| `lib/group-citations.ts` | Citation index grouping and deduplication |
+| `components/assistant-ui/message-references.tsx` | Per-message citation reference list |
+| `components/assistant-ui/model-selector.tsx` | Regular/Deep Research model picker |
+| `components/assistant-ui/reasoning.tsx` | Reasoning block components |
+| `components/assistant-ui/markdown-text.tsx` | Markdown text rendering for assistant-ui |
+| `components/assistant-ui/chat-markdown-renderer.tsx` | Chat-specific markdown rendering |
+| `components/assistant-ui/file.tsx` | File display components |
+| `components/assistant-ui/attachment.tsx` | Attachment handling |
+| `components/assistant-ui/tooltip-icon-button.tsx` | Icon button with tooltip |
+| `components/assistant-ui/tool-fallback.tsx` | Tool call fallback display |
+| `components/ui/*.tsx` | Shared UI primitives (button, dialog, picker, checkbox, etc.) |
+| `components/gl/index.tsx` | WebGL background scene root |
+| `components/gl/particles.tsx` | GPU particle simulation |
+| `components/gl/shaders/*.ts` | GLSL shaders for particle/vignette effects |
+| `components/ui/beams.tsx` | Animated beam background |
+| `components/ui/meteors.tsx` | Meteor shower background |
+| `components/ui/rain.tsx` | Rain effect background |
+| `components/ui/mesh-gradient.tsx` | Animated mesh gradient background |
+| `components/ui/paths.tsx` | Animated path background |
+| `components/ui/starfield.tsx` | Starfield background |
+| `components/ui/particles.tsx` | CSS particle background |
+| `hooks/useSpeechToText.ts` | Speech-to-text hook (Whisper integration) |
+| `hooks/useSystemRam.ts` | System RAM detection hook |
 
 ---
 
@@ -576,9 +643,13 @@ curl -N -H "Content-Type: application/json" \
 
 - **Storage:** `lancedb`, `pyarrow`, `pydantic`
 - **ML:** `mlx`, `mlx-lm`, `safetensors`, `numpy`
-- **Tokenizer:** `mistral-common`, `transformers`, `huggingface-hub`
+- **Tokenizer:** `transformers`, `huggingface-hub`
 - **PDF:** `pypdf`, `pdfminer.six`, `PyMuPDF` (fitz), `pytesseract`, `pdf2image`
-- **API:** `fastapi`, `uvicorn`, `httpx`, `python-multipart`, `sse-starlette`
+- **API:** `fastapi`, `uvicorn`, `python-multipart`
+
+### Backend (Test-only)
+
+- `httpx` -- async HTTP client for FastAPI TestClient
 
 ### Backend (Optional)
 
@@ -587,6 +658,8 @@ curl -N -H "Content-Type: application/json" \
 ### Frontend
 
 - `next` 16, `react` 19, `react-dom` 19
+- `@assistant-ui/react`, `@assistant-ui/react-ai-sdk` -- chat UI framework + AI SDK integration
 - `react-markdown`, `remark-gfm`
 - `tailwindcss` 4, `@tailwindcss/postcss`
+- `@react-three/fiber`, `@react-three/drei`, `three` -- WebGL backgrounds
 - `typescript` 5, `eslint` 9
