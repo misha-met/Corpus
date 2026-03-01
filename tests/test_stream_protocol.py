@@ -203,8 +203,8 @@ class TestEncodeFinishMessage:
         assert events[0] == {"type": "finish"}
 
     def test_params_do_not_appear_on_wire(self) -> None:
-        """finish_reason and usage tokens are ignored per AI SDK v6 spec."""
-        body = encode_finish_message("length", prompt_tokens=100, completion_tokens=50)
+        """finish_reason is accepted but output is always just {type: finish}."""
+        body = encode_finish_message("length")
         events = _parse_sse_body(body)
         assert events[0] == {"type": "finish"}
 
@@ -364,7 +364,7 @@ class TestFullStreamSequence:
 
         # 4. Finish
         frames.append(encode_finish_step("stop"))
-        frames.append(encode_finish_message("stop", prompt_tokens=500, completion_tokens=25))
+        frames.append(encode_finish_message("stop"))
 
         # Verify: every frame is a parseable SSE event
         body = "".join(frames)

@@ -15,7 +15,7 @@ import os
 import re
 import threading
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -524,7 +524,8 @@ class RagEngine:
         logger.info("_ensure_reranker: done")
         return self._reranker
 
-    def _ensure_generator(self) -> MlxGenerator:
+    def ensure_generator(self) -> MlxGenerator:
+        """Return the LLM generator, loading it lazily if needed."""
         if self._generator is not None:
             return self._generator
         with self._generator_load_lock:
@@ -556,21 +557,21 @@ class RagEngine:
         if self._generator is not None:
             return None
         logger.info("Starting speculative LLM preload during retrieval")
-        return self._preload_executor.submit(self._ensure_generator)
+        return self._preload_executor.submit(self.ensure_generator)
 
     def _consume_preloaded_generator(
         self,
         preload_future: Optional[concurrent.futures.Future[MlxGenerator]],
     ) -> MlxGenerator:
         if preload_future is None:
-            return self._ensure_generator()
+            return self.ensure_generator()
         try:
             return preload_future.result()
         except Exception:
             logger.exception(
                 "Speculative LLM preload failed; falling back to synchronous load"
             )
-            return self._ensure_generator()
+            return self.ensure_generator()
 
     def load_retrieval_models(self) -> None:
         """Pre-load embedding + reranker in parallel (call once at startup)."""
@@ -722,7 +723,7 @@ class RagEngine:
 
         generator: Optional[MlxGenerator] = None
         if summarize:
-            generator = self._ensure_generator()
+            generator = self.ensure_generator()
 
         parents_count, children_count = ingest_file_to_storage(
             file_path,
@@ -1216,11 +1217,9 @@ class RagEngine:
         # Apply user thinking override (tri-state)
         if enable_thinking is True:
             # User forced thinking on — switch to thinking-mode sampling
-            from dataclasses import replace as _dc_replace
             gen_params = _dc_replace(gen_params, enable_thinking=True, temperature=1.0, top_p=0.95)
         elif enable_thinking is False:
             # User forced thinking off — ensure non-thinking sampling
-            from dataclasses import replace as _dc_replace
             gen_params = _dc_replace(gen_params, enable_thinking=False)
         # else: None = auto, use intent-resolved value
 
@@ -1230,7 +1229,6 @@ class RagEngine:
                 "Thinking mode disabled: requires 48GB+ RAM (detected %.0fGB)",
                 self._system_ram_gb,
             )
-            from dataclasses import replace as _dc_replace
             gen_params = _dc_replace(gen_params, enable_thinking=False)
 
         # Determine token budgets based on thinking state and RAM tier
@@ -1649,7 +1647,7 @@ class RagEngine:
             return "\n".join(lines), sources, False
 
         if missing:
-            generator = self._ensure_generator()
+            generator = self.ensure_generator()
             for source in missing:
                 p_texts = self._storage.get_parent_texts_by_source(source_id=source)
                 context_text = "\n\n".join(p_texts)

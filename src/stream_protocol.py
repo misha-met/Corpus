@@ -126,21 +126,15 @@ def encode_annotation(annotations: list[dict[str, Any]]) -> str:
 
 def encode_finish_message(
     finish_reason: str = "stop",
-    *,
-    prompt_tokens: int = 0,
-    completion_tokens: int = 0,
 ) -> str:
     """Encode stream finish.
 
     AI SDK v6 UI message stream spec mandates ``{"type": "finish"}`` with no
-    extra fields. ``finishReason`` and ``usage`` are kept as parameters so
-    callers remain unchanged, but they are not included in the wire payload
-    (the SDK rejects any additional top-level fields on the finish frame).
+    extra fields.
 
     >>> encode_finish_message()
     'data: {"type": "finish"}\\n\\n'
     """
-    # Usage is available in server logs via FinishEvent; not sent on wire.
     return _encode_sse_payload({"type": "finish"})
 
 

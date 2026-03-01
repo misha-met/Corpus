@@ -262,6 +262,8 @@ _INTENT_PATTERNS: dict[Intent, list[re.Pattern]] = {
 }
 
 _HEURISTIC_CONFIDENCE = {"strong_match": 0.85, "single_match": 0.70, "weak_match": 0.50}
+# Corpus-specific: these terms appear in the demo dataset (Connectionism_Theory).
+# They boost ANALYZE for technical "how/why" queries. Safe to extend or remove.
 _TECHNICAL_TERM_HINTS = {"stimulus", "reinforcement", "skinner"}
 _OVERVIEW_SUBJECT_WORDS = {
     "this", "that", "it", "paper", "document", "article", "text",

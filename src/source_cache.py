@@ -19,7 +19,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CACHE_DIR = Path("data/source_cache")
+DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "source_cache"
 
 
 def _sanitize_filename(source_id: str) -> str:

@@ -22,7 +22,10 @@ import threading
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .rag_engine import RagEngine
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -113,7 +116,7 @@ _MAX_UPLOAD_BYTES: int = 50 * 1024 * 1024
 # Module-level state (set during lifespan)
 # ---------------------------------------------------------------------------
 
-_engine: object | None = None        # the single currently-loaded RagEngine
+_engine: RagEngine | None = None      # the single currently-loaded RagEngine
 _engine_mode: str | None = None      # which mode that engine was built for
 _engine_init_lock = threading.Lock()
 _engine_loaded: bool = False
@@ -347,11 +350,7 @@ def _encode_event(event: QueryEvent) -> Optional[str]:
     elif isinstance(event, FinishEvent):
         return (
             encode_finish_step(event.finish_reason)
-            + encode_finish_message(
-                event.finish_reason,
-                prompt_tokens=event.prompt_tokens,
-                completion_tokens=event.completion_tokens,
-            )
+            + encode_finish_message(event.finish_reason)
         )
     logger.warning("Unknown event type: %s", type(event).__name__)
     return None
@@ -639,7 +638,7 @@ async def _freeform_stream_generator(
     def _producer() -> None:
         try:
             engine = pinned_engine
-            gen = engine._ensure_generator()
+            gen = engine.ensure_generator()
             # Resolve thinking: explicit True/False from user, or default off for freeform
             use_thinking = freeform_request.enable_thinking if freeform_request.enable_thinking is not None else False
             if use_thinking:

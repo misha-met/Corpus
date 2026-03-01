@@ -6,7 +6,7 @@ import re
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -491,7 +491,7 @@ class MlxGenerator:
         messages: list[dict[str, str]],
         *,
         config: Optional[GenerationConfig] = None,
-        should_stop: Optional[callable] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
     ):
         """Streaming version of generate_chat that yields individual tokens.
 
@@ -537,7 +537,7 @@ class MlxGenerator:
         messages: list[dict[str, str]],
         *,
         config: Optional[GenerationConfig] = None,
-        should_stop: Optional[callable] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
     ):
         """Stream chat with the model's reasoning chain exposed.
 
@@ -594,7 +594,7 @@ class MlxGenerator:
         stop_tokens: list[str],
         prompt_tokens: int,
         *,
-        should_stop: Optional[callable] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
         enable_thinking: bool = False,
         visible_cap: Optional[int] = None,
     ):
