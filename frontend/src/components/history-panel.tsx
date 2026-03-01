@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
   listSessions,
   deleteSession,
@@ -43,7 +43,15 @@ export interface HistoryPanelProps {
 export function HistoryPanel({ open, onClose, onRestore }: HistoryPanelProps) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+
+  const handleSearchChange = useCallback((value: string) => {
+    setSearch(value);
+    clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => setDebouncedSearch(value), 150);
+  }, []);
 
   const refresh = useCallback(async () => {
     setIsLoading(true);
@@ -78,8 +86,8 @@ export function HistoryPanel({ open, onClose, onRestore }: HistoryPanelProps) {
   );
 
   const filteredSessions = sessions.filter((s) => {
-    if (!search.trim()) return true;
-    const q = search.toLowerCase();
+    if (!debouncedSearch.trim()) return true;
+    const q = debouncedSearch.toLowerCase();
     return (
       s.title.toLowerCase().includes(q) ||
       s.messages.some((m) => m.content.toLowerCase().includes(q))
@@ -127,7 +135,7 @@ export function HistoryPanel({ open, onClose, onRestore }: HistoryPanelProps) {
             </svg>
             <input
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => handleSearchChange(e.target.value)}
               placeholder="Search conversations..."
               className="w-full rounded-lg pl-8 pr-3 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none transition-colors"
               style={{
@@ -155,7 +163,7 @@ export function HistoryPanel({ open, onClose, onRestore }: HistoryPanelProps) {
               </p>
             </div>
           ) : (
-            <ul className="divide-y divide-[#1e1e1e]">
+            <ul className="divide-y divide-[#1e1e1e] [&>li:first-child]:border-t-0">
               {filteredSessions.map((session) => (
                 <li key={session.id}>
                   <div

@@ -103,6 +103,16 @@ export default function Page() {
   const { theme, setTheme } = useTheme();
   const [themeOpen, setThemeOpen] = useState(false);
 
+  // Close theme picker on Escape
+  useEffect(() => {
+    if (!themeOpen) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setThemeOpen(false);
+    };
+    document.addEventListener("keydown", handleKey);
+    return () => document.removeEventListener("keydown", handleKey);
+  }, [themeOpen]);
+
   const THEMES: { id: BackgroundTheme; label: string }[] = [
     { id: "none",      label: "Default" },
     { id: "beams",     label: "Beams" },
