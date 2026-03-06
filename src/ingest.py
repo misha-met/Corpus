@@ -368,7 +368,7 @@ def _chunk_pages(
     return parents, children
 
 
-def _extract_pypdf(reader, **_kw) -> list[_PageData]:
+def _extract_pypdf(reader, *, page_offset: int = 1, **_kw) -> list[_PageData]:
     """Strategy 1: pypdf per-page extraction."""
     pages: list[_PageData] = []
     for index, page in enumerate(reader.pages, start=1):
@@ -381,13 +381,18 @@ def _extract_pypdf(reader, **_kw) -> list[_PageData]:
                 page_label = page.get_label()
         except Exception:
             pass
-        display_page = page_label if page_label else str(index)
-        pages.append(_PageData(page_text, index, page_label, display_page))
+        page_number = (index - 1) + page_offset
+        display_page = str(page_number) if page_offset != 1 else (page_label if page_label else str(index))
+        pages.append(_PageData(page_text, page_number, page_label, display_page))
     return pages
 
 
 def _extract_pdfminer(path: Path, **_kw) -> list[_PageData]:
-    """Strategy 2: pdfminer whole-document fallback."""
+    """Strategy 2: pdfminer whole-document fallback.
+
+    # Page offset is not applied here: pdfminer is a whole-document fallback
+    # that produces a single block with no per-page metadata (all page fields are None).
+    """
     try:
         from pdfminer.high_level import extract_text
     except Exception as exc:  # pragma: no cover
@@ -398,7 +403,7 @@ def _extract_pdfminer(path: Path, **_kw) -> list[_PageData]:
     return []
 
 
-def _extract_pymupdf(path: Path, **_kw) -> list[_PageData]:
+def _extract_pymupdf(path: Path, *, page_offset: int = 1, **_kw) -> list[_PageData]:
     """Strategy 3: PyMuPDF per-page fallback."""
     try:
         import fitz
@@ -417,13 +422,13 @@ def _extract_pymupdf(path: Path, **_kw) -> list[_PageData]:
                 page_label = page.get_label()
         except Exception:
             pass
-        page_number = index + 1
-        display_page = page_label if page_label else str(page_number)
+        page_number = index + page_offset
+        display_page = str(page_number) if page_offset != 1 else (page_label if page_label else str(page_number))
         pages.append(_PageData(page_text, page_number, page_label, display_page))
     return pages
 
 
-def _extract_ocr(reader, path: Path, **_kw) -> list[_PageData]:
+def _extract_ocr(reader, path: Path, *, page_offset: int = 1, **_kw) -> list[_PageData]:
     """Strategy 4: OCR fallback (pytesseract)."""
     try:
         from pdf2image import convert_from_path
@@ -442,7 +447,8 @@ def _extract_ocr(reader, path: Path, **_kw) -> list[_PageData]:
         del page_images
         if not page_text:
             continue
-        pages.append(_PageData(page_text, index, None, str(index)))
+        page_number = (index - 1) + page_offset
+        pages.append(_PageData(page_text, page_number, None, str(page_number)))
     return pages
 
 
@@ -454,6 +460,7 @@ def ingest_pdf(
     file_path: str | Path,
     *,
     source_id: str,
+    page_offset: int = 1,
 ) -> tuple[list[ParentChunk], list[ChildChunk]]:
     path = Path(file_path)
     if not source_id or not source_id.strip():
@@ -473,7 +480,7 @@ def ingest_pdf(
         raise ValueError("PDF file has no pages.")
 
     for strategy in _PDF_STRATEGIES:
-        pages = strategy(reader=reader, path=path)
+        pages = strategy(reader=reader, path=path, page_offset=page_offset)
         if pages:
             parents, children = _chunk_pages(pages, source_id)
             if parents:
@@ -503,11 +510,12 @@ def ingest_file_to_storage(
     embedding_model: object,
     summarize: bool = False,
     summary_generator: Optional[MlxGenerator] = None,
+    page_offset: int = 1,
 ) -> tuple[int, int]:
     path = Path(file_path)
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        parents, children = ingest_pdf(path, source_id=source_id)
+        parents, children = ingest_pdf(path, source_id=source_id, page_offset=page_offset)
     elif suffix in {".md", ".markdown"}:
         parents, children = ingest_markdown(
             path,
@@ -543,6 +551,7 @@ def ingest_file_to_storage(
         context = _sample_context(context, _SUMMARY_CONTEXT_CHAR_LIMIT)
         messages = build_ingest_summary_messages(context)
         summary = generator.generate_chat(messages)
-        storage.upsert_source_summary(source_id=source_id, summary=summary)
+        storage.upsert_source_summary(source_id=source_id, summary=summary, page_offset=page_offset)
 
+    storage.persist_source_page_offset(source_id, page_offset)
     return len(parents), len(children)

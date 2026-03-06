@@ -114,7 +114,7 @@ export function SourcePanel({
 
     (async () => {
       try {
-        await sourceApi.uploadDocument(current.file, current.sourceId, current.summarize);
+        await sourceApi.uploadDocument(current.file, current.sourceId, current.summarize, current.pageOffset);
         // Refresh the source list after each successful ingest
         const data = await sourceApi.listSources();
         setSources(data);

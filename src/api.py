@@ -861,6 +861,7 @@ async def list_sources():
             snapshot_path=snapshot_path,
             source_size_bytes=source_size_bytes,
             content_size_bytes=source_size_bytes or snapshot_size_bytes,
+            page_offset=detail.get("page_offset") or 1,
         ))
 
     # Add any source IDs that have chunks but no summary
@@ -874,6 +875,8 @@ async def _post_ingest_snapshot(
     engine: object,
     source_id: str,
     file_path: str,
+    *,
+    page_offset: int = 1,
 ) -> None:
     """Create text snapshot and update summary record with file paths.
 
@@ -896,7 +899,7 @@ async def _post_ingest_snapshot(
     except Exception as snap_exc:
         logger.warning("Failed to create snapshot for %s: %s", source_id, snap_exc)
 
-    # Update the summary record with file paths (schema v2)
+    # Update the summary record with file paths (schema v3)
     try:
         summaries = storage.get_source_summaries()
         summary_text = summaries.get(source_id, "")
@@ -906,6 +909,7 @@ async def _post_ingest_snapshot(
                 summary=summary_text,
                 source_path=str(Path(file_path).resolve()),
                 snapshot_path=snapshot_path,
+                page_offset=page_offset,
             )
     except Exception as path_exc:
         logger.warning("Failed to update source paths for %s: %s", source_id, path_exc)
@@ -920,6 +924,7 @@ async def ingest_source(request: IngestRequest):
 
     file_path = request.file_path
     source_id = request.source_id
+    page_offset = request.page_offset
 
     # Validate file exists
     if not Path(file_path).is_file():
@@ -940,9 +945,10 @@ async def ingest_source(request: IngestRequest):
             file_path,
             source_id=source_id,
             summarize=request.summarize,
+            page_offset=page_offset,
         )
 
-        await _post_ingest_snapshot(engine, source_id, file_path)
+        await _post_ingest_snapshot(engine, source_id, file_path, page_offset=page_offset)
 
         return IngestResponse(
             source_id=result.source_id,
@@ -983,6 +989,7 @@ async def upload_source(
     file: UploadFile = File(...),
     source_id: str = Form(""),
     summarize: bool = Form(True),
+    page_offset: int = Form(1),
 ):
     """Upload and ingest a document (PDF or Markdown) from the browser.
 
@@ -1040,9 +1047,10 @@ async def upload_source(
             str(dest),
             source_id=sid,
             summarize=summarize,
+            page_offset=page_offset,
         )
 
-        await _post_ingest_snapshot(engine, sid, str(dest))
+        await _post_ingest_snapshot(engine, sid, str(dest), page_offset=page_offset)
 
         return IngestResponse(
             source_id=result.source_id,

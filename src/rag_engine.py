@@ -716,6 +716,7 @@ class RagEngine:
         source_id: str,
         page_number: Optional[int] = None,
         summarize: bool = True,
+        page_offset: int = 1,
     ) -> IngestResult:
         """Ingest a document (PDF or Markdown) into the RAG store."""
         self._on_status(f"Ingesting {Path(file_path).name}...")
@@ -733,6 +734,7 @@ class RagEngine:
             embedding_model=embedding_model,
             summarize=summarize,
             summary_generator=generator,
+            page_offset=page_offset,
         )
 
         self._on_status(

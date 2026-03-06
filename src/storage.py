@@ -92,17 +92,20 @@ class StorageEngine:
     # ------------------------------------------------------------------
 
     _SUMMARIES_V2_COLUMNS = ("source_path", "snapshot_path")
+    _SUMMARIES_V3_COLUMNS = ("page_offset",)  # int32; absence treated as 1 at read time
 
     def _migrate_summaries_schema(self) -> None:
-        """Add v2 columns to the source_summaries table if missing."""
+        """Add v2 and v3 columns to the source_summaries table if missing."""
         if self._summaries is None:
             return
         existing = set(self._summaries.schema.names)
-        missing = [
+        missing: list[pa.Field] = [
             pa.field(col, pa.utf8())
             for col in self._SUMMARIES_V2_COLUMNS
             if col not in existing
         ]
+        if "page_offset" not in existing:
+            missing.append(pa.field("page_offset", pa.int32()))
         if not missing:
             return
         self._summaries.add_columns(missing)
@@ -507,6 +510,51 @@ class StorageEngine:
         rows = self._parents.to_arrow().to_pylist()
         return sorted(set(r["source_id"] for r in rows if r.get("source_id")))
 
+    def persist_source_page_offset(self, source_id: str, page_offset: int = 1) -> None:
+        """Persist the page offset for a source, preserving existing summary/path fields.
+
+        Creates a minimal record if no record exists yet — this handles the
+        ``summarize=False`` (``--no-summarize``) case where
+        ``upsert_source_summary`` is never called.
+        """
+        sid = source_id.strip()
+        if not sid:
+            raise ValueError("source_id must be non-empty.")
+
+        existing_summary = ""
+        existing_source_path = ""
+        existing_snapshot_path = ""
+
+        if self._summaries is not None:
+            rows = (
+                self._summaries
+                .search()
+                .where(self._where_eq("source_id", sid), prefilter=True)
+                .to_list()
+            )
+            if rows:
+                r = rows[0]
+                existing_summary = r.get("summary") or ""
+                existing_source_path = r.get("source_path") or ""
+                existing_snapshot_path = r.get("snapshot_path") or ""
+                self._summaries.delete(self._where_eq("source_id", sid))
+
+        record: dict[str, Any] = {
+            "source_id": sid,
+            "summary": existing_summary,
+            "source_path": existing_source_path,
+            "snapshot_path": existing_snapshot_path,
+            "page_offset": page_offset,
+        }
+        if self._summaries is None:
+            self._summaries = self._db.create_table(self._SUMMARIES_TABLE, [record])
+            logger.info(
+                "Created LanceDB table '%s' via persist_source_page_offset",
+                self._SUMMARIES_TABLE,
+            )
+        else:
+            self._summaries.add([record])
+
     def upsert_source_summary(
         self,
         *,
@@ -514,8 +562,9 @@ class StorageEngine:
         summary: str,
         source_path: Optional[str] = None,
         snapshot_path: Optional[str] = None,
+        page_offset: int = 1,
     ) -> None:
-        """Insert or update a source summary record (schema v2).
+        """Insert or update a source summary record (schema v3).
 
         Parameters
         ----------
@@ -527,6 +576,8 @@ class StorageEngine:
             Original file path used during ingest.
         snapshot_path : str | None
             Path to cached text snapshot under data/source_cache/.
+        page_offset : int
+            Starting page number for the first physical PDF page (default 1).
         """
         if not source_id.strip():
             raise ValueError("source_id must be non-empty.")
@@ -538,10 +589,11 @@ class StorageEngine:
             "summary": summary.strip(),
             "source_path": source_path or "",
             "snapshot_path": snapshot_path or "",
+            "page_offset": page_offset,
         }
         if self._summaries is None:
             self._summaries = self._db.create_table(self._SUMMARIES_TABLE, [record])
-            logger.info("Created LanceDB table '%s' (schema v2)", self._SUMMARIES_TABLE)
+            logger.info("Created LanceDB table '%s' (schema v3)", self._SUMMARIES_TABLE)
         else:
             try:
                 self._summaries.delete(self._where_eq("source_id", sid))
@@ -566,10 +618,22 @@ class StorageEngine:
             if r.get("source_id") and r.get("summary")
         }
 
-    def get_source_details(self) -> list[dict[str, Any]]:
-        """Return full details for all sources (schema v2 fields).
+    def get_source_page_offsets(self) -> dict[str, int]:
+        """Return page offset for each source. Absent or null values default to 1."""
+        if self._summaries is None:
+            return {}
+        rows = self._summaries.to_arrow().to_pylist()
+        return {
+            r["source_id"]: int(r.get("page_offset") or 1)
+            for r in rows
+            if r.get("source_id")
+        }
 
-        Returns list of dicts with keys: source_id, summary, source_path, snapshot_path.
+    def get_source_details(self) -> list[dict[str, Any]]:
+        """Return full details for all sources (schema v3 fields).
+
+        Returns list of dicts with keys: source_id, summary, source_path,
+        snapshot_path, page_offset.
         """
         if self._summaries is None:
             return []
@@ -580,6 +644,7 @@ class StorageEngine:
                 "summary": r.get("summary", ""),
                 "source_path": r.get("source_path", ""),
                 "snapshot_path": r.get("snapshot_path", ""),
+                "page_offset": int(r.get("page_offset") or 1),
             }
             for r in rows
             if r.get("source_id")
@@ -603,6 +668,7 @@ class StorageEngine:
             "summary": r.get("summary", ""),
             "source_path": r.get("source_path", ""),
             "snapshot_path": r.get("snapshot_path", ""),
+            "page_offset": int(r.get("page_offset") or 1),
         }
 
     def delete_source(self, source_id: str) -> bool:

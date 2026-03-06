@@ -71,6 +71,12 @@ def run() -> None:
         "--page-number", type=int, default=None, help="Page number"
     )
     ingest_parser.add_argument(
+        "--page-offset",
+        type=int,
+        default=1,
+        help="Starting page number for the first physical PDF page (default: 1). No effect on Markdown files.",
+    )
+    ingest_parser.add_argument(
         "--lance", default="data/lance", help="LanceDB directory"
     )
     ingest_parser.add_argument(
@@ -286,6 +292,7 @@ def run() -> None:
             source_id=args.source_id,
             page_number=args.page_number,
             summarize=args.summarize,
+            page_offset=args.page_offset,
         )
         print(f"Ingested {result.parents_count} parents and {result.children_count} children.")
         if result.summarized:

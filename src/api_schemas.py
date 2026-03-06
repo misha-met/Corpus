@@ -180,6 +180,11 @@ class IngestRequest(BaseModel):
         default=True,
         description="Whether to generate a summary during ingest.",
     )
+    page_offset: int = Field(
+        default=1,
+        ge=1,
+        description="Starting page number for the first physical PDF page. No effect on Markdown files.",
+    )
 
 
 class IngestResponse(BaseModel):
@@ -218,6 +223,10 @@ class SourceInfo(BaseModel):
     content_size_bytes: Optional[int] = Field(
         default=None,
         description="Best-available text/content size in bytes for UI display.",
+    )
+    page_offset: int = Field(
+        default=1,
+        description="Starting page number for the first physical PDF page.",
     )
 
 

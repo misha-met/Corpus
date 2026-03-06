@@ -11,6 +11,8 @@ export interface UploadRequest {
    *  e.g. "Smith, J. et al. (2024) 'Climate Change Review'"
    *  Stored in localStorage keyed by source_id. */
   citationRef?: string;
+  /** Starting page number for the first physical PDF page (default 1). */
+  pageOffset?: number;
 }
 
 interface IngestModalProps {
@@ -36,6 +38,8 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
   const [sourceIds, setSourceIds] = useState<string[]>([]);
   const [citationRefs, setCitationRefs] = useState<string[]>([]);
   const [showCitationRefs, setShowCitationRefs] = useState(false);
+  const [pageOffset, setPageOffset] = useState(1);
+  const [showPageOffset, setShowPageOffset] = useState(false);
   const [summarize, setSummarize] = useState(true);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -84,6 +88,8 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
       setFiles(valid);
       setSourceIds(valid.map((f) => sanitizeSourceId(f.name)));
       setCitationRefs(valid.map(() => ""));
+      setPageOffset(1);
+      setShowPageOffset(false);
       setValidationError(null);
     },
     [validateFile]
@@ -123,11 +129,12 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
       sourceId: normalizedSourceIds[idx],
       summarize,
       citationRef: citationRefs[idx]?.trim() || undefined,
+      pageOffset: pageOffset > 1 ? pageOffset : undefined,
     }));
 
     onStartUpload(reqs);
     onClose();
-  }, [files, sourceIds, citationRefs, summarize, onStartUpload, onClose]);
+  }, [files, sourceIds, citationRefs, pageOffset, summarize, onStartUpload, onClose]);
 
   return (
     <div
@@ -351,6 +358,44 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
                       ))}
                     </div>
                   )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Starting page number — optional, collapsible, PDF only */}
+          {files.some((f) => f.name.toLowerCase().endsWith(".pdf")) && (
+            <div>
+              <button
+                type="button"
+                onClick={() => setShowPageOffset((v) => !v)}
+                className="flex items-center gap-1.5 text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors mb-1"
+              >
+                <svg
+                  className={`w-3 h-3 shrink-0 transition-transform ${showPageOffset ? "rotate-90" : ""}`}
+                  fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                </svg>
+                Starting page number
+                <span className="ml-1 text-[10px] px-1.5 py-px rounded bg-white/8 text-[var(--muted-foreground)]">optional</span>
+              </button>
+
+              {showPageOffset && (
+                <div className="pl-1 space-y-2">
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={pageOffset}
+                    onChange={(e) => setPageOffset(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                    className="w-32 px-3 py-2 rounded-lg text-sm text-[var(--foreground)] placeholder-[var(--muted-foreground)] focus:outline-none transition-colors"
+                    style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }}
+                  />
+                  <p className="text-[11px] text-[var(--muted-foreground)]/70">
+                    Page number of the first page in this PDF — applied to all PDFs in this batch.
+                    Leave at 1 for documents whose page numbers start at 1.
+                  </p>
                 </div>
               )}
             </div>

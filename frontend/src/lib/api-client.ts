@@ -189,12 +189,14 @@ class SourceApiClient {
   async uploadDocument(
     file: File,
     sourceId: string,
-    summarize: boolean = true
+    summarize: boolean = true,
+    pageOffset?: number
   ): Promise<IngestResponse> {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("source_id", sourceId);
     formData.append("summarize", String(summarize));
+    formData.append("page_offset", String(pageOffset ?? 1));
 
     // Call the backend directly to bypass the Next.js dev proxy
     // which has a ~30s timeout — upload+ingest can take minutes.
