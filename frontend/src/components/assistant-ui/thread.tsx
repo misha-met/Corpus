@@ -2,6 +2,7 @@ import { ChatMarkdownRendererWithSmooth } from "@/components/assistant-ui/chat-m
 import { ModelSelector } from "@/components/assistant-ui/model-selector";
 import { IntentSelector } from "@/components/assistant-ui/intent-selector";
 import { ThinkingPanel } from "@/components/assistant-ui/thinking-panel";
+import { RetrievalDetailsPanel } from "@/components/assistant-ui/retrieval-details-panel";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { MessageReferences } from "@/components/assistant-ui/message-references";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
@@ -433,6 +434,7 @@ const AssistantMessage: FC = () => {
       data-role="assistant"
     >
       <ThinkingPanel />
+      <RetrievalDetailsPanel />
 
       {/* only render the bubble once text begins to arrive */}
       {messageText.length > 0 && (

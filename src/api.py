@@ -54,6 +54,7 @@ from .query_events import (
     FinishEvent,
     IntentEvent,
     QueryEvent,
+    RetrievalDetailsEvent,
     SourcesEvent,
     StatusEvent,
     TextTokenEvent,
@@ -64,6 +65,7 @@ from .stream_protocol import (
     annotation_error_with_metadata,
     annotation_citations,
     annotation_intent,
+    annotation_retrieval_details,
     annotation_sources,
     annotation_status,
     encode_done,
@@ -337,6 +339,15 @@ def _encode_event(event: QueryEvent) -> Optional[str]:
         return annotation_sources(event.source_ids)
     elif isinstance(event, CitationListEvent):
         return annotation_citations(event.citations)
+    elif isinstance(event, RetrievalDetailsEvent):
+        return annotation_retrieval_details({
+            "timings": event.timings,
+            "score_distribution": event.score_distribution,
+            "candidates": event.candidates,
+            "budget": event.budget,
+            "source_diversity": event.source_diversity,
+            "threshold_info": event.threshold_info,
+        })
     elif isinstance(event, TextTokenEvent):
         # Should not reach here — handled statefully in the consumer loop.
         return None

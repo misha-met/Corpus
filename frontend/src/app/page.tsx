@@ -235,6 +235,9 @@ export default function Page() {
       case "citations":
         dispatch({ type: "SET_CITATIONS", citations: event.citations });
         break;
+      case "retrieval-details":
+        dispatch({ type: "SET_RETRIEVAL_DETAILS", details: event.details });
+        break;
       case "error":
         dispatch({ type: "SET_ERROR", message: event.error.message });
         break;

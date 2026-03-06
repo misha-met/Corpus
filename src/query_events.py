@@ -75,6 +75,31 @@ class CitationListEvent:
 
 
 @dataclass(frozen=True)
+class RetrievalDetailsEvent:
+    """Full retrieval diagnostics emitted after CitationListEvent.
+
+    Emitted once per query (after budget packing, before prompt build) so the
+    frontend can render a progressive-disclosure panel while the LLM streams.
+
+    Fields
+    ------
+    timings          Stage-level timings in ms (from TimingMetrics).
+    score_distribution  Reranker score stats + percentile bands.
+    candidates       Per-chunk fate records (serialised CandidateDecision dicts).
+    budget           Token budget utilisation (from BudgetMetrics).
+    source_diversity Source counts across all candidates.
+    threshold_info   Threshold filtering parameters (from ThresholdMetrics).
+    """
+
+    timings: dict[str, object] = field(default_factory=dict)
+    score_distribution: dict[str, object] = field(default_factory=dict)
+    candidates: list[dict[str, object]] = field(default_factory=list)
+    budget: dict[str, object] = field(default_factory=dict)
+    source_diversity: dict[str, object] = field(default_factory=dict)
+    threshold_info: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class FinishEvent:
     """Pipeline execution complete."""
 
@@ -91,6 +116,7 @@ QueryEvent = Union[
     TextTokenEvent,
     ThinkingTokenEvent,
     CitationListEvent,
+    RetrievalDetailsEvent,
     ErrorEvent,
     FinishEvent,
 ]

@@ -7,6 +7,27 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+@dataclass(frozen=True)
+class CandidateDecision:
+    """Per-chunk fate record for retrieval diagnostics.
+
+    Tracks how each candidate chunk progressed (or was removed) through the
+    retrieval pipeline stages.  Created as a side-channel list alongside the
+    normal ``list[RetrievalResult]`` return when ``track_decisions=True`` is
+    passed to ``RetrievalEngine.search()``.
+    """
+
+    chunk_id: str
+    source_id: str
+    page: Optional[int]
+    score: float
+    percentile: float
+    rank: int          # 1-indexed rank in the reranked list before filtering
+    status: str        # "kept" | "filtered" | "deduplicated" | "budget_cut"
+    reason: str        # human-readable: "below threshold (0.27)" etc.
+    text_preview: str  # first 80 chars of chunk text
+
+
 @dataclass
 class BudgetMetrics:
     """Token budget utilization metrics."""

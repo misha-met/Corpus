@@ -60,6 +60,52 @@ export interface CitationsEvent {
   citations: Citation[];
 }
 
+// ---------------------------------------------------------------------------
+// Retrieval details type (matches RetrievalDetailsEvent in src/query_events.py)
+// ---------------------------------------------------------------------------
+
+export interface CandidateDecision {
+  chunk_id: string;
+  source_id: string;
+  page: number | null;
+  score: number;
+  percentile: number;
+  rank: number;
+  /** "kept" | "filtered" | "deduplicated" | "budget_cut" */
+  status: string;
+  reason: string;
+  text_preview: string;
+}
+
+export interface RetrievalDetails {
+  timings: Record<string, number>;
+  score_distribution: {
+    min: number; max: number; mean: number; std: number; n: number;
+    threshold: number;
+    percentile_10: number; percentile_25: number; percentile_50: number;
+    percentile_75: number; percentile_90: number;
+  };
+  candidates: CandidateDecision[];
+  budget: {
+    budget_tokens: number; used_tokens: number; utilization_pct: number;
+    avg_doc_tokens: number; docs_packed: number; docs_skipped: number;
+    docs_truncated: number;
+  };
+  source_diversity: {
+    distinct_sources: number; source_counts: Record<string, number>;
+    total_candidates: number; kept_candidates: number;
+  };
+  threshold_info: {
+    threshold_value: number; items_before_threshold: number;
+    items_after_threshold: number; safety_net_triggered: boolean; min_docs: number;
+  };
+}
+
+export interface RetrievalDetailsEvent {
+  type: "retrieval-details";
+  details: RetrievalDetails;
+}
+
 export interface ErrorEvent {
   type: "error";
   error: {
@@ -81,6 +127,7 @@ export type CustomEvent =
   | IntentEvent
   | SourcesEvent
   | CitationsEvent
+  | RetrievalDetailsEvent
   | ErrorEvent
   | FinishStepEvent;
 
@@ -192,6 +239,24 @@ export function parseCustomEvent(dataPart: unknown): CustomEvent | null {
         finishReason: typeof d?.["finishReason"] === "string" ? d["finishReason"] : "stop",
         isContinued: Boolean(d?.["isContinued"]),
       };
+    }
+
+    case "data-retrieval-details": {
+      const d = part["data"] as Record<string, unknown> | null | undefined;
+      if (d && typeof d === "object") {
+        // The backend spreads fields directly into the annotation payload.
+        // Re-assemble them as a nested RetrievalDetails object.
+        const details: RetrievalDetails = {
+          timings: (d["timings"] as Record<string, number>) ?? {},
+          score_distribution: (d["score_distribution"] as RetrievalDetails["score_distribution"]) ?? {} as RetrievalDetails["score_distribution"],
+          candidates: (d["candidates"] as CandidateDecision[]) ?? [],
+          budget: (d["budget"] as RetrievalDetails["budget"]) ?? {} as RetrievalDetails["budget"],
+          source_diversity: (d["source_diversity"] as RetrievalDetails["source_diversity"]) ?? {} as RetrievalDetails["source_diversity"],
+          threshold_info: (d["threshold_info"] as RetrievalDetails["threshold_info"]) ?? {} as RetrievalDetails["threshold_info"],
+        };
+        return { type: "retrieval-details", details };
+      }
+      return null;
     }
 
     default:

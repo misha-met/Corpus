@@ -27,6 +27,7 @@ from typing import Any, Optional
 
 from .config import ModelConfig, ResolvedRetrievalParams
 from .metrics import (
+    CandidateDecision,
     RetrievalMetrics,
     TimingMetrics,
     RerankerMetrics,
@@ -582,7 +583,8 @@ class RetrievalEngine:
         embedding_query: Optional[str] = None,
         bm25_query: Optional[str] = None,
         intent: Optional[str] = None,
-    ) -> list[RetrievalResult]:
+        track_decisions: bool = False,
+    ) -> "list[RetrievalResult] | tuple[list[RetrievalResult], list[CandidateDecision]]":
         """Execute hybrid search with timing and metrics collection.
 
         Pipeline stages:
@@ -593,6 +595,12 @@ class RetrievalEngine:
         5. Budget-aware expansion
         6. Final dedup
         7. Context expansion to parent text
+
+        When *track_decisions* is ``True`` the return type changes to a
+        ``(results, decisions)`` tuple where *decisions* is a
+        ``list[CandidateDecision]`` recording the fate of every candidate that
+        entered the reranker.  When ``False`` (default) the existing
+        ``list[RetrievalResult]`` is returned unchanged (backward-compatible).
         """
         cfg = self._config
 
@@ -629,16 +637,52 @@ class RetrievalEngine:
         reranked, raw_scores = self._stage_rerank(query, fused, k_rerank, reranker_enabled, timing)
         all_reranked = list(reranked)
 
+        # --- Decision tracking setup (after stage 2) ---
+        # Mutable dict: chunk_id -> {status, reason} — populated after each stage.
+        # Percentile: rank 1 out of n gets 100%, rank n gets ~0%.
+        _tracker: dict[str, dict[str, Any]] = {}
+        if track_decisions:
+            n_reranked = len(all_reranked)
+            score_key_t = "rerank_score" if reranker_enabled else "score"
+            for _rank0, _item in enumerate(all_reranked):
+                _item_id = _item.get("id", "")
+                _percentile = (
+                    100.0 * (n_reranked - _rank0) / (n_reranked - 1)
+                    if n_reranked > 1 else 100.0
+                )
+                _tracker[_item_id] = {
+                    "item": _item,
+                    "rank": _rank0 + 1,
+                    "score": float(_item.get(score_key_t, 0.0)),
+                    "percentile": round(_percentile, 1),
+                    "status": "kept",
+                    "reason": "",
+                }
+
         # Stage 3: Dedup by parent
         t0 = time.perf_counter()
         reranked, dedup_metrics = self._deduplicate_by_parent(reranked, top_k=len(reranked), max_children_per_parent=_max_children)
         timing.dedup_ms = (time.perf_counter() - t0) * 1000
         logger.debug(f"Parent dedup (post-rerank): {dedup_metrics.children_before_dedup} -> {dedup_metrics.children_after_dedup} ({dedup_metrics.reduction_pct:.1f}% reduction)")
 
+        if track_decisions:
+            _post_dedup3_ids = {item.get("id") for item in reranked}
+            for _item_id, _data in _tracker.items():
+                if _data["status"] == "kept" and _item_id not in _post_dedup3_ids:
+                    _data["status"] = "deduplicated"
+                    _data["reason"] = "max children per parent exceeded"
+
         # Stage 4: Threshold filter
         reranked, above_threshold_results, threshold, threshold_metrics = self._stage_threshold_filter(
             reranked, reranker_enabled, reranker_threshold, reranker_min_docs,
         )
+
+        if track_decisions:
+            _post_threshold_ids = {item.get("id") for item in reranked}
+            for _item_id, _data in _tracker.items():
+                if _data["status"] == "kept" and _item_id not in _post_threshold_ids:
+                    _data["status"] = "filtered"
+                    _data["reason"] = f"below threshold ({threshold:.3f})"
 
         reranker_metrics = compute_reranker_stats(raw_scores)
         if reranker_metrics.items_reranked > 0:
@@ -655,6 +699,16 @@ class RetrievalEngine:
             query, reranked, all_reranked, above_threshold_results,
             k_final, budget, threshold, intent,
         )
+
+        if track_decisions:
+            # Budget expansion can re-introduce items that were marked "filtered"
+            # (sub-threshold backfill).  Restore their status so they show as kept.
+            _post_expand_ids = {item.get("id") for item in reranked}
+            for _item_id in _post_expand_ids:
+                _data = _tracker.get(_item_id)
+                if _data and _data["status"] == "filtered":
+                    _data["status"] = "kept"
+                    _data["reason"] = "sub-threshold backfill"
 
         # Stage 6: Final dedup
         final: list[dict[str, Any]] = []
@@ -694,4 +748,37 @@ class RetrievalEngine:
                 score=results[0].score, parent_text=results[0].parent_text, metrics=metrics,
             )
 
-        return results
+        if not track_decisions:
+            return results
+
+        # --- Finalize decision records ---
+        # Stage 6 outcome: items in _tracker that are "kept" but not in `final`
+        # were removed by the final dedup pass.
+        _final_ids = {item.get("id") for item in final}
+        for _item_id, _data in _tracker.items():
+            if _data["status"] == "kept" and _item_id not in _final_ids:
+                _data["status"] = "deduplicated"
+                _data["reason"] = "final dedup"
+
+        decisions: list[CandidateDecision] = []
+        for _item_id, _data in _tracker.items():
+            _item = _data["item"]
+            _meta = _item.get("metadata") or {}
+            _page_raw = _meta.get("page_number") or _meta.get("display_page")
+            try:
+                _page = int(_page_raw) if _page_raw is not None else None
+            except (TypeError, ValueError):
+                _page = None
+            decisions.append(CandidateDecision(
+                chunk_id=_item_id,
+                source_id=_meta.get("source_id", ""),
+                page=_page,
+                score=_data["score"],
+                percentile=_data["percentile"],
+                rank=_data["rank"],
+                status=_data["status"],
+                reason=_data["reason"],
+                text_preview=(_item.get("text", "") or "")[:80],
+            ))
+
+        return results, decisions

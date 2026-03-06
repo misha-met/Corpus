@@ -15,7 +15,7 @@ import os
 import re
 import threading
 from contextlib import nullcontext
-from dataclasses import dataclass, field, replace as _dc_replace
+from dataclasses import asdict as _dc_asdict, dataclass, field, replace as _dc_replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -48,6 +48,7 @@ from .intent import (
 from .latency import LatencyProfiler
 from .metrics import (
     BudgetMetrics,
+    CandidateDecision,
     RetrievalMetrics,
 )
 from .citation_verification import compute_highlight_texts
@@ -63,6 +64,7 @@ from .query_events import (
     FinishEvent,
     IntentEvent,
     QueryEvent,
+    RetrievalDetailsEvent,
     SourcesEvent,
     StatusEvent,
     TextTokenEvent,
@@ -134,6 +136,7 @@ class _RetrieveResult:
     extra_instructions: Optional[str]
     retrieval_metrics: Optional[RetrievalMetrics]
     generator_preload_future: Optional[concurrent.futures.Future[MlxGenerator]]
+    candidate_decisions: list[CandidateDecision] = field(default_factory=list)
 
 
 @dataclass
@@ -149,6 +152,7 @@ class _PackResult:
     packed_retrieval_results: list[RetrievalResult]
     pack_result: Optional[BudgetPackResult]
     packed_metadatas: list[dict[str, Any]]
+    candidate_decisions: list[CandidateDecision] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -1193,6 +1197,10 @@ class RagEngine:
         if packed.citation_list:
             yield CitationListEvent(citations=packed.citation_list)
 
+        # -- retrieval diagnostics event ------------------------------------
+        if packed.candidate_decisions:
+            yield self._build_retrieval_details_event(packed, retrieved)
+
         # -- build prompt ---------------------------------------------------
         if should_stop():
             yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled before prompt build")
@@ -1413,6 +1421,7 @@ class RagEngine:
         context_docs: list = []
         retrieval_metrics = None
         generator_preload_future = None
+        candidate_decisions: list[CandidateDecision] = []
 
         if classified.bypass_retrieval:
             if cite:
@@ -1454,13 +1463,19 @@ class RagEngine:
                 generator_preload_future = self._start_generator_preload()
 
             with _span("Retrieval (hybrid search + rerank)"):
-                results = retrieval_engine.search(
+                _search_out = retrieval_engine.search(
                     query_text,
                     source_id=source_id,
                     params=classified.retrieval_params,
                     retrieval_budget=config.retrieval_budget,
                     intent=classified.intent_result.intent.value,
+                    track_decisions=True,
                 )
+            if isinstance(_search_out, tuple):
+                results, candidate_decisions = _search_out
+            else:
+                results = _search_out
+                candidate_decisions = []
 
             source_ids = sorted(
                 {
@@ -1501,6 +1516,7 @@ class RagEngine:
             extra_instructions=extra_instructions,
             retrieval_metrics=retrieval_metrics,
             generator_preload_future=generator_preload_future,
+            candidate_decisions=candidate_decisions,
         )
 
     def _step_pack_budget(
@@ -1618,9 +1634,117 @@ class RagEngine:
             packed_retrieval_results=packed_retrieval_results,
             pack_result=pack_result_obj,
             packed_metadatas=packed_metadatas,
+            candidate_decisions=self._apply_budget_decisions(
+                retrieved.candidate_decisions,
+                retrieved.results,
+                pack_result_obj,
+            ),
         )
 
     # -- internal pipeline helpers -----------------------------------------
+
+    @staticmethod
+    def _build_retrieval_details_event(
+        packed: "_PackResult",
+        retrieved: "_RetrieveResult",
+    ) -> "RetrievalDetailsEvent":
+        """Assemble a RetrievalDetailsEvent from retrieval + packing results."""
+        rm = retrieved.retrieval_metrics
+
+        # Timings
+        timings: dict[str, Any] = _dc_asdict(rm.timing) if rm else {}
+
+        # Score distribution with percentile bands
+        _all_scores = sorted(d.score for d in packed.candidate_decisions)
+        _n = len(_all_scores)
+
+        def _pct(p: float) -> float:
+            return _all_scores[int(_n * p)] if _n else 0.0
+
+        reranker_rm = rm.reranker if rm else None
+        score_distribution: dict[str, Any] = {
+            "min": reranker_rm.score_min if reranker_rm else 0.0,
+            "max": reranker_rm.score_max if reranker_rm else 0.0,
+            "mean": reranker_rm.score_mean if reranker_rm else 0.0,
+            "std": reranker_rm.score_std if reranker_rm else 0.0,
+            "n": reranker_rm.items_reranked if reranker_rm else _n,
+            "threshold": rm.threshold.threshold_value if rm else 0.0,
+            "percentile_10": _pct(0.10),
+            "percentile_25": _pct(0.25),
+            "percentile_50": _pct(0.50),
+            "percentile_75": _pct(0.75),
+            "percentile_90": _pct(0.90),
+        }
+
+        # Candidates: serialise each CandidateDecision to a plain dict
+        candidates: list[dict[str, Any]] = [
+            {
+                "chunk_id": d.chunk_id,
+                "source_id": d.source_id,
+                "page": d.page,
+                "score": d.score,
+                "percentile": d.percentile,
+                "rank": d.rank,
+                "status": d.status,
+                "reason": d.reason,
+                "text_preview": d.text_preview,
+            }
+            for d in packed.candidate_decisions
+        ]
+
+        # Budget
+        budget_info: dict[str, Any] = _dc_asdict(packed.budget_metrics) if packed.budget_metrics else {}
+
+        # Source diversity (kept candidates only)
+        kept = [d for d in packed.candidate_decisions if d.status == "kept"]
+        source_counts: dict[str, int] = {}
+        for d in kept:
+            source_counts[d.source_id] = source_counts.get(d.source_id, 0) + 1
+        source_diversity: dict[str, Any] = {
+            "distinct_sources": len(source_counts),
+            "source_counts": source_counts,
+            "total_candidates": len(packed.candidate_decisions),
+            "kept_candidates": len(kept),
+        }
+
+        # Threshold info
+        threshold_info: dict[str, Any] = _dc_asdict(rm.threshold) if rm else {}
+
+        return RetrievalDetailsEvent(
+            timings=timings,
+            score_distribution=score_distribution,
+            candidates=candidates,
+            budget=budget_info,
+            source_diversity=source_diversity,
+            threshold_info=threshold_info,
+        )
+
+    @staticmethod
+    def _apply_budget_decisions(        decisions: list[CandidateDecision],
+        retrieved_results: list[RetrievalResult],
+        pack_result: Optional[BudgetPackResult],
+    ) -> list[CandidateDecision]:
+        """Update candidate decision statuses after token budget packing.
+
+        Items that were "kept" through retrieval but skipped or truncated by the
+        budget packer are updated to "budget_cut".  Items that survived packing
+        keep their existing status unchanged.
+        """
+        if not decisions or pack_result is None:
+            return decisions
+
+        packed_chunk_ids: set[str] = set()
+        for pack_idx in pack_result.packed_indices:
+            if pack_idx < len(retrieved_results):
+                packed_chunk_ids.add(retrieved_results[pack_idx].child_id)
+
+        updated: list[CandidateDecision] = []
+        for d in decisions:
+            if d.status == "kept" and d.chunk_id not in packed_chunk_ids:
+                updated.append(_dc_replace(d, status="budget_cut", reason="skipped by budget packer"))
+            else:
+                updated.append(d)
+        return updated
 
     def _handle_collection(
         self,

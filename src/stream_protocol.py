@@ -226,6 +226,11 @@ def annotation_citations(citations: list[dict[str, Any]]) -> str:
     return encode_annotation([{"type": "citations", "citations": citations}])
 
 
+def annotation_retrieval_details(details: dict[str, Any]) -> str:
+    """Encode retrieval diagnostics as a custom annotation part."""
+    return encode_annotation([{"type": "retrieval-details", **details}])
+
+
 # ---------------------------------------------------------------------------
 # HTTP error body helper (for non-streaming error responses)
 # ---------------------------------------------------------------------------

@@ -22,10 +22,10 @@ import {
   type ReactNode,
 } from "react";
 
-import type { Citation } from "@/lib/event-parser";
+import type { Citation, RetrievalDetails } from "@/lib/event-parser";
 
 // Re-export Citation so consumers can import it from this module if convenient
-export type { Citation };
+export type { Citation, RetrievalDetails };
 
 // ---------------------------------------------------------------------------
 // Thinking step — one status update emitted during RAG pipeline execution
@@ -67,6 +67,8 @@ export interface AppState {
   intentOverride: string;
   /** Active chat mode: "rag" for document-QA, "freeform" for non-RAG chat */
   chatMode: "rag" | "freeform";
+  /** Retrieval diagnostics from the most recent query (cleared on QUERY_STARTED) */
+  retrievalDetails: RetrievalDetails | null;
 }
 
 const initialState: AppState = {
@@ -82,6 +84,7 @@ const initialState: AppState = {
   currentAssistantMessageId: null,
   intentOverride: "auto",
   chatMode: "rag",
+  retrievalDetails: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -113,7 +116,8 @@ export type AppAction =
   | { type: "SET_ACTIVE_CITATION"; citation: Citation | null }
   | { type: "ADD_THINKING_STEP"; message: string }
   | { type: "SET_INTENT_OVERRIDE"; intentOverride: string }
-  | { type: "SET_CHAT_MODE"; mode: "rag" | "freeform" };
+  | { type: "SET_CHAT_MODE"; mode: "rag" | "freeform" }
+  | { type: "SET_RETRIEVAL_DETAILS"; details: RetrievalDetails };
 
 // ---------------------------------------------------------------------------
 // Reducer
@@ -132,6 +136,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
         // Explicitly NOT clearing citationsByMessage so old messages retain their references drawer
         thinkingSteps: [],
         _stepCounter: 0,
+        retrievalDetails: null,
       };
     case "QUERY_FINISHED":
       return {
@@ -189,6 +194,8 @@ function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, intentOverride: action.intentOverride };
     case "SET_CHAT_MODE":
       return { ...state, chatMode: action.mode };
+    case "SET_RETRIEVAL_DETAILS":
+      return { ...state, retrievalDetails: action.details };
     default:
       return state;
   }
