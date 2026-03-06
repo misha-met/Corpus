@@ -219,6 +219,10 @@ class SourceInfo(BaseModel):
         default=None,
         description="Best-available text/content size in bytes for UI display.",
     )
+    image_count: Optional[int] = Field(
+        default=None,
+        description="Number of extracted images/figures for this source (Phase 4).",
+    )
 
 
 class SourceListResponse(BaseModel):
@@ -354,6 +358,39 @@ class TimelineBucket(BaseModel):
     sources: list[str]
 
 
+class RelationshipNode(BaseModel):
+    """A single source node in the relationship graph."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    label: str
+    size: int = 0
+    dominant_topic: Optional[int] = None
+    summary: Optional[str] = None
+
+
+class RelationshipEdge(BaseModel):
+    """A weighted edge between two source nodes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str
+    target: str
+    types: list[str]
+    weights: dict[str, float]
+    combined_weight: float
+
+
+class RelationshipGraph(BaseModel):
+    """Nodes + edges for the source relationship force graph."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    nodes: list[RelationshipNode] = Field(default_factory=list)
+    edges: list[RelationshipEdge] = Field(default_factory=list)
+
+
 class AnalyticsResponse(BaseModel):
     """Full corpus analytics response."""
 
@@ -363,6 +400,7 @@ class AnalyticsResponse(BaseModel):
     topics: list[TopicCluster] = Field(default_factory=list)
     entities: list[EntityFrequency] = Field(default_factory=list)
     timeline: list[TimelineBucket] = Field(default_factory=list)
+    relationships: RelationshipGraph = Field(default_factory=RelationshipGraph)
     ner_available: bool = False
     timeline_available: bool = True
 
@@ -384,6 +422,7 @@ class HealthResponse(BaseModel):
         description="Detected system RAM in GB, used by frontend for capability gating.",
     )
     spacy_available: bool = False
+    image_extraction_enabled: bool = True
     analytics_cache_status: Optional[str] = Field(
         default=None,
         description="Analytics cache status: 'fresh', 'stale', or 'empty'.",

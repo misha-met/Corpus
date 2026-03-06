@@ -22,6 +22,7 @@ import { useAppDispatch, useAppState } from "@/context/app-context";
 import { parseCustomEvent } from "@/lib/event-parser";
 import type { ChatSession } from "@/lib/session-store";
 import type { FreeChatMessage } from "@/lib/session-store";
+import { sourceApi, type HealthResponse } from "@/lib/api-client";
 import { Plus } from "lucide-react";
 import { BackgroundBeams } from "@/components/ui/beams";
 import { Meteors } from "@/components/ui/meteors";
@@ -140,6 +141,17 @@ export default function Page() {
 
   // Analytics dashboard
   const [showAnalytics, setShowAnalytics] = useState(false);
+
+  // Health flags — fetched once on mount, used for feature gating
+  const [healthFlags, setHealthFlags] = useState<HealthResponse | null>(null);
+  useEffect(() => {
+    sourceApi
+      .getHealth()
+      .then(setHealthFlags)
+      .catch(() => {
+        // Backend not reachable yet; flags remain null (show all features by default)
+      });
+  }, []);
 
   // Restored freeform session state (passed to FreeformChatPanel)
   const [restoredSessionId, setRestoredSessionId] = useState<string | null>(null);
@@ -382,17 +394,19 @@ export default function Page() {
               Chat History
             </button>
 
-            {/* Analytics button */}
-            <button
-              onClick={() => setShowAnalytics(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors text-gray-500 hover:text-gray-300 hover:bg-[#1e1e1e]"
-              title="Corpus analytics"
-            >
-              <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-              </svg>
-              Analytics
-            </button>
+            {/* Analytics button — shown when engine is loaded or health is unknown */}
+            {(healthFlags === null || healthFlags.engine_loaded) && (
+              <button
+                onClick={() => setShowAnalytics(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors text-gray-500 hover:text-gray-300 hover:bg-[#1e1e1e]"
+                title="Corpus analytics"
+              >
+                <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                </svg>
+                Analytics
+              </button>
+            )}
           </div>
         </header>
 
@@ -434,6 +448,7 @@ export default function Page() {
                 selectedSourceIds={selectedSourceIds}
                 onSelectedSourceIdsChange={setSelectedSourceIds}
                 onCollapse={() => setIsPanelCollapsed(true)}
+                imageExtractionEnabled={healthFlags?.image_extraction_enabled ?? false}
               />
             )}
           </aside>

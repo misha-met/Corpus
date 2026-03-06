@@ -13,6 +13,7 @@ export interface SourceInfo {
   snapshot_path: string | null;
   source_size_bytes?: number | null;
   content_size_bytes?: number | null;
+  image_count?: number | null;
 }
 
 export interface SourceListResponse {
@@ -133,13 +134,44 @@ export interface TimelineBucket {
   sources: string[];
 }
 
+export interface RelationshipNode {
+  id: string;
+  label: string;
+  size: number;
+  dominant_topic: number | null;
+  summary: string | null;
+}
+
+export interface RelationshipEdge {
+  source: string;
+  target: string;
+  types: string[];
+  weights: Record<string, number>;
+  combined_weight: number;
+}
+
+export interface RelationshipGraph {
+  nodes: RelationshipNode[];
+  edges: RelationshipEdge[];
+}
+
 export interface AnalyticsResponse {
   overview: CorpusOverview;
   topics: TopicCluster[];
   entities: EntityFrequency[];
   timeline: TimelineBucket[];
+  relationships: RelationshipGraph;
   ner_available: boolean;
   timeline_available: boolean;
+}
+
+export interface HealthResponse {
+  status: string;
+  engine_loaded: boolean;
+  system_ram_gb: number | null;
+  spacy_available: boolean;
+  image_extraction_enabled: boolean;
+  analytics_cache_status: string | null;
 }
 
 class SourceApiClient {
@@ -291,6 +323,26 @@ class SourceApiClient {
     if (!res.ok) {
       const message = await this.parseErrorResponse(res);
       throw new Error(message);
+    }
+    return res.json();
+  }
+
+  async getRelationships(force?: boolean): Promise<RelationshipGraph> {
+    const url = force
+      ? `${this.baseUrl}/analytics/relationships?force=true`
+      : `${this.baseUrl}/analytics/relationships`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      const message = await this.parseErrorResponse(res);
+      throw new Error(message);
+    }
+    return res.json();
+  }
+
+  async getHealth(): Promise<HealthResponse> {
+    const res = await fetch(`${this.baseUrl}/health`);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
     }
     return res.json();
   }

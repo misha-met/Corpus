@@ -448,6 +448,228 @@ def _compute_timeline(storage, source_ids: list[str]) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Source relationship graph
+# ---------------------------------------------------------------------------
+
+def _compute_relationships(
+    storage,
+    source_ids: list[str],
+    topics: list[dict[str, Any]],
+    timeline: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Compute source relationship graph with embedding, entity, and temporal edges.
+
+    Memory-efficient: fetches vectors one source at a time, computes the mean
+    centroid, then discards the raw vectors.  Only the centroid matrix
+    (n_sources × embedding_dim) is held in memory when calling cosine_similarity.
+    """
+    if not _SKLEARN_AVAILABLE or len(source_ids) < 2:
+        # Build minimal nodes even for a single-source corpus
+        nodes = [{"id": sid, "label": sid, "size": 0, "dominant_topic": None, "summary": None} for sid in source_ids]
+        return {"nodes": nodes, "edges": []}
+
+    from sklearn.metrics.pairwise import cosine_similarity
+    import numpy as np
+
+    # ── Node metadata ───────────────────────────────────────────────────────
+
+    # Dominant topic per source (from already-computed topic clusters)
+    topic_map: dict[str, Optional[int]] = {sid: None for sid in source_ids}
+    for topic in topics:
+        for sid in topic.get("source_ids", []):
+            if sid in topic_map and topic_map[sid] is None:
+                topic_map[sid] = topic.get("cluster_id")
+
+    # First-200-char summary per source
+    summary_map: dict[str, str] = {}
+    if storage._summaries is not None:
+        try:
+            rows = storage._summaries.to_arrow().to_pylist()
+            for row in rows:
+                sid = row.get("source_id", "")
+                text = (row.get("summary", "") or "")[:200]
+                if sid in topic_map and text:
+                    summary_map[sid] = text
+        except Exception as exc:
+            logger.warning("Relationships: summaries failed: %s", exc)
+
+    # ── Batch centroid computation (memory-efficient) ────────────────────────
+
+    size_map: dict[str, int] = {sid: 0 for sid in source_ids}
+    centroids: dict[str, Any] = {}  # sid → np.ndarray
+
+    if storage._table is not None:
+        for sid in source_ids:
+            try:
+                escaped = storage._escape_sql_literal(sid)
+                rows = (
+                    storage._table
+                    .search()
+                    .where(f"source_id = '{escaped}'", prefilter=True)
+                    .select(["vector"])
+                    .limit(10_000)
+                    .to_list()
+                )
+                if not rows:
+                    continue
+                size_map[sid] = len(rows)
+                vecs = np.array([r["vector"] for r in rows], dtype=np.float32)
+                centroids[sid] = vecs.mean(axis=0)
+                del vecs  # free memory immediately
+            except Exception as exc:
+                logger.warning("Relationships: centroid for %s failed: %s", sid, exc)
+
+    # ── Pairwise embedding similarity ────────────────────────────────────────
+
+    sim_pairs: dict[tuple[str, str], float] = {}
+    valid_sids = [s for s in source_ids if s in centroids]
+    if len(valid_sids) >= 2:
+        try:
+            centroid_matrix = np.array([centroids[s] for s in valid_sids], dtype=np.float32)
+            sim_matrix = cosine_similarity(centroid_matrix)  # shape (n, n)
+            for i, si in enumerate(valid_sids):
+                row = sim_matrix[i].copy()
+                row[i] = -1.0  # exclude self
+                top_j_indices = row.argsort()[-8:][::-1]
+                for j in top_j_indices:
+                    if j == i:
+                        continue  # guard: when n < 8, i appears in results
+                    score = float(sim_matrix[i, j])
+                    if score < 0.3:
+                        continue
+                    # canonical key: lower index first to avoid duplicates
+                    a, b = (si, valid_sids[j]) if i < j else (valid_sids[j], si)
+                    if (a, b) not in sim_pairs or sim_pairs[(a, b)] < score:
+                        sim_pairs[(a, b)] = score
+        except Exception as exc:
+            logger.warning("Relationships: cosine similarity failed: %s", exc)
+
+    # ── Per-source entity sets ────────────────────────────────────────────────
+    # Re-extract compact entity sets per source (uses parent chunks, max 20 each)
+
+    entity_sets: dict[str, set[str]] = {sid: set() for sid in source_ids}
+    if _SPACY_AVAILABLE and _nlp is not None and storage._parents is not None:
+        try:
+            for sid in source_ids:
+                escaped = storage._escape_sql_literal(sid)
+                rows = (
+                    storage._parents
+                    .search()
+                    .where(f"source_id = '{escaped}'", prefilter=True)
+                    .select(["text"])
+                    .limit(20)
+                    .to_list()
+                )
+                texts = [r.get("text", "") or "" for r in rows if r.get("text")]
+                for doc in _nlp.pipe(texts, batch_size=16, disable=["parser", "lemmatizer"]):
+                    for ent in doc.ents:
+                        if ent.label_ in ("PERSON", "ORG", "GPE", "LOC", "NORP"):
+                            entity_sets[sid].add(_normalize_entity(ent.text))
+        except Exception as exc:
+            logger.warning("Relationships: entity sets failed: %s", exc)
+
+    # ── Jaccard entity similarity ─────────────────────────────────────────────
+
+    entity_pairs: dict[tuple[str, str], float] = {}
+    sid_list = source_ids
+    for i, si in enumerate(sid_list):
+        for j in range(i + 1, len(sid_list)):
+            sj = sid_list[j]
+            set_i = entity_sets.get(si, set())
+            set_j = entity_sets.get(sj, set())
+            if not set_i or not set_j:
+                continue
+            intersection = len(set_i & set_j)
+            union = len(set_i | set_j)
+            if union > 0:
+                jaccard = intersection / union
+                if jaccard >= 0.15:
+                    entity_pairs[(si, sj)] = jaccard
+
+    # ── Temporal overlap ──────────────────────────────────────────────────────
+    # Derive per-source year ranges from already-computed timeline buckets
+
+    source_years: dict[str, list[int]] = {sid: [] for sid in source_ids}
+    for bucket in timeline:
+        mid = (bucket.get("period_start", 0) + bucket.get("period_end", 0)) // 2
+        for sid in bucket.get("sources", []):
+            if sid in source_years:
+                source_years[sid].append(mid)
+
+    year_ranges: dict[str, tuple[int, int]] = {}
+    for sid, years in source_years.items():
+        if years:
+            year_ranges[sid] = (min(years), max(years))
+
+    temporal_pairs: dict[tuple[str, str], float] = {}
+    for i, si in enumerate(sid_list):
+        for j in range(i + 1, len(sid_list)):
+            sj = sid_list[j]
+            ri = year_ranges.get(si)
+            rj = year_ranges.get(sj)
+            if ri is None or rj is None:
+                continue
+            overlap_start = max(ri[0], rj[0])
+            overlap_end = min(ri[1], rj[1])
+            if overlap_end > overlap_start:
+                total = max(ri[1], rj[1]) - min(ri[0], rj[0])
+                if total > 0:
+                    ratio = (overlap_end - overlap_start) / total
+                    if ratio >= 0.1:
+                        temporal_pairs[(si, sj)] = ratio
+
+    # ── Merge edges ───────────────────────────────────────────────────────────
+
+    all_pairs: set[tuple[str, str]] = set(sim_pairs) | set(entity_pairs) | set(temporal_pairs)
+    edges: list[dict[str, Any]] = []
+    for (si, sj) in all_pairs:
+        types: list[str] = []
+        weights: dict[str, float] = {}
+        if (si, sj) in sim_pairs:
+            types.append("similarity")
+            weights["similarity"] = sim_pairs[(si, sj)]
+        if (si, sj) in entity_pairs:
+            types.append("entities")
+            weights["entities"] = entity_pairs[(si, sj)]
+        if (si, sj) in temporal_pairs:
+            types.append("temporal")
+            weights["temporal"] = temporal_pairs[(si, sj)]
+        combined = (
+            0.5 * weights.get("similarity", 0.0)
+            + 0.3 * weights.get("entities", 0.0)
+            + 0.2 * weights.get("temporal", 0.0)
+        )
+        edges.append({
+            "source": si,
+            "target": sj,
+            "types": types,
+            "weights": weights,
+            "combined_weight": round(combined, 4),
+        })
+
+    nodes = [
+        {
+            "id": sid,
+            "label": sid,
+            "size": size_map.get(sid, 0),
+            "dominant_topic": topic_map.get(sid),
+            "summary": summary_map.get(sid),
+        }
+        for sid in source_ids
+    ]
+
+    logger.info(
+        "Relationships: %d nodes, %d edges (%d sim, %d entity, %d temporal)",
+        len(nodes),
+        len(edges),
+        len(sim_pairs),
+        len(entity_pairs),
+        len(temporal_pairs),
+    )
+    return {"nodes": nodes, "edges": edges}
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -490,6 +712,7 @@ def compute_corpus_analytics(
     topics = _compute_topics(storage, source_ids) if _SKLEARN_AVAILABLE else []
     entities = _compute_entities(storage, source_ids) if _SPACY_AVAILABLE else []
     timeline = _compute_timeline(storage, source_ids)
+    relationships = _compute_relationships(storage, source_ids, topics, timeline)
 
     result: dict[str, Any] = {
         "_cache_key": _cache_key(source_ids),
@@ -497,6 +720,7 @@ def compute_corpus_analytics(
         "topics": topics,
         "entities": entities,
         "timeline": timeline,
+        "relationships": relationships,
         "ner_available": _SPACY_AVAILABLE,
         "timeline_available": _DATEPARSER_AVAILABLE,
     }

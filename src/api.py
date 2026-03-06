@@ -46,6 +46,9 @@ from .api_schemas import (
     IngestResponse,
     QueryRequest,
     QueryResponse,
+    RelationshipGraph,
+    RelationshipEdge,
+    RelationshipNode,
     SourceContentResponse,
     SourceDeleteResponse,
     SourceInfo,
@@ -285,6 +288,7 @@ async def health():
         engine_loaded=_engine_loaded,
         system_ram_gb=round(get_system_ram_gb(), 1),
         spacy_available=_SPACY_AVAILABLE,
+        image_extraction_enabled=True,
         analytics_cache_status=analytics_cache_status,
     )
 
@@ -328,11 +332,35 @@ def _build_analytics_response(data: dict) -> AnalyticsResponse:
         )
         for b in data.get("timeline", [])
     ]
+    rel_raw = data.get("relationships", {})
+    relationships = RelationshipGraph(
+        nodes=[
+            RelationshipNode(
+                id=n.get("id", ""),
+                label=n.get("label", ""),
+                size=n.get("size", 0),
+                dominant_topic=n.get("dominant_topic"),
+                summary=n.get("summary"),
+            )
+            for n in rel_raw.get("nodes", [])
+        ],
+        edges=[
+            RelationshipEdge(
+                source=e.get("source", ""),
+                target=e.get("target", ""),
+                types=e.get("types", []),
+                weights=e.get("weights", {}),
+                combined_weight=e.get("combined_weight", 0.0),
+            )
+            for e in rel_raw.get("edges", [])
+        ],
+    )
     return AnalyticsResponse(
         overview=overview,
         topics=topics,
         entities=entities,
         timeline=timeline,
+        relationships=relationships,
         ner_available=data.get("ner_available", False),
         timeline_available=data.get("timeline_available", True),
     )
@@ -340,7 +368,7 @@ def _build_analytics_response(data: dict) -> AnalyticsResponse:
 
 @app.get("/api/analytics", response_model=AnalyticsResponse)
 async def get_analytics(force: bool = False):
-    """Return full corpus analytics (topics, entities, timeline, overview).
+    """Return full corpus analytics (topics, entities, timeline, overview, relationships).
 
     Results are cached. Pass ``?force=true`` to recompute from scratch.
     Runs in a thread pool to avoid blocking the event loop.
@@ -354,6 +382,42 @@ async def get_analytics(force: bool = False):
         force_recompute=force,
     )
     return _build_analytics_response(data)
+
+
+@app.get("/api/analytics/relationships", response_model=RelationshipGraph)
+async def get_analytics_relationships(force: bool = False):
+    """Return the source relationship graph (nodes + edges)."""
+    from .analytics import compute_corpus_analytics
+
+    engine = await asyncio.to_thread(_get_engine)
+    data = await asyncio.to_thread(
+        compute_corpus_analytics,
+        engine.storage,
+        force_recompute=force,
+    )
+    rel_raw = data.get("relationships", {})
+    return RelationshipGraph(
+        nodes=[
+            RelationshipNode(
+                id=n.get("id", ""),
+                label=n.get("label", ""),
+                size=n.get("size", 0),
+                dominant_topic=n.get("dominant_topic"),
+                summary=n.get("summary"),
+            )
+            for n in rel_raw.get("nodes", [])
+        ],
+        edges=[
+            RelationshipEdge(
+                source=e.get("source", ""),
+                target=e.get("target", ""),
+                types=e.get("types", []),
+                weights=e.get("weights", {}),
+                combined_weight=e.get("combined_weight", 0.0),
+            )
+            for e in rel_raw.get("edges", [])
+        ],
+    )
 
 
 @app.get("/api/analytics/overview", response_model=CorpusOverview)

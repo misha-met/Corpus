@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import dynamic from "next/dynamic";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   BarChart,
@@ -15,6 +16,21 @@ import {
   Cell,
 } from "recharts";
 import { sourceApi, type AnalyticsResponse } from "@/lib/api-client";
+
+const RelationshipGraphComponent = dynamic(
+  () =>
+    import("@/components/relationship-graph").then((m) => ({
+      default: m.RelationshipGraph,
+    })),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex items-center justify-center h-64 text-xs text-gray-500">
+        Loading graph…
+      </div>
+    ),
+  },
+);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -396,6 +412,57 @@ function TimelineSection({
 }
 
 // ---------------------------------------------------------------------------
+// Relationships section
+// ---------------------------------------------------------------------------
+
+function RelationshipsSection({
+  relationships,
+}: {
+  relationships: AnalyticsResponse["relationships"];
+}) {
+  const hasData = relationships && relationships.nodes.length > 0;
+  return (
+    <section>
+      <h2 className="text-sm font-semibold text-gray-300 mb-3 uppercase tracking-wide">
+        Source Relationships
+      </h2>
+      {hasData ? (
+        <>
+          <p className="text-xs text-gray-500 mb-3">
+            {relationships.nodes.length} sources ·{" "}
+            {relationships.edges.length} connections. Hover nodes to highlight
+            neighbours; click to pin.
+          </p>
+          <RelationshipGraphComponent data={relationships} />
+          {/* Edge type legend note */}
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600">
+            <span>
+              <span className="font-medium text-blue-400/70">Solid</span> =
+              embedding similarity
+            </span>
+            <span>
+              <span className="font-medium text-indigo-400/70">Dashed</span> =
+              shared entities
+            </span>
+            <span>
+              <span className="font-medium text-emerald-400/70">Dotted</span> =
+              temporal overlap
+            </span>
+          </div>
+        </>
+      ) : (
+        <div className="rounded-lg border border-[#1e1e1e] bg-[#111] px-4 py-6 text-center">
+          <p className="text-xs text-gray-500">
+            Relationship graph will appear once analytics are computed (at least
+            2 sources required).
+          </p>
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main dashboard component
 // ---------------------------------------------------------------------------
 
@@ -519,6 +586,7 @@ export function AnalyticsDashboard({ open, onClose }: AnalyticsDashboardProps) {
                   timeline={analytics.timeline}
                   timelineAvailable={analytics.timeline_available}
                 />
+                <RelationshipsSection relationships={analytics.relationships} />
               </>
             )}
           </div>

@@ -14,6 +14,8 @@ interface SourcePanelProps {
   selectedSourceIds: string[];
   onSelectedSourceIdsChange: (ids: string[]) => void;
   onCollapse: () => void;
+  /** When true, show image count badges next to sources that have images. */
+  imageExtractionEnabled?: boolean;
 }
 
 /**
@@ -31,6 +33,7 @@ export function SourcePanel({
   selectedSourceIds,
   onSelectedSourceIdsChange,
   onCollapse,
+  imageExtractionEnabled = false,
 }: SourcePanelProps) {
   type IngestState = "ingesting" | "queued";
   type DisplaySource = SourceInfo & { ingestState?: IngestState };
@@ -437,9 +440,19 @@ export function SourcePanel({
 
                   {/* Title */}
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-[#e0e0e0] truncate">
-                      {source.source_id}
-                    </p>
+                    <div className="flex items-center gap-1.5">
+                      <p className="text-sm font-medium text-[#e0e0e0] truncate">
+                        {source.source_id}
+                      </p>
+                      {imageExtractionEnabled && (source.image_count ?? 0) > 0 && (
+                        <span
+                          className="shrink-0 text-xs text-gray-500 flex items-center gap-0.5"
+                          title={`${source.image_count} extracted image${source.image_count === 1 ? "" : "s"}`}
+                        >
+                          📷{source.image_count}
+                        </span>
+                      )}
+                    </div>
                     <p className="mt-0.5 text-xs text-muted-foreground/70 truncate">
                       {isPending
                         ? source.ingestState === "queued"
