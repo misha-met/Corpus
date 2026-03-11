@@ -46,7 +46,7 @@ chroma/
 
 *.md
 # Allow specific markdown files
-!tests/README.md
+!README.md
 !tests/TEST_REPORT.md
 
 # Ignore unsaved/scratch editor files created by VS Code or browsers
