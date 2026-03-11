@@ -2,7 +2,7 @@
 
 import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
 
-export type BackgroundTheme = "none" | "beams" | "meteors" | "rain" | "mesh" | "paths" | "starfield" | "particles";
+export type BackgroundTheme = "none" | "meteors" | "rain" | "mesh" | "starfield" | "particles";
 
 const STORAGE_KEY = "dh-background-theme";
 
@@ -22,8 +22,9 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   // Hydrate from localStorage on mount
   useEffect(() => {
     try {
-      const stored = localStorage.getItem(STORAGE_KEY) as BackgroundTheme | null;
-      if (stored) setThemeState(stored);
+      const raw = localStorage.getItem(STORAGE_KEY);
+      // "beams" was removed; ignore it so the user falls back to "none"
+      if (raw && raw !== "beams") setThemeState(raw as BackgroundTheme);
     } catch {}
   }, []);
 

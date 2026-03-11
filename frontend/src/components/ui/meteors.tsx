@@ -24,10 +24,10 @@ interface MeteorData {
 
 export function Meteors({
   className,
-  count = 20,
+  count = 12,
   angle = 215,
-  color = "#64748b",
-  tailColor = "#64748b",
+  color = "#ffffff",
+  tailColor = "#ffffff",
 }: MeteorsProps) {
   const [meteors, setMeteors] = useState<MeteorData[]>([])
 
@@ -36,14 +36,14 @@ export function Meteors({
       Array.from({ length: count }, (_, i) => ({
         id: i,
         left: i * (100 / count),
-        delay: Math.random() * 5,
-        duration: 3 + Math.random() * 7,
+        delay: Math.random() * 10,
+        duration: 6 + Math.random() * 10,
       })),
     )
   }, [count])
 
   return (
-    <div className={cn("pointer-events-none absolute inset-0 overflow-hidden", className)}>
+    <div className={cn("pointer-events-none absolute inset-0", className)}>
       <style>{`
         @keyframes meteor-fall {
           0% {
@@ -60,27 +60,21 @@ export function Meteors({
         }
       `}</style>
 
-      {/* Subtle gradient overlay */}
-      <div
-        className="pointer-events-none absolute inset-0"
-        style={{
-          background: `
-            radial-gradient(ellipse at 50% 0%, rgba(30, 40, 60, 0.3) 0%, transparent 50%),
-            radial-gradient(ellipse at 100% 100%, rgba(20, 20, 40, 0.2) 0%, transparent 50%)
-          `,
-        }}
-      />
+      {/* Night-sky base — extends 2px beyond bounds to prevent edge banding */}
+      <div className="pointer-events-none absolute" style={{ inset: "-2px", background: "#0a0a0a" }} />
 
       {/* Meteors */}
       {meteors.map(meteor => (
         <span
           key={meteor.id}
-          className="absolute h-0.5 w-0.5 rounded-full"
+          className="absolute rounded-full"
           style={{
             top: "-40px",
             left: `${meteor.left}%`,
+            width: "2px",
+            height: "2px",
             backgroundColor: color,
-            boxShadow: "0 0 0 1px rgba(255,255,255,0.1)",
+            boxShadow: `0 0 4px 1px rgba(255,255,255,0.6)`,
             animation: `meteor-fall ${meteor.duration}s linear infinite`,
             animationDelay: `${meteor.delay}s`,
           }}
@@ -90,22 +84,14 @@ export function Meteors({
             className="absolute top-1/2 -translate-y-1/2"
             style={{
               left: "100%",
-              width: "50px",
+              width: "80px",
               height: "1px",
-              background: `linear-gradient(to right, ${tailColor}, transparent)`,
+              background: `linear-gradient(to right, rgba(255,255,255,0.8), transparent)`,
             }}
           />
         </span>
       ))}
 
-      {/* Vignette */}
-      <div
-        className="pointer-events-none absolute inset-0"
-        style={{
-          background:
-            "radial-gradient(ellipse at center, transparent 0%, transparent 50%, rgba(10,10,15,0.8) 100%)",
-        }}
-      />
     </div>
   )
 }

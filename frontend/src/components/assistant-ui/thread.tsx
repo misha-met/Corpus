@@ -129,7 +129,7 @@ const ThreadWelcome: FC = () => {
             </p>
           ) : (
             <p className="aui-thread-welcome-message-inner text-muted-foreground text-xl">
-              What do you want to know?
+              Ingest documents to get started
             </p>
           )}
         </div>

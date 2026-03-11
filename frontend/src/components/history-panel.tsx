@@ -6,6 +6,7 @@ import {
   deleteSession,
   type ChatSession,
 } from "@/lib/session-store";
+import { useTheme } from "@/context/theme-context";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -34,13 +35,22 @@ export interface HistoryPanelProps {
   open: boolean;
   onClose: () => void;
   onRestore: (session: ChatSession) => void;
+  panelBg?: string;
+  panelBackdrop?: string;
+  panelBorderColor?: string;
 }
 
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
-export function HistoryPanel({ open, onClose, onRestore }: HistoryPanelProps) {
+export function HistoryPanel({ open, onClose, onRestore, panelBg: panelBgProp, panelBackdrop: panelBackdropProp, panelBorderColor: panelBorderColorProp }: HistoryPanelProps) {
+  const { theme } = useTheme();
+  const isGlassTheme = theme === "particles" || theme === "mesh";
+  const panelBg = panelBgProp ?? (isGlassTheme ? "rgba(255,255,255,0.08)" : "rgba(14,14,14,0.88)");
+  const panelBackdrop = panelBackdropProp ?? "blur(12px)";
+  const panelBorderColor = panelBorderColorProp ?? "rgba(255,255,255,0.12)";
+
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -98,11 +108,14 @@ export function HistoryPanel({ open, onClose, onRestore }: HistoryPanelProps) {
 
   return (
     <aside
-      className="flex flex-col w-72 shrink-0 overflow-hidden backdrop-blur-xl"
+      className="flex flex-col w-72 shrink-0 overflow-hidden"
       style={{
-        background: "rgba(8,8,8,0.88)",
-        borderLeft: "1px solid rgba(255,255,255,0.10)",
-        boxShadow: "-4px 0 24px rgba(0,0,0,0.5), inset 1px 0 0 rgba(255,255,255,0.04)",
+        background: panelBg,
+        borderLeft: `1px solid ${panelBorderColor}`,
+        boxShadow: "-2px 0 8px rgba(0,0,0,0.45), -1px 0 2px rgba(0,0,0,0.35), inset 1px 0 0 rgba(255,255,255,0.04)",
+        backdropFilter: panelBackdrop,
+        WebkitBackdropFilter: panelBackdrop,
+        isolation: "isolate",
       }}
     >
         {/* Header */}

@@ -22,12 +22,16 @@ import { useAppDispatch, useAppState } from "@/context/app-context";
 import { parseCustomEvent } from "@/lib/event-parser";
 import type { ChatSession } from "@/lib/session-store";
 import type { FreeChatMessage } from "@/lib/session-store";
-import { Plus } from "lucide-react";
-import { BackgroundBeams } from "@/components/ui/beams";
+import { Plus, PaletteIcon } from "lucide-react";
+import {
+  PickerRoot,
+  PickerTrigger,
+  PickerContent,
+  PickerItem,
+} from "@/components/ui/picker";
 import { Meteors } from "@/components/ui/meteors";
 import { RainBackground } from "@/components/ui/rain";
 import { MeshGradientBackground } from "@/components/ui/mesh-gradient";
-import { BackgroundPaths } from "@/components/ui/paths";
 import { StarfieldBackground } from "@/components/ui/starfield";
 import { ParticleBackground } from "@/components/ui/particles";
 import { Leva } from "leva";
@@ -103,23 +107,24 @@ export default function Page() {
   const { theme, setTheme } = useTheme();
   const [themeOpen, setThemeOpen] = useState(false);
 
-  // Close theme picker on Escape
-  useEffect(() => {
-    if (!themeOpen) return;
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setThemeOpen(false);
-    };
-    document.addEventListener("keydown", handleKey);
-    return () => document.removeEventListener("keydown", handleKey);
-  }, [themeOpen]);
+  const GLASS: Record<BackgroundTheme, { bg: string; backdrop: string; border: string }> = {
+    none:      { bg: "rgba(14,14,14,0.88)",     backdrop: "blur(12px)",                 border: "rgba(255,255,255,0.12)"  },
+    meteors:   { bg: "rgba(255,255,255,0.0)", backdrop: "blur(7px)",                  border: "rgba(255,255,255,0.060)" },
+    rain:      { bg: "rgba(0,0,0,0.175)",       backdrop: "blur(9px) saturate(100%)",   border: "rgba(255,255,255,0.000)" },
+    mesh:      { bg: "rgba(0,0,0,0.055)",       backdrop: "blur(9px) saturate(110%)",  border: "rgba(255,255,255,0.000)" },
+    starfield: { bg: "rgba(0,0,0,0.165)",       backdrop: "blur(10px) saturate(100%)",  border: "rgba(255,255,255,0.000)" },
+    particles: { bg: "rgba(255,255,255,0.035)", backdrop: "blur(5px)",                  border: "rgba(255,255,255,0.12)"  },
+  };
+  const glass = GLASS[theme];
+  const panelBg = glass.bg;
+  const panelBackdrop = glass.backdrop;
+  const panelBorderColor = glass.border;
 
   const THEMES: { id: BackgroundTheme; label: string }[] = [
     { id: "none",      label: "Default" },
-    { id: "beams",     label: "Beams" },
     { id: "meteors",   label: "Meteors" },
     { id: "rain",      label: "Rain" },
     { id: "mesh",      label: "Gradient" },
-    { id: "paths",     label: "Paths" },
     { id: "starfield", label: "Starfield" },
     { id: "particles", label: "Particles" },
   ];
@@ -254,20 +259,31 @@ export default function Page() {
   }, [dispatch]);
 
   return (
-    <div className="relative flex flex-col h-dvh bg-background text-foreground overflow-hidden">
+    <div
+      className="relative flex flex-col h-dvh text-foreground overflow-hidden"
+      style={{ background: theme === "meteors" ? "#0a0a0a" : "var(--background)" }}
+    >
       {/* Background layer */}
-      {theme === "beams"     && <BackgroundBeams className="absolute inset-0" />}
       {theme === "meteors"   && <Meteors className="absolute inset-0" />}
       {theme === "rain"      && <RainBackground className="absolute inset-0" />}
       {theme === "mesh"      && <MeshGradientBackground className="absolute inset-0" />}
-      {theme === "paths"     && <BackgroundPaths className="absolute inset-0" />}
       {theme === "starfield" && <StarfieldBackground className="absolute inset-0" />}
       {theme === "particles" && <ParticleBackground className="absolute inset-0" />}
       {/* hidden leva panel for particle controls */}
       <Leva hidden />
 
         {/* ── Top bar: mode tabs + history button ─────────────────────── */}
-        <header className="relative z-30 flex items-center gap-2 px-4 py-2 justify-between w-full bg-background/60 backdrop-blur-md border-b border-[#1e1e1e] shrink-0">
+        <header
+          className="relative z-30 flex items-center gap-2 px-4 py-2 justify-between w-full shrink-0"
+          style={{
+            background: panelBg,
+            borderBottom: `1px solid ${panelBorderColor}`,
+            boxShadow: "0 2px 8px rgba(0,0,0,0.45), 0 1px 2px rgba(0,0,0,0.35), inset 0 -1px 0 rgba(255,255,255,0.04)",
+            backdropFilter: panelBackdrop,
+            WebkitBackdropFilter: panelBackdrop,
+            isolation: "isolate",
+          }}
+        >
           <div className="flex items-center gap-2">
             {/* Mode tabs */}
             <button
@@ -305,7 +321,7 @@ export default function Page() {
             {/* New Chat button */}
             <button
               onClick={handleNewChat}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors text-gray-500 hover:text-gray-300 hover:bg-[#1e1e1e]"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors text-white/40 hover:text-white/70 hover:bg-white/8"
               title="New chat"
             >
               <Plus className="w-3.5 h-3.5 shrink-0" />
@@ -313,59 +329,36 @@ export default function Page() {
             </button>
 
             {/* Theme picker */}
-            <div className="relative">
-              <button
-                onClick={() => setThemeOpen((v) => !v)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                  themeOpen
-                    ? "bg-[#242424] text-gray-100 border border-[#333]"
-                    : "text-gray-500 hover:text-gray-300 hover:bg-[#1e1e1e]"
-                }`}
+            <PickerRoot open={themeOpen} onOpenChange={setThemeOpen}>
+              <PickerTrigger
+                variant="ghost"
+                size="sm"
+                className="text-white/40 hover:text-white/70 hover:bg-white/8 data-[state=open]:bg-white/15 data-[state=open]:text-white data-[state=open]:border data-[state=open]:border-white/25"
                 title="Background theme"
               >
-                <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 16l4-4m0 0l4-4m-4 4h12" />
-                  <circle cx="12" cy="12" r="9" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
+                <PaletteIcon className="w-3.5 h-3.5 shrink-0" />
                 Theme
-              </button>
-              {themeOpen && (
-                <>
-                  {/* Backdrop */}
-                  <div className="fixed inset-0 z-40" onClick={() => setThemeOpen(false)} />
-                  <div className="absolute right-0 top-full z-50 mt-1 min-w-40 rounded-md border border-[#2a2a2a] bg-[#181818] py-1 shadow-xl">
-                    {THEMES.map((t) => (
-                      <button
-                        key={t.id}
-                        onClick={() => { setTheme(t.id); setThemeOpen(false); }}
-                        className={`flex w-full items-center gap-2 px-3 py-1.5 text-xs transition-colors ${
-                          theme === t.id
-                            ? "text-gray-100 bg-[#242424]"
-                            : "text-gray-400 hover:text-gray-200 hover:bg-[#222222]"
-                        }`}
-                      >
-                        {theme === t.id && (
-                          <svg className="w-3 h-3 shrink-0 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                          </svg>
-                        )}
-                        {theme !== t.id && <span className="w-3 h-3 shrink-0" />}
-                        {t.label}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              )}
-
-            </div>
+              </PickerTrigger>
+              <PickerContent align="end" className="min-w-36">
+                {THEMES.map((t) => (
+                  <PickerItem
+                    key={t.id}
+                    selected={theme === t.id}
+                    onClick={() => { setTheme(t.id); setThemeOpen(false); }}
+                  >
+                    {t.label}
+                  </PickerItem>
+                ))}
+              </PickerContent>
+            </PickerRoot>
 
             {/* History button */}
             <button
               onClick={() => setShowHistory((v) => !v)}
               className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
                 showHistory
-                  ? "bg-[#242424] text-gray-100 border border-[#333]"
-                  : "text-gray-500 hover:text-gray-300 hover:bg-[#1e1e1e]"
+                  ? "bg-white/15 text-white border border-white/25 shadow-sm"
+                  : "text-white/40 hover:text-white/70 hover:bg-white/8"
               }`}
               title="Chat history"
             >
@@ -382,7 +375,7 @@ export default function Page() {
 
           {/* Left: Source Panel — always mounted, slides in/out via width+opacity */}
           <aside
-            className="border-r shrink-0 overflow-hidden flex flex-col bg-background/70 backdrop-blur-md"
+            className="shrink-0 overflow-hidden flex flex-col"
             style={{
               width:
                 chatMode !== "rag" ? "0"
@@ -394,7 +387,12 @@ export default function Page() {
                 : "14rem",
               opacity: chatMode !== "rag" ? 0 : 1,
               transition: "width 280ms cubic-bezier(0.4,0,0.2,1), min-width 280ms cubic-bezier(0.4,0,0.2,1), opacity 220ms ease",
-              borderRightColor: "#1e1e1e",
+              background: panelBg,
+              borderRight: `1px solid ${panelBorderColor}`,
+              boxShadow: "2px 0 8px rgba(0,0,0,0.45), 1px 0 2px rgba(0,0,0,0.35), inset -1px 0 0 rgba(255,255,255,0.04)",
+              backdropFilter: panelBackdrop,
+              WebkitBackdropFilter: panelBackdrop,
+              isolation: "isolate",
               pointerEvents: chatMode !== "rag" ? "none" : "auto",
             }}
           >
@@ -458,8 +456,13 @@ export default function Page() {
             open={showHistory}
             onClose={() => setShowHistory(false)}
             onRestore={handleRestoreSession}
+            panelBg={panelBg}
+            panelBackdrop={panelBackdrop}
+            panelBorderColor={panelBorderColor}
           />
         </div>
+
+
       </div>
   );
 }
