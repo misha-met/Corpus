@@ -26,6 +26,15 @@ interface Drop {
   layer: number
 }
 
+const noiseTexture = `url("data:image/svg+xml;utf8,${encodeURIComponent(`
+  <svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120">
+    <filter id="n">
+      <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" stitchTiles="stitch"/>
+    </filter>
+    <rect width="100%" height="100%" fill="white" filter="url(#n)"/>
+  </svg>
+`)}")`
+
 export function RainBackground({
   className,
   count = 150,
@@ -80,14 +89,19 @@ export function RainBackground({
       drops.push(createDrop(layer))
     }
 
-    let nextLightning = Date.now() + 3000 + Math.random() * 5000
+    const getNextLightningTime = () => Date.now() + 10000 + Math.random() * 15000
+    let nextLightning = getNextLightningTime()
 
     const triggerLightning = () => {
       if (!flash) return
-      flash.style.opacity = "0.8"
-      setTimeout(() => { if (flash) flash.style.opacity = "0.3" }, 50)
-      setTimeout(() => { if (flash) flash.style.opacity = "0" }, 150)
-      nextLightning = Date.now() + 3000 + Math.random() * 5000
+      flash.style.opacity = "0.35"
+      setTimeout(() => {
+        if (flash) flash.style.opacity = "0.1"
+      }, 40)
+      setTimeout(() => {
+        if (flash) flash.style.opacity = "0"
+      }, 110)
+      nextLightning = getNextLightningTime()
     }
 
     const handleResize = () => {
@@ -148,7 +162,10 @@ export function RainBackground({
       ref={containerRef}
       className={cn("pointer-events-none absolute inset-0 overflow-hidden", className)}
       style={{
-        background: "linear-gradient(to bottom, #0c1018 0%, #1a1f2e 50%, #151922 100%)",
+        background: `
+          radial-gradient(circle at 50% 20%, rgba(30, 45, 75, 0.12) 0%, transparent 45%),
+          linear-gradient(to bottom, #0b0f17 0%, #121827 38%, #171d2b 68%, #11161f 100%)
+        `,
       }}
     >
       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
@@ -156,9 +173,18 @@ export function RainBackground({
       {lightning && (
         <div
           ref={flashRef}
-          className="pointer-events-none absolute inset-0 bg-blue-100 opacity-0 transition-opacity duration-100"
+          className="pointer-events-none absolute inset-0 bg-blue-100 opacity-0 transition-opacity duration-75"
         />
       )}
+
+      <div
+        className="pointer-events-none absolute inset-0"
+        style={{
+          backgroundImage: noiseTexture,
+          opacity: 0.035,
+          mixBlendMode: "soft-light",
+        }}
+      />
 
       <div
         className="pointer-events-none absolute inset-x-0 bottom-0 h-1/3"
