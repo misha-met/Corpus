@@ -7,8 +7,10 @@ import { MessageReferences } from "@/components/assistant-ui/message-references"
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { NumberTicker } from "@/components/ui/number-ticker";
 import { TypewriterText } from "@/components/ui/typewriter-text";
 import { useAppState } from "@/context/app-context";
+import { useIndexedStats } from "@/hooks/useIndexedStats";
 import { useSpeechToText } from "@/hooks/useSpeechToText";
 import { useSystemRam } from "@/hooks/useSystemRam";
 import { cn } from "@/lib/utils";
@@ -92,6 +94,14 @@ const ThreadScrollToBottom: FC = () => {
 
 const ThreadWelcome: FC = () => {
   const { chatMode } = useAppState();
+  const { sourceCount, estimatedTokens } = useIndexedStats();
+
+  const hasData = sourceCount > 0;
+  // Round to nearest 1k for a clean read; floor at 1k so it never shows "0 tokens"
+  const displayTokens = estimatedTokens > 0
+    ? Math.max(1000, Math.round(estimatedTokens / 1000) * 1000)
+    : 0;
+
   return (
     <div className="aui-thread-welcome-root mx-auto my-auto flex w-full max-w-(--thread-max-width) grow flex-col">
       <div className="aui-thread-welcome-center flex w-full grow flex-col items-center justify-center">
@@ -102,9 +112,26 @@ const ThreadWelcome: FC = () => {
             typingSpeed={80}
             className="aui-thread-welcome-message-inner font-semibold text-2xl"
           />
-          <p className="aui-thread-welcome-message-inner text-muted-foreground text-xl">
-            How can I help you today?
-          </p>
+          {hasData ? (
+            <p className="aui-thread-welcome-message-inner text-muted-foreground text-xl">
+              <NumberTicker
+                value={sourceCount}
+                className="text-muted-foreground"
+              />
+              {" "}
+              {sourceCount === 1 ? "source" : "sources"}
+              {" · "}
+              <NumberTicker
+                value={displayTokens}
+                className="text-muted-foreground"
+              />
+              {" tokens indexed"}
+            </p>
+          ) : (
+            <p className="aui-thread-welcome-message-inner text-muted-foreground text-xl">
+              What do you want to know?
+            </p>
+          )}
         </div>
       </div>
       <ThreadSuggestions />
