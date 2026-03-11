@@ -225,7 +225,7 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
-    title="DH Notebook RAG API",
+    title="Corpus RAG API",
     version="0.1.0",
     lifespan=lifespan,
 )

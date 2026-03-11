@@ -108,7 +108,7 @@ const ThreadWelcome: FC = () => {
         <div className="aui-thread-welcome-message flex size-full flex-col justify-center px-4">
           <TypewriterText
             key={chatMode}
-            text="Hello there!"
+            text="Welcome to Corpus!"
             typingSpeed={80}
             className="aui-thread-welcome-message-inner font-semibold text-2xl"
           />

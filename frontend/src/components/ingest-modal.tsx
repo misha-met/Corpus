@@ -156,12 +156,12 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
       >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
-          <h2 className="text-sm font-semibold text-[var(--foreground)]">
+          <h2 className="text-sm font-semibold text-foreground">
             Add Source Document
           </h2>
           <button
             onClick={onClose}
-            className="p-1 text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-white/5 rounded-lg transition-colors"
+            className="p-1 text-muted-foreground hover:text-foreground hover:bg-white/5 rounded-lg transition-colors"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -204,10 +204,10 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
                 <svg className="w-8 h-8 text-white/70" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
-                <p className="text-sm text-[var(--foreground)] font-medium truncate max-w-full">
+                <p className="text-sm text-foreground font-medium truncate max-w-full">
                   {files.length === 1 ? files[0].name : `${files.length} files selected`}
                 </p>
-                <p className="text-xs text-[var(--muted-foreground)]">
+                <p className="text-xs text-muted-foreground">
                   {files.length === 1
                     ? `${(files[0].size / 1024).toFixed(0)} KB`
                     : `${(files.reduce((total, f) => total + f.size, 0) / (1024 * 1024)).toFixed(1)} MB total`}
@@ -216,13 +216,13 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
               </>
             ) : (
               <>
-                <svg className="w-8 h-8 text-[var(--muted-foreground)]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <svg className="w-8 h-8 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
                 </svg>
-                <p className="text-sm text-[var(--muted-foreground)]">
-                  Drop a file here or <span className="text-[var(--foreground)]">browse</span>
+                <p className="text-sm text-muted-foreground">
+                  Drop a file here or <span className="text-foreground">browse</span>
                 </p>
-                <p className="text-xs text-[var(--muted-foreground)]/60">
+                <p className="text-xs text-(--muted-foreground)/60">
                   PDF, Markdown &middot; Up to 50 MB
                 </p>
               </>
@@ -232,7 +232,7 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
           {/* Source ID input(s) */}
           {files.length <= 1 ? (
             <div>
-              <label className="block text-xs text-[var(--muted-foreground)] mb-1.5">
+              <label className="block text-xs text-muted-foreground mb-1.5">
                 Source ID
               </label>
               <input
@@ -246,20 +246,20 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
                   })
                 }
                 placeholder="Auto-generated from filename"
-                className="w-full px-3 py-2 rounded-lg text-sm text-[var(--foreground)] placeholder-[var(--muted-foreground)] focus:outline-none transition-colors"
+                className="w-full px-3 py-2 rounded-lg text-sm text-foreground placeholder-muted-foreground focus:outline-none transition-colors"
                 style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }}
               />
-              <p className="mt-1 text-[11px] text-[var(--muted-foreground)]/60">
+              <p className="mt-1 text-[11px] text-(--muted-foreground)/60">
                 Unique identifier. Letters, numbers, hyphens, underscores.
               </p>
             </div>
           ) : (
             <div className="space-y-2">
-              <p className="text-xs text-[var(--muted-foreground)]">Source IDs</p>
+              <p className="text-xs text-muted-foreground">Source IDs</p>
               <div className="max-h-40 overflow-y-auto space-y-2 pr-1">
                 {files.map((file, idx) => (
                   <div key={`${file.name}-${file.size}-${idx}`}>
-                    <label className="block text-[11px] text-[var(--muted-foreground)] mb-1 truncate" title={file.name}>
+                    <label className="block text-[11px] text-muted-foreground mb-1 truncate" title={file.name}>
                       {file.name}
                     </label>
                     <input
@@ -272,7 +272,7 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
                           return next;
                         })
                       }
-                      className="w-full px-3 py-1.5 rounded-lg text-sm text-[var(--foreground)] placeholder-[var(--muted-foreground)] focus:outline-none"
+                      className="w-full px-3 py-1.5 rounded-lg text-sm text-foreground placeholder-muted-foreground focus:outline-none"
                       style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }}
                     />
                   </div>
@@ -287,7 +287,7 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
               <button
                 type="button"
                 onClick={() => setShowCitationRefs((v) => !v)}
-                className="flex items-center gap-1.5 text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors mb-1"
+                className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors mb-1"
               >
                 <svg
                   className={`w-3 h-3 shrink-0 transition-transform ${showCitationRefs ? "rotate-90" : ""}`}
@@ -296,22 +296,22 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                 </svg>
                 Citation reference
-                <span className="ml-1 text-[10px] px-1.5 py-px rounded bg-white/8 text-[var(--muted-foreground)]">optional</span>
+                <span className="ml-1 text-[10px] px-1.5 py-px rounded bg-white/8 text-muted-foreground">optional</span>
               </button>
 
               {showCitationRefs && (
                 <div className="space-y-2 pl-1">
                   {/* Format hint */}
                   <div
-                    className="px-3 py-2.5 rounded-lg text-[11px] text-[var(--muted-foreground)] leading-relaxed space-y-1"
+                    className="px-3 py-2.5 rounded-lg text-[11px] text-muted-foreground leading-relaxed space-y-1"
                     style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)" }}
                   >
-                    <p className="font-semibold text-[var(--foreground)]">Harvard author-date format</p>
+                    <p className="font-semibold text-foreground">Harvard author-date format</p>
                     <p>Enter the full reference as you want it to appear in citations:</p>
                     <code className="block mt-1 font-mono text-[10.5px] bg-black/30 px-2 py-1 rounded text-white/70">
                       Smith, J. et al. (2024) &apos;Title of Work&apos;
                     </code>
-                    <p className="mt-1 text-[var(--muted-foreground)]/70">
+                    <p className="mt-1 text-(--muted-foreground)/70">
                       Leave blank to use the filename as the reference.
                       You can also add this later — the reference is stored
                       locally and used whenever you copy citations.
@@ -330,14 +330,14 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
                         })
                       }
                       placeholder="e.g. Smith, J. et al. (2024) 'Climate Change Review'"
-                      className="w-full px-3 py-2 rounded-lg text-sm text-[var(--foreground)] placeholder-[var(--muted-foreground)] focus:outline-none transition-colors"
+                      className="w-full px-3 py-2 rounded-lg text-sm text-foreground placeholder-muted-foreground focus:outline-none transition-colors"
                       style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }}
                     />
                   ) : (
                     <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
                       {files.map((file, idx) => (
                         <div key={`citref-${file.name}-${idx}`}>
-                          <label className="block text-[11px] text-[var(--muted-foreground)] mb-1 truncate" title={file.name}>
+                          <label className="block text-[11px] text-muted-foreground mb-1 truncate" title={file.name}>
                             {file.name}
                           </label>
                           <input
@@ -351,7 +351,7 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
                               })
                             }
                             placeholder="e.g. Smith, J. (2024) 'Title'"
-                            className="w-full px-3 py-1.5 rounded-lg text-sm text-[var(--foreground)] placeholder-[var(--muted-foreground)] focus:outline-none"
+                            className="w-full px-3 py-1.5 rounded-lg text-sm text-foreground placeholder-muted-foreground focus:outline-none"
                             style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }}
                           />
                         </div>
@@ -369,7 +369,7 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
               <button
                 type="button"
                 onClick={() => setShowPageOffset((v) => !v)}
-                className="flex items-center gap-1.5 text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors mb-1"
+                className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors mb-1"
               >
                 <svg
                   className={`w-3 h-3 shrink-0 transition-transform ${showPageOffset ? "rotate-90" : ""}`}
@@ -378,7 +378,7 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                 </svg>
                 Starting page number
-                <span className="ml-1 text-[10px] px-1.5 py-px rounded bg-white/8 text-[var(--muted-foreground)]">optional</span>
+                <span className="ml-1 text-[10px] px-1.5 py-px rounded bg-white/8 text-muted-foreground">optional</span>
               </button>
 
               {showPageOffset && (
@@ -389,10 +389,10 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
                     step={1}
                     value={pageOffset}
                     onChange={(e) => setPageOffset(Math.max(1, parseInt(e.target.value, 10) || 1))}
-                    className="w-32 px-3 py-2 rounded-lg text-sm text-[var(--foreground)] placeholder-[var(--muted-foreground)] focus:outline-none transition-colors"
+                    className="w-32 px-3 py-2 rounded-lg text-sm text-foreground placeholder-muted-foreground focus:outline-none transition-colors"
                     style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }}
                   />
-                  <p className="text-[11px] text-[var(--muted-foreground)]/70">
+                  <p className="text-[11px] text-(--muted-foreground)/70">
                     Page number of the first page in this PDF — applied to all PDFs in this batch.
                     Leave at 1 for documents whose page numbers start at 1.
                   </p>
@@ -407,7 +407,7 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
               checked={summarize}
               onChange={setSummarize}
             />
-            <span className="text-sm text-[var(--muted-foreground)]">
+            <span className="text-sm text-muted-foreground">
               Generate summary during ingest
             </span>
           </label>
@@ -424,7 +424,7 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
         <div className="flex items-center justify-end gap-3 px-6 py-4" style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
           <button
             onClick={onClose}
-            className="px-4 py-2 text-sm text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-white/5 rounded-lg transition-colors"
+            className="px-4 py-2 text-sm text-muted-foreground hover:text-foreground hover:bg-white/5 rounded-lg transition-colors"
           >
             Cancel
           </button>
@@ -434,7 +434,7 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
               files.length === 0 ||
               sourceIds.some((sid) => !(sid ?? "").trim())
             }
-            className="px-4 py-2 bg-white text-black hover:bg-white/90 disabled:bg-[var(--secondary)] disabled:text-[var(--muted-foreground)] text-sm font-medium rounded-lg transition-colors disabled:cursor-not-allowed"
+            className="px-4 py-2 bg-white text-black hover:bg-white/90 disabled:bg-secondary disabled:text-muted-foreground text-sm font-medium rounded-lg transition-colors disabled:cursor-not-allowed"
           >
             {files.length > 1 ? `Upload & Ingest ${files.length} Files` : "Upload & Ingest"}
           </button>

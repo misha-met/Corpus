@@ -61,7 +61,7 @@ export function ChatMarkdown({
   const markdownContent = addCitationLinks(content, citations);
 
   return (
-    <div className={`text-base leading-[1.65] min-h-[1.5em] break-words ${className}`}>
+    <div className={`text-base leading-[1.65] min-h-[1.5em] wrap-break-word ${className}`}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         urlTransform={(url) => {
@@ -101,7 +101,7 @@ export function ChatMarkdown({
                         dispatch({ type: "SET_ACTIVE_CITATION", citation });
                       }
                     }}
-                    className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-semibold text-black rounded-full cursor-pointer transition-colors disabled:opacity-60 disabled:cursor-not-allowed bg-white/90 border border-white/80 hover:bg-white"
+                    className="inline-flex items-center justify-center min-w-4.5 h-4.5 px-1 text-[10px] font-semibold text-black rounded-full cursor-pointer transition-colors disabled:opacity-60 disabled:cursor-not-allowed bg-white/90 border border-white/80 hover:bg-white"
                     title={citation ? `View source: ${citation.source_id}` : "Source (no metadata)"}
                     disabled={!citation}
                   >

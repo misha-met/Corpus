@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "DH Notebook",
+  title: "Corpus",
   description: "Offline RAG-powered research notebook",
 };
 

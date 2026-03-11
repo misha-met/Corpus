@@ -1,4 +1,4 @@
-## Project: DH Notebook Offline RAG Application (Apple Silicon Optimized)
+## Project: Corpus Offline RAG Application (Apple Silicon Optimized)
 
 ## 1. Core Architecture Overview
 

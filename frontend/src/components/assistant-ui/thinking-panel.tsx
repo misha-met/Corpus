@@ -69,7 +69,7 @@ export const ThinkingPanel: FC = () => {
             <ul className="space-y-1.5">
               {thinkingSteps.map((step) => (
                 <li key={step.id} className="flex items-start gap-2">
-                  <span className="mt-[7px] shrink-0 size-1 rounded-full bg-muted-foreground/40" />
+                  <span className="mt-1.75 shrink-0 size-1 rounded-full bg-muted-foreground/40" />
                   <span>{step.message}</span>
                 </li>
               ))}
@@ -91,7 +91,7 @@ export const ThinkingPanel: FC = () => {
           {isRunning && !hasReasoning && thinkingSteps.length === 0 && (
             <ul className="space-y-1.5">
               <li className="flex items-start gap-2 opacity-40">
-                <span className="mt-[7px] shrink-0 size-1 rounded-full bg-muted-foreground/40 animate-pulse" />
+                <span className="mt-1.75 shrink-0 size-1 rounded-full bg-muted-foreground/40 animate-pulse" />
                 <span className="animate-pulse">working…</span>
               </li>
             </ul>

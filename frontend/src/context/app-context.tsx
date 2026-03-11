@@ -1,5 +1,5 @@
 /**
- * AppContext — custom application state for DH Notebook.
+ * AppContext — custom application state for Corpus.
  *
  * What this context owns:
  *   - Per-query transient state: statusMessage, lastIntent, lastSources, citations

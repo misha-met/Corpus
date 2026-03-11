@@ -517,7 +517,7 @@ export function FreeformChatPanel({
                   className="font-semibold text-2xl"
                 />
                 <p className="fade-in slide-in-from-bottom-1 animate-in fill-mode-both text-muted-foreground text-xl delay-75 duration-200">
-                  No documents — answers from model knowledge only
+                  Answers from model knowledge only
                 </p>
               </div>
             </div>
@@ -537,7 +537,7 @@ export function FreeformChatPanel({
             return (
               <div
                 key={message.id}
-                className="fade-in slide-in-from-bottom-1 mx-auto grid w-full max-w-(--thread-max-width) animate-in auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 py-4 duration-150 [&>*]:col-start-2"
+                className="fade-in slide-in-from-bottom-1 mx-auto grid w-full max-w-(--thread-max-width) animate-in auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 py-4 duration-150 *:col-start-2"
                 data-role="user"
               >
                 <div className="relative col-start-2 min-w-0">

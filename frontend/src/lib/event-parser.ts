@@ -1,7 +1,7 @@
 /**
  * event-parser.ts — Phase 3
  *
- * Typed parser for the custom data parts emitted by the DH Notebook backend
+ * Typed parser for the custom data parts emitted by the Corpus backend
  * over the AI SDK v6 UI message stream.
  *
  * Wire format (produced by src/stream_protocol.py):
