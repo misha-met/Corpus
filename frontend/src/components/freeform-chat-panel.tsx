@@ -118,6 +118,12 @@ async function* freeformStreaming(
   });
 
   if (!res.ok || !res.body) {
+    if (res.status === 502 || res.status === 503 || res.status === 504) {
+      throw new Error("Backend not reachable — make sure the server is running on port 8000.");
+    }
+    if (res.status === 500) {
+      throw new Error("Internal server error — something went wrong on the backend.");
+    }
     throw new Error(`Freeform chat failed: HTTP ${res.status}`);
   }
 
@@ -457,7 +463,13 @@ export function FreeformChatPanel({
         }
       } catch (err) {
         if (err instanceof Error && err.name !== "AbortError") {
-          setErrorText(err.message || "An unexpected error occurred");
+          const isNetworkErr = err instanceof TypeError &&
+            (err.message === "Failed to fetch" || err.message.includes("fetch failed") || err.message.includes("ECONNREFUSED"));
+          setErrorText(
+            isNetworkErr
+              ? "Backend not reachable — make sure the server is running on port 8000."
+              : (err.message || "An unexpected error occurred")
+          );
         }
         if ((err as Error)?.name === "AbortError") {
           setMessages((prev) => prev.filter((m) => m.id !== assistantId));

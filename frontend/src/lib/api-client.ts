@@ -105,6 +105,18 @@ class SourceApiClient {
    * Returns a human-readable error message.
    */
   private async parseErrorResponse(res: Response): Promise<string> {
+    // 502/503/504 means Next.js couldn't reach the backend at all
+    if (res.status === 502 || res.status === 503 || res.status === 504) {
+      return "Backend not reachable — make sure the server is running on port 8000.";
+    }
+    if (res.status === 500) {
+      try {
+        const body = await res.json();
+        return body?.error?.message ?? "Internal server error — something went wrong on the backend.";
+      } catch {
+        return "Internal server error — something went wrong on the backend.";
+      }
+    }
     try {
       const body = await res.json();
       return body?.error?.message ?? `HTTP ${res.status}`;
@@ -130,8 +142,8 @@ class SourceApiClient {
   async listSources(): Promise<SourceInfo[]> {
     const res = await fetch(`${this.baseUrl}/sources`);
     if (!res.ok) {
-      const err: ApiError = await res.json();
-      throw new Error(err.error.message);
+      const message = await this.parseErrorResponse(res);
+      throw new Error(message);
     }
     const data: SourceListResponse = await res.json();
     return data.sources;
@@ -142,8 +154,8 @@ class SourceApiClient {
       `${this.baseUrl}/sources/${encodeURIComponent(sourceId)}/content`
     );
     if (!res.ok) {
-      const err: ApiError = await res.json();
-      throw new Error(err.error.message);
+      const message = await this.parseErrorResponse(res);
+      throw new Error(message);
     }
     return res.json();
   }
@@ -154,8 +166,8 @@ class SourceApiClient {
       { method: "DELETE" }
     );
     if (!res.ok) {
-      const err: ApiError = await res.json();
-      throw new Error(err.error.message);
+      const message = await this.parseErrorResponse(res);
+      throw new Error(message);
     }
     return res.json();
   }
@@ -175,8 +187,8 @@ class SourceApiClient {
       }),
     });
     if (!res.ok) {
-      const err: ApiError = await res.json();
-      throw new Error(err.error.message);
+      const message = await this.parseErrorResponse(res);
+      throw new Error(message);
     }
     return res.json();
   }
@@ -215,8 +227,8 @@ class SourceApiClient {
       `${this.baseUrl}/sources/${encodeURIComponent(sourceId)}/chunk/${encodeURIComponent(chunkId)}`
     );
     if (!res.ok) {
-      const err: ApiError = await res.json();
-      throw new Error(err.error.message);
+      const message = await this.parseErrorResponse(res);
+      throw new Error(message);
     }
     return res.json();
   }
@@ -230,8 +242,8 @@ class SourceApiClient {
       `${this.baseUrl}/sources/${encodeURIComponent(sourceId)}/chunks?ids=${encodeURIComponent(chunkIds.join(","))}`
     );
     if (!res.ok) {
-      const err: ApiError = await res.json();
-      throw new Error(err.error.message);
+      const message = await this.parseErrorResponse(res);
+      throw new Error(message);
     }
     return res.json();
   }
@@ -267,20 +279,35 @@ export async function* queryStreaming(
 ): AsyncGenerator<StreamEvent, void, unknown> {
   const { sourceIds, citationsEnabled = true, signal } = options;
 
-  const res = await fetch("/api/query", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      query,
-      stream: true,
-      source_ids: sourceIds ?? [],
-      citations_enabled: citationsEnabled,
-    }),
-    signal,
-  });
+  let res: Response;
+  try {
+    res = await fetch("/api/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query,
+        stream: true,
+        source_ids: sourceIds ?? [],
+        citations_enabled: citationsEnabled,
+      }),
+      signal,
+    });
+  } catch (err) {
+    if ((err as Error)?.name === "AbortError") return;
+    yield { event: "error", data: { error: "Backend not reachable — make sure the server is running on port 8000." } };
+    return;
+  }
 
   if (!res.ok || !res.body) {
-    yield { event: "error", data: { error: `HTTP ${res.status}` } };
+    let msg: string;
+    if (res.status === 502 || res.status === 503 || res.status === 504) {
+      msg = "Backend not reachable — make sure the server is running on port 8000.";
+    } else if (res.status === 500) {
+      msg = "Internal server error — something went wrong on the backend.";
+    } else {
+      msg = `HTTP ${res.status}`;
+    }
+    yield { event: "error", data: { error: msg } };
     return;
   }
 
