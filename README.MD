@@ -222,7 +222,18 @@ A direct conversational interface to the LLM with no retrieval pipeline. Convers
 
 ### Background Themes
 
-Eight visual themes persisted to localStorage: `none`, `beams`, `meteors`, `rain`, `mesh`, `paths`, `starfield`, `particles`.
+Seven visual themes persisted to localStorage: `stars`, `meteors`, `rain`, `mesh`, `starfield`, `particles`, and `darkveil`.
+
+The **Dark Veil** theme is a WebGL background using a CPPN (Compositional Pattern-Producing Network) neural-network shader rendered via OGL. It generates an animated dark procedural texture with six configurable parameters accessible via the settings panel next to the theme picker:
+
+| Parameter | Range | Description |
+|---|---|---|
+| Hue Shift | 0 – 360° | Rotates the colour hue of the generated texture |
+| Noise | 0 – 1 | Adds film-grain noise over the shader output |
+| Scanlines | 0 – 1 | Overlays horizontal scanline bands |
+| Scanline Frequency | 0 – 10 | Controls the density of scanline bands |
+| Warp | 0 – 1 | Applies domain-warping distortion to the pattern |
+| Speed | 0 – 3 | Controls the animation playback rate |
 
 ---
 
@@ -451,7 +462,7 @@ curl -F "file=@paper.pdf" -F "source_id=my_paper" -F "summarize=true" \
 | app/page.tsx | Entry point, dual-mode always-mounted layout, theme picker |
 | app/api/chat/route.ts | Next.js streaming proxy to backend (unbuffered SSE) |
 | context/app-context.tsx | Global state: useReducer, 13 action types, dual-context pattern |
-| context/theme-context.tsx | Background theme state: 8 themes, localStorage persistence |
+| context/theme-context.tsx | Background theme state: 7 themes, localStorage persistence |
 | components/source-panel.tsx | Document library: sequential upload queue, drag-and-drop |
 | components/freeform-chat-panel.tsx | Freeform streaming chat: model and thinking selection, AI-generated titles |
 | components/citation-viewer-modal.tsx | Inline citation reader: parallel content and chunk fetch |

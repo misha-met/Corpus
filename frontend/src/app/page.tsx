@@ -35,6 +35,7 @@ import { MeshGradientBackground } from "@/components/ui/mesh-gradient";
 import { StarfieldBackground } from "@/components/ui/starfield";
 import { ParticleBackground } from "@/components/ui/particles";
 import { StarsBackground } from "@/components/ui/stars-background";
+import { DarkVeilBackground } from "@/components/ui/dark-veil";
 import { Leva } from "leva";
 import { useTheme, type BackgroundTheme } from "@/context/theme-context";
 
@@ -110,11 +111,12 @@ export default function Page() {
 
   const GLASS: Record<BackgroundTheme, { bg: string; backdrop: string; border: string }> = {
     meteors:   { bg: "rgba(255,255,255,0.0)", backdrop: "blur(7px)",                  border: "rgba(255,255,255,0.060)" },
-    rain:      { bg: "rgba(0,0,0,0.175)",       backdrop: "blur(9px) saturate(100%)",   border: "rgba(255,255,255,0.000)" },
-    mesh:      { bg: "rgba(0,0,0,0.055)",       backdrop: "blur(9px) saturate(110%)",  border: "rgba(255,255,255,0.000)" },
-    starfield: { bg: "rgba(0,0,0,0.165)",       backdrop: "blur(10px) saturate(100%)",  border: "rgba(255,255,255,0.000)" },
-    particles: { bg: "rgba(255,255,255,0.030)", backdrop: "blur(4px)",                  border: "rgba(255,255,255,0.12)"  },
-    stars:     { bg: "rgba(0,0,0,0.145)",       backdrop: "blur(4px) saturate(100%)",  border: "rgba(255,255,255,0.000)" },
+    rain:      { bg: "rgba(0,0,0,0.175)",     backdrop: "blur(9px) saturate(100%)",   border: "rgba(255,255,255,0.000)" },
+    mesh:      { bg: "rgba(0,0,0,0.055)",     backdrop: "blur(9px) saturate(110%)",   border: "rgba(255,255,255,0.000)" },
+    starfield: { bg: "rgba(0,0,0,0.165)",     backdrop: "blur(10px) saturate(100%)",  border: "rgba(255,255,255,0.000)" },
+    particles: { bg: "rgba(255,255,255,0.030)", backdrop: "blur(4px)",                border: "rgba(255,255,255,0.12)"  },
+    stars:     { bg: "rgba(0,0,0,0.145)",     backdrop: "blur(4px) saturate(100%)",   border: "rgba(255,255,255,0.000)" },
+    darkveil:  { bg: "rgba(0,0,0,0.250)",     backdrop: "blur(6px) saturate(110%)",   border: "rgba(255,255,255,0.000)" },
   };
   const glass = GLASS[theme];
   const panelBg = glass.bg;
@@ -128,6 +130,7 @@ export default function Page() {
     { id: "mesh",      label: "Gradient" },
     { id: "starfield", label: "Starfield" },
     { id: "particles", label: "Particles" },
+    { id: "darkveil",  label: "Dark Veil" },
   ];
 
   // Source panel collapse state
@@ -262,7 +265,7 @@ export default function Page() {
   return (
     <div
       className="relative flex flex-col h-dvh text-foreground overflow-hidden"
-      style={{ background: (theme === "meteors" || theme === "stars" || theme === "starfield") ? "#0a0a0a" : "var(--background)" }}
+      style={{ background: (theme === "meteors" || theme === "stars" || theme === "starfield" || theme === "darkveil") ? "#0a0a0a" : "var(--background)" }}
     >
       {/* Background layer */}
       {theme === "meteors"   && <Meteors className="absolute inset-0" />}
@@ -271,6 +274,7 @@ export default function Page() {
       {theme === "starfield" && <StarfieldBackground className="absolute inset-0" />}
       {theme === "particles" && <ParticleBackground className="absolute inset-0" />}
       {theme === "stars"     && <StarsBackground className="absolute inset-0" />}
+      {theme === "darkveil"  && <DarkVeilBackground className="absolute inset-0" />}
       {/* hidden leva panel for particle controls */}
       <Leva hidden />
 
@@ -354,7 +358,6 @@ export default function Page() {
               </PickerContent>
             </PickerRoot>
 
-            {/* History button */}
             <button
               onClick={() => setShowHistory((v) => !v)}
               className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
