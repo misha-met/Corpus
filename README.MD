@@ -67,7 +67,7 @@ Corpus classifies each query into one of twelve research intents before executin
 
 ## Architecture
 
-````mermaid
+```mermaid
 graph TB
     subgraph Frontend["Frontend — Next.js 16 / React 19"]
         UI["Chat Interface<br/>RAG + Freeform modes"]
@@ -106,11 +106,11 @@ graph TB
     RT <--> VEC & PAR & SUM
     GEN <--> LLM
     IC -.->|"low-confidence fallback"| INT
-````
+```
 
 ### Query Pipeline
 
-````mermaid
+```mermaid
 flowchart TD
     Q(["Query"])
 
@@ -134,11 +134,11 @@ flowchart TD
 
     style Q fill:#4f46e5,color:#fff,stroke:none
     style A fill:#059669,color:#fff,stroke:none
-````
+```
 
 ### Document Ingestion
 
-````mermaid
+```mermaid
 flowchart LR
     DOC(["Document<br/>.pdf or .md"])
 
@@ -172,14 +172,14 @@ flowchart LR
     Chunk -.->|"if summarise enabled"| Opt
 
     style DOC fill:#7c3aed,color:#fff,stroke:none
-````
+```
 
 Child chunks (~250 tokens) serve as retrieval units because their specificity improves vector search precision. When a child chunk is retrieved, Corpus fetches the full parent chunk (~1,200 tokens) to pass to the language model, providing the paragraph-level context needed for coherent, accurate generation.
 
 
 ### Operating Modes
 
-````mermaid
+```mermaid
 graph LR
     RAM{{"System RAM"}}
 
@@ -199,7 +199,7 @@ graph LR
         D3["4× more retrieval candidates"]
         D4["Chain-of-thought reasoning<br/>ANALYZE · COMPARE · CRITIQUE · EXPLAIN"]
     end
-````
+```
 
 Mode is detected automatically from system RAM. In Deep Research mode the four analytical intents (ANALYZE, COMPARE, CRITIQUE, EXPLAIN) activate Qwen3.5's chain-of-thought reasoning; the thinking is hidden from the visible output but substantially improves quality on complex questions.
 
