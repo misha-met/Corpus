@@ -6,6 +6,8 @@
 
 *Ask questions of your documents. Receive grounded, cited answers. No data leaves your machine.*
 
+![Corpus demo screenshot](docs/images/demo-screenshot.png)
+
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![Next.js 16](https://img.shields.io/badge/Next.js-16-000000?style=flat-square&logo=nextdotjs&logoColor=white)](https://nextjs.org)
 [![Apple Silicon](https://img.shields.io/badge/Apple_Silicon-Optimised-555555?style=flat-square&logo=apple&logoColor=white)](https://apple.com/silicon)
@@ -220,20 +222,11 @@ The primary research interface. Queries are processed through the full retrieval
 
 A direct conversational interface to the LLM with no retrieval pipeline. Conversation history is maintained within the session and persisted to IndexedDB. Supports thinking mode and generates AI-derived session titles after the first exchange.
 
+![Freeform mode demo](docs/images/freemode-demo.png)
+
 ### Background Themes
 
-Seven visual themes persisted to localStorage: `stars`, `meteors`, `rain`, `mesh`, `starfield`, `particles`, and `darkveil`.
-
-The **Dark Veil** theme is a WebGL background using a CPPN (Compositional Pattern-Producing Network) neural-network shader rendered via OGL. It generates an animated dark procedural texture with six configurable parameters accessible via the settings panel next to the theme picker:
-
-| Parameter | Range | Description |
-|---|---|---|
-| Hue Shift | 0 – 360° | Rotates the colour hue of the generated texture |
-| Noise | 0 – 1 | Adds film-grain noise over the shader output |
-| Scanlines | 0 – 1 | Overlays horizontal scanline bands |
-| Scanline Frequency | 0 – 10 | Controls the density of scanline bands |
-| Warp | 0 – 1 | Applies domain-warping distortion to the pattern |
-| Speed | 0 – 3 | Controls the animation playback rate |
+Seven visual themes: `stars`, `meteors`, `rain`, `mesh`, `starfield`, `particles`, and `darkveil`.
 
 ---
 
@@ -250,6 +243,8 @@ When citations are enabled, each retrieved passage is wrapped at prompt-construc
 The model is instructed to cite passages inline as `[N]`. After generation, a `CitationListEvent` is emitted over SSE carrying the full citation metadata; the frontend binds each marker to a Citation object with source ID, chunk ID, and page number.
 
 Clicking a citation badge opens the citation viewer: the full document and the cited chunk are fetched in parallel, and the passage is highlighted in context. An optional citation reference string can be entered per source at ingest time and used when exporting responses as formatted footnotes or Harvard bibliography entries.
+
+![Citation viewer demo](docs/images/citation-demo.png)
 
 ---
 
