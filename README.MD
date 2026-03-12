@@ -25,7 +25,7 @@ Humanities researchers increasingly work with AI tools that require uploading do
 
 Corpus runs entirely on your machine. Documents are ingested into a local vector database, queries are answered by a large language model running on your Apple Silicon GPU, and every response is grounded in retrieved passages with inline citations linking to the specific source location and page number. No data leaves your machine, and no internet connection is required after the initial model download.
 
-*Developed as part of a final-year Digital Humanities project.*
+*Developed as part of a final-year University College Cork Digital Humanities project.*
 
 ---
 
@@ -143,6 +143,7 @@ flowchart LR
     DOC(["Document<br/>.pdf or .md"])
 
     subgraph Parse["Parse"]
+        direction TB
         P1["pypdf<br/>Text layer extraction"]
         P2["pdfminer.six<br/>Fallback"]
         P3["PyMuPDF<br/>Fallback"]
