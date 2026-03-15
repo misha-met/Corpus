@@ -50,6 +50,17 @@ from .metrics import (
     BudgetMetrics,
     RetrievalMetrics,
 )
+from .phoenix_tracing import (
+    SPAN_KIND_CHAIN,
+    SPAN_KIND_LLM,
+    SPAN_KIND_RETRIEVER,
+    PhoenixTracingStatus,
+    get_phoenix_tracer,
+    mark_span_error,
+    set_span_attribute,
+    set_span_attributes,
+    start_span,
+)
 from .retrieval import (
     RetrievalEngine,
     RetrievalResult,
@@ -388,6 +399,14 @@ class RagEngineConfig:
     verbose: bool = False
     latency: bool = False
 
+    # Phoenix / Arize tracing (OpenTelemetry)
+    phoenix_enabled: Optional[bool] = None
+    phoenix_project_name: Optional[str] = None
+    phoenix_endpoint: Optional[str] = None
+    phoenix_api_key: Optional[str] = None
+    phoenix_auto_instrument: Optional[bool] = None
+    phoenix_batch: Optional[bool] = None
+
 
 # ---------------------------------------------------------------------------
 # Main Engine
@@ -432,6 +451,19 @@ class RagEngine:
         self._model_config: ModelConfig = select_mode_config(
             manual_mode=self._cfg.mode
         )
+
+        self._tracer, self._phoenix_status = get_phoenix_tracer(
+            __name__,
+            enabled=self._cfg.phoenix_enabled,
+            project_name=self._cfg.phoenix_project_name,
+            endpoint=self._cfg.phoenix_endpoint,
+            api_key=self._cfg.phoenix_api_key,
+            auto_instrument=self._cfg.phoenix_auto_instrument,
+            batch=self._cfg.phoenix_batch,
+        )
+        if self._phoenix_status.error:
+            logger.warning(self._phoenix_status.error)
+
         self._system_ram_gb = float(self._model_config.system_ram_gb or 0.0)
         self._memory_constrained = (
             self._system_ram_gb > 0.0 and self._system_ram_gb <= 40.0
@@ -472,6 +504,18 @@ class RagEngine:
     @property
     def storage(self) -> StorageEngine:
         return self._storage
+
+    @property
+    def tracer(self) -> Any:
+        """OpenTelemetry tracer used by this engine (or ``None`` when disabled)."""
+
+        return self._tracer
+
+    @property
+    def phoenix_status(self) -> PhoenixTracingStatus:
+        """Current Phoenix tracing runtime status for diagnostics/health endpoints."""
+
+        return self._phoenix_status
 
     # -- model loading -----------------------------------------------------
 
@@ -810,6 +854,7 @@ class RagEngine:
             embedding_model=embedding_model,
             reranker=reranker,
             config=config,
+            tracer=self._tracer,
         )
 
         # -- intent classification + parameter resolution ------------------
@@ -879,17 +924,28 @@ class RagEngine:
         # -- build prompt ---------------------------------------------------
         self._on_status("Building prompt...")
         with profiler.span("Build prompt / messages"):
-            messages = build_messages(
-                packed.context,
-                query_text,
-                intent=intent_result.intent,
-                extra_instructions=retrieved.extra_instructions,
-                citations_enabled=cite,
-                source_legend=packed.source_legend,
-                mode=config.mode,
-                retrieval_budget=config.retrieval_budget,
-                citation_output_mode=citation_output_mode,
-            )
+            with start_span(
+                self._tracer,
+                "rag.prompt.build",
+                span_kind=SPAN_KIND_CHAIN,
+                attributes={
+                    "rag.intent": intent_result.intent.value,
+                    "rag.citations_enabled": cite,
+                    "rag.context_chars": len(packed.context),
+                },
+            ) as prompt_span:
+                messages = build_messages(
+                    packed.context,
+                    query_text,
+                    intent=intent_result.intent,
+                    extra_instructions=retrieved.extra_instructions,
+                    citations_enabled=cite,
+                    source_legend=packed.source_legend,
+                    mode=config.mode,
+                    retrieval_budget=config.retrieval_budget,
+                    citation_output_mode=citation_output_mode,
+                )
+                set_span_attribute(prompt_span, "rag.prompt.message_count", len(messages))
 
         # -- dump-prompt path (no LLM generation) --------------------------
         if dump_prompt:
@@ -920,13 +976,37 @@ class RagEngine:
         )
 
         self._on_status("Generating answer...")
-        with profiler.span("LLM generation"):
-            raw_answer = generator.generate_chat(
-                messages,
-                config=gen_config,
-            )
+        with start_span(
+            self._tracer,
+            "rag.llm.generate",
+            span_kind=SPAN_KIND_LLM,
+            attributes={
+                "rag.intent": intent_result.intent.value,
+                "llm.temperature": gen_config.temperature,
+                "llm.top_p": gen_config.top_p,
+                "llm.top_k": gen_config.top_k,
+                "llm.max_tokens": gen_config.max_tokens,
+            },
+        ) as generation_span:
+            try:
+                with profiler.span("LLM generation"):
+                    raw_answer = generator.generate_chat(
+                        messages,
+                        config=gen_config,
+                    )
+                _gen_tokens = count_tokens(raw_answer, generator.tokenizer)
+                set_span_attributes(
+                    generation_span,
+                    {
+                        "output.value": raw_answer,
+                        "llm.token_count.total": _gen_tokens,
+                        "rag.output_chars": len(raw_answer),
+                    },
+                )
+            except Exception as exc:
+                mark_span_error(generation_span, f"{type(exc).__name__}: {exc}")
+                raise
 
-        _gen_tokens = count_tokens(raw_answer, generator.tokenizer)
         logger.info(
             "INTENT_AWARE | intent=%s | temperature=%.2f | top_p=%.2f | tokens_generated=%d",
             intent_result.intent.value,
@@ -1058,6 +1138,7 @@ class RagEngine:
             embedding_model=embedding_model,
             reranker=reranker,
             config=config,
+            tracer=self._tracer,
         )
 
         # -- intent classification + parameter resolution ------------------
@@ -1206,17 +1287,28 @@ class RagEngine:
             return
 
         yield StatusEvent(status="Building prompt...")
-        messages = build_messages(
-            packed.context,
-            query_text,
-            intent=intent_result.intent,
-            extra_instructions=retrieved.extra_instructions,
-            citations_enabled=cite,
-            source_legend=packed.source_legend,
-            mode=config.mode,
-            retrieval_budget=config.retrieval_budget,
-            citation_output_mode=citation_output_mode,
-        )
+        with start_span(
+            self._tracer,
+            "rag.prompt.build.stream",
+            span_kind=SPAN_KIND_CHAIN,
+            attributes={
+                "rag.intent": intent_result.intent.value,
+                "rag.citations_enabled": cite,
+                "rag.context_chars": len(packed.context),
+            },
+        ) as prompt_span:
+            messages = build_messages(
+                packed.context,
+                query_text,
+                intent=intent_result.intent,
+                extra_instructions=retrieved.extra_instructions,
+                citations_enabled=cite,
+                source_legend=packed.source_legend,
+                mode=config.mode,
+                retrieval_budget=config.retrieval_budget,
+                citation_output_mode=citation_output_mode,
+            )
+            set_span_attribute(prompt_span, "rag.prompt.message_count", len(messages))
 
         # -- generate with streaming tokens --------------------------------
         gen_params = classified.generation_params
@@ -1265,45 +1357,71 @@ class RagEngine:
         token_count = 0
         answer_tokens: list[str] = []
 
-        if gen_params.enable_thinking:
-            thinking_budget_exhausted = False
-            for event in generator.stream_chat_with_thinking(
-                messages,
-                config=gen_config,
-                should_stop=should_stop,
-            ):
-                if should_stop():
-                    yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled during generation")
+        with start_span(
+            self._tracer,
+            "rag.llm.generate.stream",
+            span_kind=SPAN_KIND_LLM,
+            attributes={
+                "rag.intent": intent_result.intent.value,
+                "rag.thinking_enabled": gen_params.enable_thinking,
+                "llm.temperature": gen_config.temperature,
+                "llm.top_p": gen_config.top_p,
+                "llm.top_k": gen_config.top_k,
+                "llm.max_tokens": gen_config.max_tokens,
+                "llm.max_internal_tokens": gen_config.max_internal_tokens,
+            },
+        ) as generation_span:
+            if gen_params.enable_thinking:
+                thinking_budget_exhausted = False
+                for event in generator.stream_chat_with_thinking(
+                    messages,
+                    config=gen_config,
+                    should_stop=should_stop,
+                ):
+                    if should_stop():
+                        mark_span_error(generation_span, "STREAM_CANCELLED")
+                        yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled during generation")
+                        yield FinishEvent(finish_reason="error")
+                        return
+                    token_count += 1
+                    if event["type"] == "answer":
+                        answer_tokens.append(event["text"])
+                        yield TextTokenEvent(token=event["text"])
+                    elif event["type"] == "thinking":
+                        yield ThinkingTokenEvent(token=event["text"])
+                    elif event["type"] == "error" and event.get("text") == "THINKING_BUDGET_EXHAUSTED":
+                        thinking_budget_exhausted = True
+                if thinking_budget_exhausted:
+                    mark_span_error(generation_span, "THINKING_BUDGET_EXHAUSTED")
+                    yield ErrorEvent(
+                        code="THINKING_BUDGET_EXHAUSTED",
+                        message="The model's reasoning phase consumed the entire token budget. Please try a simpler question or disable thinking mode.",
+                    )
                     yield FinishEvent(finish_reason="error")
                     return
-                token_count += 1
-                if event["type"] == "answer":
-                    answer_tokens.append(event["text"])
-                    yield TextTokenEvent(token=event["text"])
-                elif event["type"] == "thinking":
-                    yield ThinkingTokenEvent(token=event["text"])
-                elif event["type"] == "error" and event.get("text") == "THINKING_BUDGET_EXHAUSTED":
-                    thinking_budget_exhausted = True
-            if thinking_budget_exhausted:
-                yield ErrorEvent(
-                    code="THINKING_BUDGET_EXHAUSTED",
-                    message="The model's reasoning phase consumed the entire token budget. Please try a simpler question or disable thinking mode.",
-                )
-                yield FinishEvent(finish_reason="error")
-                return
-        else:
-            for token in generator.generate_chat_stream(
-                messages,
-                config=gen_config,
-                should_stop=should_stop,
-            ):
-                if should_stop():
-                    yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled during generation")
-                    yield FinishEvent(finish_reason="error")
-                    return
-                token_count += 1
-                answer_tokens.append(token)
-                yield TextTokenEvent(token=token)
+            else:
+                for token in generator.generate_chat_stream(
+                    messages,
+                    config=gen_config,
+                    should_stop=should_stop,
+                ):
+                    if should_stop():
+                        mark_span_error(generation_span, "STREAM_CANCELLED")
+                        yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled during generation")
+                        yield FinishEvent(finish_reason="error")
+                        return
+                    token_count += 1
+                    answer_tokens.append(token)
+                    yield TextTokenEvent(token=token)
+
+            set_span_attributes(
+                generation_span,
+                {
+                    "output.value": "".join(answer_tokens),
+                    "llm.token_count.total": token_count,
+                    "rag.output_chars": len("".join(answer_tokens)),
+                },
+            )
 
         # -- end of generation -----------------------------------------------
 
@@ -1335,49 +1453,76 @@ class RagEngine:
         config = self._model_config
         _span = profiler.span if profiler is not None else lambda _: nullcontext()
 
-        with _span("Intent classification"):
-            intent_result = self._classify_intent(
-                query_text=query_text,
-                intent_override=intent_override,
-                no_generate=no_generate,
+        with start_span(
+            self._tracer,
+            "rag.intent.classify",
+            span_kind=SPAN_KIND_CHAIN,
+            attributes={
+                "input.value": query_text,
+                "rag.source_id": source_id,
+                "rag.intent_override": intent_override,
+                "rag.no_generate": no_generate,
+            },
+        ) as classify_span:
+            with _span("Intent classification"):
+                intent_result = self._classify_intent(
+                    query_text=query_text,
+                    intent_override=intent_override,
+                    no_generate=no_generate,
+                )
+
+            logger.info(
+                "Classified intent: %s (confidence=%.2f, method=%s)",
+                intent_result.intent.value,
+                intent_result.confidence,
+                intent_result.method,
             )
 
-        logger.info(
-            "Classified intent: %s (confidence=%.2f, method=%s)",
-            intent_result.intent.value,
-            intent_result.confidence,
-            intent_result.method,
-        )
+            before_guard = intent_result
+            intent_result, force_collection = self._apply_collection_guard(
+                query_text=query_text,
+                source_id=source_id,
+                intent_override=intent_override,
+                intent_result=intent_result,
+            )
 
-        before_guard = intent_result
-        intent_result, force_collection = self._apply_collection_guard(
-            query_text=query_text,
-            source_id=source_id,
-            intent_override=intent_override,
-            intent_result=intent_result,
-        )
+            retrieval_params = resolve_retrieval_params(config, intent_result.intent.value)
+            generation_params = resolve_generation_params(intent_result.intent.value, config.mode)
 
-        retrieval_params = resolve_retrieval_params(config, intent_result.intent.value)
-        generation_params = resolve_generation_params(intent_result.intent.value, config.mode)
+            logger.info(
+                "INTENT_CLASSIFIED | intent=%s | confidence=%.2f | method=%s | mode=%s",
+                intent_result.intent.value,
+                intent_result.confidence,
+                intent_result.method,
+                config.mode,
+            )
 
-        logger.info(
-            "INTENT_CLASSIFIED | intent=%s | confidence=%.2f | method=%s | mode=%s",
-            intent_result.intent.value,
-            intent_result.confidence,
-            intent_result.method,
-            config.mode,
-        )
+            bypass_retrieval = is_low_information_query(query_text)
 
-        bypass_retrieval = is_low_information_query(query_text)
+            set_span_attributes(
+                classify_span,
+                {
+                    "output.value": intent_result.intent.value,
+                    "rag.intent": intent_result.intent.value,
+                    "rag.intent_confidence": intent_result.confidence,
+                    "rag.intent_method": intent_result.method,
+                    "rag.force_collection": force_collection,
+                    "rag.bypass_retrieval": bypass_retrieval,
+                    "rag.retrieval.top_k_fused": retrieval_params.top_k_fused,
+                    "rag.retrieval.top_k_rerank": retrieval_params.top_k_rerank,
+                    "rag.retrieval.top_k_final": retrieval_params.top_k_final,
+                    "rag.retrieval.threshold": retrieval_params.reranker_threshold,
+                },
+            )
 
-        return _ClassifyResult(
-            intent_result=intent_result,
-            before_guard_intent=before_guard,
-            retrieval_params=retrieval_params,
-            generation_params=generation_params,
-            force_collection=force_collection,
-            bypass_retrieval=bypass_retrieval,
-        )
+            return _ClassifyResult(
+                intent_result=intent_result,
+                before_guard_intent=before_guard,
+                retrieval_params=retrieval_params,
+                generation_params=generation_params,
+                force_collection=force_collection,
+                bypass_retrieval=bypass_retrieval,
+            )
 
     def _step_retrieve(
         self,
@@ -1393,102 +1538,140 @@ class RagEngine:
         config = self._model_config
         _span = profiler.span if profiler is not None else lambda _: nullcontext()
 
-        extra_instructions: Optional[str] = None
-        context = ""
-        results: list = []
-        source_ids: list = []
-        context_docs: list = []
-        retrieval_metrics = None
-        generator_preload_future = None
+        with start_span(
+            self._tracer,
+            "rag.retrieve",
+            span_kind=SPAN_KIND_RETRIEVER,
+            attributes={
+                "input.value": query_text,
+                "rag.intent": classified.intent_result.intent.value,
+                "rag.source_id": source_id,
+                "rag.no_generate": no_generate,
+                "rag.citations_enabled": cite,
+            },
+        ) as retrieve_span:
+            extra_instructions: Optional[str] = None
+            context = ""
+            results: list = []
+            source_ids: list = []
+            context_docs: list = []
+            retrieval_metrics = None
+            generator_preload_future = None
 
-        if classified.bypass_retrieval:
-            if cite:
-                logger.info(
-                    "Auto-disabling citations: no retrieval context for unclear query"
-                )
-                cite = False
-            extra_instructions = (
-                "The user query is unclear or nonsensical. Ask a concise clarifying "
-                "question first, and optionally suggest 2-3 concrete ways they can rephrase it."
-            )
-
-        elif classified.intent_result.intent == Intent.COLLECTION:
-            context, source_ids, cite = self._handle_collection(
-                config=config,
-                no_generate=no_generate,
-                citations_enabled=cite,
-            )
-            if classified.force_collection:
+            if classified.bypass_retrieval:
+                if cite:
+                    logger.info(
+                        "Auto-disabling citations: no retrieval context for unclear query"
+                    )
+                    cite = False
                 extra_instructions = (
-                    "If the question asks which source/document matches a criterion, "
-                    "name the matching source IDs explicitly in the first sentence, "
-                    "then justify briefly from the summaries. If none match, say that clearly."
-                )
-            if context is None:
-                return _RetrieveResult(
-                    context=None,
-                    results=[],
-                    source_ids=[],
-                    context_docs=[],
-                    cite=cite,
-                    extra_instructions=extra_instructions,
-                    retrieval_metrics=None,
-                    generator_preload_future=None,
+                    "The user query is unclear or nonsensical. Ask a concise clarifying "
+                    "question first, and optionally suggest 2-3 concrete ways they can rephrase it."
                 )
 
-        else:
-            if not no_generate:
-                generator_preload_future = self._start_generator_preload()
-
-            with _span("Retrieval (hybrid search + rerank)"):
-                results = retrieval_engine.search(
-                    query_text,
-                    source_id=source_id,
-                    params=classified.retrieval_params,
-                    retrieval_budget=config.retrieval_budget,
-                    intent=classified.intent_result.intent.value,
+            elif classified.intent_result.intent == Intent.COLLECTION:
+                context, source_ids, cite = self._handle_collection(
+                    config=config,
+                    no_generate=no_generate,
+                    citations_enabled=cite,
                 )
+                if classified.force_collection:
+                    extra_instructions = (
+                        "If the question asks which source/document matches a criterion, "
+                        "name the matching source IDs explicitly in the first sentence, "
+                        "then justify briefly from the summaries. If none match, say that clearly."
+                    )
+                if context is None:
+                    set_span_attributes(
+                        retrieve_span,
+                        {
+                            "rag.retrieve.path": "collection",
+                            "rag.retrieve.results_count": 0,
+                            "rag.retrieve.sources_count": 0,
+                            "rag.citations_enabled": cite,
+                        },
+                    )
+                    return _RetrieveResult(
+                        context=None,
+                        results=[],
+                        source_ids=[],
+                        context_docs=[],
+                        cite=cite,
+                        extra_instructions=extra_instructions,
+                        retrieval_metrics=None,
+                        generator_preload_future=None,
+                    )
 
-            source_ids = sorted(
-                {
-                    r.metadata.get("source_id")
+            else:
+                if not no_generate:
+                    generator_preload_future = self._start_generator_preload()
+
+                with _span("Retrieval (hybrid search + rerank)"):
+                    results = retrieval_engine.search(
+                        query_text,
+                        source_id=source_id,
+                        params=classified.retrieval_params,
+                        retrieval_budget=config.retrieval_budget,
+                        intent=classified.intent_result.intent.value,
+                    )
+
+                source_ids = sorted(
+                    {
+                        r.metadata.get("source_id")
+                        for r in results
+                        if r.metadata.get("source_id")
+                    }
+                )
+                context_docs = [
+                    (r.parent_text if r.parent_text else r.text)
                     for r in results
-                    if r.metadata.get("source_id")
-                }
+                    if (r.parent_text if r.parent_text else r.text)
+                ]
+
+            retrieval_metrics = results[0].metrics if results and results[0].metrics else None
+
+            _scores = [r.score for r in results] if results else []
+            logger.info(
+                "INTENT_AWARE | intent=%s | retrieval_results=%d | top_score=%.4f | low_score=%.4f | "
+                "params: top_k_dense=%d top_k_fused=%d top_k_rerank=%d top_k_final=%d threshold=%.4f",
+                classified.intent_result.intent.value,
+                len(results),
+                max(_scores) if _scores else 0.0,
+                min(_scores) if _scores else 0.0,
+                classified.retrieval_params.top_k_dense,
+                classified.retrieval_params.top_k_fused,
+                classified.retrieval_params.top_k_rerank,
+                classified.retrieval_params.top_k_final,
+                classified.retrieval_params.reranker_threshold,
             )
-            context_docs = [
-                (r.parent_text if r.parent_text else r.text)
-                for r in results
-                if (r.parent_text if r.parent_text else r.text)
-            ]
 
-        retrieval_metrics = results[0].metrics if results and results[0].metrics else None
+            set_span_attributes(
+                retrieve_span,
+                {
+                    "rag.retrieve.path": (
+                        "bypass"
+                        if classified.bypass_retrieval
+                        else "collection"
+                        if classified.intent_result.intent == Intent.COLLECTION
+                        else "hybrid"
+                    ),
+                    "rag.retrieve.results_count": len(results),
+                    "rag.retrieve.sources_count": len(source_ids),
+                    "rag.retrieve.context_docs_count": len(context_docs),
+                    "rag.citations_enabled": cite,
+                },
+            )
 
-        _scores = [r.score for r in results] if results else []
-        logger.info(
-            "INTENT_AWARE | intent=%s | retrieval_results=%d | top_score=%.4f | low_score=%.4f | "
-            "params: top_k_dense=%d top_k_fused=%d top_k_rerank=%d top_k_final=%d threshold=%.4f",
-            classified.intent_result.intent.value,
-            len(results),
-            max(_scores) if _scores else 0.0,
-            min(_scores) if _scores else 0.0,
-            classified.retrieval_params.top_k_dense,
-            classified.retrieval_params.top_k_fused,
-            classified.retrieval_params.top_k_rerank,
-            classified.retrieval_params.top_k_final,
-            classified.retrieval_params.reranker_threshold,
-        )
-
-        return _RetrieveResult(
-            context=context,
-            results=results,
-            source_ids=source_ids,
-            context_docs=context_docs,
-            cite=cite,
-            extra_instructions=extra_instructions,
-            retrieval_metrics=retrieval_metrics,
-            generator_preload_future=generator_preload_future,
-        )
+            return _RetrieveResult(
+                context=context,
+                results=results,
+                source_ids=source_ids,
+                context_docs=context_docs,
+                cite=cite,
+                extra_instructions=extra_instructions,
+                retrieval_metrics=retrieval_metrics,
+                generator_preload_future=generator_preload_future,
+            )
 
     def _step_pack_budget(
         self,
@@ -1502,125 +1685,156 @@ class RagEngine:
         formatted without token budgeting — using :func:`_dedupe_context` so
         both code paths get deduplication.
         """
-        source_legend: Optional[str] = None
-        result_metadatas: list = (
-            [
-                r.metadata
-                for r in retrieved.results
-                if (r.parent_text if r.parent_text else r.text)
-            ]
-            if retrieved.context_docs and retrieved.results
-            else []
-        )
-        citation_list: list = []
-        packed_retrieval_results: list = []
-        pack_result_obj = None
-        packed_metadatas: list = []
-        context = retrieved.context
-        cite = retrieved.cite
-        budget_metrics = None
-
-        if generator is not None and retrieved.context_docs:
-            pack_result_obj = enforce_token_budget(
-                docs=retrieved.context_docs,
-                max_tokens=config.retrieval_budget,
-                tokenizer=generator.tokenizer,
-                consecutive_fail_threshold=3,
-                allow_truncation=True,
-                log=logger,
+        with start_span(
+            self._tracer,
+            "rag.budget.pack",
+            span_kind=SPAN_KIND_CHAIN,
+            attributes={
+                "rag.retrieval.docs_in": len(retrieved.context_docs),
+                "rag.citations_enabled": retrieved.cite,
+                "rag.retrieval_budget": config.retrieval_budget,
+            },
+        ) as budget_span:
+            source_legend: Optional[str] = None
+            result_metadatas: list = (
+                [
+                    r.metadata
+                    for r in retrieved.results
+                    if (r.parent_text if r.parent_text else r.text)
+                ]
+                if retrieved.context_docs and retrieved.results
+                else []
             )
-            packed_metadatas = [
-                result_metadatas[i]
-                for i in pack_result_obj.packed_indices
-                if i < len(result_metadatas)
-            ]
-            packed_chunk_ids = [
-                (
-                    retrieved.results[i].child_id
-                    if i < len(retrieved.results)
-                    else ""
-                )
-                for i in pack_result_obj.packed_indices
-            ]
+            citation_list: list = []
+            packed_retrieval_results: list = []
+            pack_result_obj = None
+            packed_metadatas: list = []
+            context = retrieved.context
+            cite = retrieved.cite
+            budget_metrics = None
 
-            if cite and packed_metadatas:
-                context, source_mapping = format_context_with_citations(
-                    texts=pack_result_obj.packed_docs,
-                    metadatas=packed_metadatas,
-                    chunk_ids=packed_chunk_ids,
+            if generator is not None and retrieved.context_docs:
+                pack_result_obj = enforce_token_budget(
+                    docs=retrieved.context_docs,
+                    max_tokens=config.retrieval_budget,
+                    tokenizer=generator.tokenizer,
+                    consecutive_fail_threshold=3,
+                    allow_truncation=True,
+                    log=logger,
                 )
-                source_legend = build_source_legend(source_mapping)
-
-                for ci, pack_idx in enumerate(pack_result_obj.packed_indices):
-                    if pack_idx >= len(retrieved.results):
-                        continue
-                    r = retrieved.results[pack_idx]
-                    packed_retrieval_results.append(r)
-                    citation_list.append(
-                        {
-                            "index": ci + 1,
-                            "source_id": r.metadata.get("source_id", ""),
-                            "chunk_id": r.child_id,
-                            "page_number": r.metadata.get("page_number"),
-                            "display_page": r.metadata.get("display_page"),
-                            "start_page": r.metadata.get("start_page"),
-                            "end_page": r.metadata.get("end_page"),
-                            "header_path": r.metadata.get("header_path", ""),
-                            "chunk_text": r.text if r.text else "",
-                        }
+                packed_metadatas = [
+                    result_metadatas[i]
+                    for i in pack_result_obj.packed_indices
+                    if i < len(result_metadatas)
+                ]
+                packed_chunk_ids = [
+                    (
+                        retrieved.results[i].child_id
+                        if i < len(retrieved.results)
+                        else ""
                     )
-            elif cite:
-                logger.info(
-                    "Auto-disabling citations: packed context missing metadata"
-                )
-                cite = False
-            else:
-                context = "\n\n".join(pack_result_obj.packed_docs)
+                    for i in pack_result_obj.packed_indices
+                ]
 
-            budget_metrics = BudgetMetrics(
-                budget_tokens=config.retrieval_budget,
-                used_tokens=pack_result_obj.used_tokens,
-                utilization_pct=(
-                    100 * pack_result_obj.used_tokens / config.retrieval_budget
-                    if config.retrieval_budget > 0
-                    else 0
-                ),
-                avg_doc_tokens=(
-                    pack_result_obj.used_tokens / len(pack_result_obj.packed_docs)
-                    if pack_result_obj.packed_docs
-                    else 0
-                ),
-                docs_packed=len(pack_result_obj.packed_docs),
-                docs_skipped=pack_result_obj.skipped_count,
-                docs_truncated=pack_result_obj.truncated_count,
+                if cite and packed_metadatas:
+                    context, source_mapping = format_context_with_citations(
+                        texts=pack_result_obj.packed_docs,
+                        metadatas=packed_metadatas,
+                        chunk_ids=packed_chunk_ids,
+                    )
+                    source_legend = build_source_legend(source_mapping)
+
+                    for ci, pack_idx in enumerate(pack_result_obj.packed_indices):
+                        if pack_idx >= len(retrieved.results):
+                            continue
+                        r = retrieved.results[pack_idx]
+                        packed_retrieval_results.append(r)
+                        citation_list.append(
+                            {
+                                "index": ci + 1,
+                                "source_id": r.metadata.get("source_id", ""),
+                                "chunk_id": r.child_id,
+                                "page_number": r.metadata.get("page_number"),
+                                "display_page": r.metadata.get("display_page"),
+                                "start_page": r.metadata.get("start_page"),
+                                "end_page": r.metadata.get("end_page"),
+                                "header_path": r.metadata.get("header_path", ""),
+                                "chunk_text": r.text if r.text else "",
+                            }
+                        )
+                elif cite:
+                    logger.info(
+                        "Auto-disabling citations: packed context missing metadata"
+                    )
+                    cite = False
+                else:
+                    context = "\n\n".join(pack_result_obj.packed_docs)
+
+                budget_metrics = BudgetMetrics(
+                    budget_tokens=config.retrieval_budget,
+                    used_tokens=pack_result_obj.used_tokens,
+                    utilization_pct=(
+                        100 * pack_result_obj.used_tokens / config.retrieval_budget
+                        if config.retrieval_budget > 0
+                        else 0
+                    ),
+                    avg_doc_tokens=(
+                        pack_result_obj.used_tokens / len(pack_result_obj.packed_docs)
+                        if pack_result_obj.packed_docs
+                        else 0
+                    ),
+                    docs_packed=len(pack_result_obj.packed_docs),
+                    docs_skipped=pack_result_obj.skipped_count,
+                    docs_truncated=pack_result_obj.truncated_count,
+                )
+
+            elif retrieved.context_docs:
+                # no_generate=True path: format context without token budgeting.
+                if cite and result_metadatas:
+                    context_chunk_ids = [r.child_id for r in retrieved.results]
+                    context, source_mapping = format_context_with_citations(
+                        texts=retrieved.context_docs,
+                        metadatas=result_metadatas,
+                        chunk_ids=context_chunk_ids,
+                    )
+                    source_legend = build_source_legend(source_mapping)
+                elif cite:
+                    cite = False
+                else:
+                    context = _dedupe_context(retrieved.context_docs)
+
+            set_span_attributes(
+                budget_span,
+                {
+                    "rag.citations_enabled": cite,
+                    "rag.retrieval.docs_out": (
+                        len(pack_result_obj.packed_docs)
+                        if pack_result_obj is not None
+                        else len(retrieved.context_docs)
+                    ),
+                    "rag.budget.docs_skipped": (
+                        pack_result_obj.skipped_count if pack_result_obj is not None else 0
+                    ),
+                    "rag.budget.docs_truncated": (
+                        pack_result_obj.truncated_count if pack_result_obj is not None else 0
+                    ),
+                    "rag.budget.used_tokens": (
+                        pack_result_obj.used_tokens if pack_result_obj is not None else 0
+                    ),
+                },
             )
 
-        elif retrieved.context_docs:
-            # no_generate=True path: format context without token budgeting.
-            if cite and result_metadatas:
-                context_chunk_ids = [r.child_id for r in retrieved.results]
-                context, source_mapping = format_context_with_citations(
-                    texts=retrieved.context_docs,
-                    metadatas=result_metadatas,
-                    chunk_ids=context_chunk_ids,
-                )
-                source_legend = build_source_legend(source_mapping)
-            elif cite:
-                cite = False
-            else:
-                context = _dedupe_context(retrieved.context_docs)
-
-        return _PackResult(
-            context=context,
-            cite=cite,
-            source_legend=source_legend,
-            result_metadatas=result_metadatas,
-            budget_metrics=budget_metrics,
-            citation_list=citation_list,
-            packed_retrieval_results=packed_retrieval_results,
-            pack_result=pack_result_obj,
-            packed_metadatas=packed_metadatas,
-        )
+            return _PackResult(
+                context=context,
+                cite=cite,
+                source_legend=source_legend,
+                result_metadatas=result_metadatas,
+                budget_metrics=budget_metrics,
+                citation_list=citation_list,
+                packed_retrieval_results=packed_retrieval_results,
+                pack_result=pack_result_obj,
+                packed_metadatas=packed_metadatas,
+            )
 
     # -- internal pipeline helpers -----------------------------------------
 

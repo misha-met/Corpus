@@ -331,3 +331,23 @@ class HealthResponse(BaseModel):
         default=None,
         description="Detected system RAM in GB, used by frontend for capability gating.",
     )
+    phoenix_configured: bool = Field(
+        default=False,
+        description="Whether Phoenix tracing is configured (via flags or env vars).",
+    )
+    phoenix_active: bool = Field(
+        default=False,
+        description="Whether Phoenix exporter/tracer is currently active.",
+    )
+    phoenix_project_name: Optional[str] = Field(
+        default=None,
+        description="Phoenix project name currently configured.",
+    )
+    phoenix_endpoint: Optional[str] = Field(
+        default=None,
+        description="Phoenix collector endpoint currently configured.",
+    )
+    phoenix_error: Optional[str] = Field(
+        default=None,
+        description="Last Phoenix initialization error, if any.",
+    )

@@ -59,6 +59,7 @@ from .query_events import (
     TextTokenEvent,
     ThinkingTokenEvent,
 )
+from .phoenix_tracing import get_phoenix_runtime_status
 from .stream_protocol import (
     annotation_error,
     annotation_error_with_metadata,
@@ -263,10 +264,17 @@ async def validation_exception_handler(request: Request, exc: Exception):
 async def health():
     from .config import get_system_ram_gb
 
+    phoenix_status = get_phoenix_runtime_status()
+
     return HealthResponse(
         status="ok",
         engine_loaded=_engine_loaded,
         system_ram_gb=round(get_system_ram_gb(), 1),
+        phoenix_configured=phoenix_status.configured,
+        phoenix_active=phoenix_status.active,
+        phoenix_project_name=phoenix_status.project_name,
+        phoenix_endpoint=phoenix_status.endpoint,
+        phoenix_error=phoenix_status.error,
     )
 
 

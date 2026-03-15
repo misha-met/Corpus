@@ -50,6 +50,44 @@ def _get_fts_batch_size_default() -> int:
         return 0
 
 
+def _add_phoenix_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--phoenix",
+        action="store_true",
+        help="Enable Phoenix tracing for this command",
+    )
+    parser.add_argument(
+        "--no-phoenix",
+        action="store_true",
+        help="Disable Phoenix tracing even when env vars are set",
+    )
+    parser.add_argument(
+        "--phoenix-project",
+        default=None,
+        help="Phoenix project name override",
+    )
+    parser.add_argument(
+        "--phoenix-endpoint",
+        default=None,
+        help="Phoenix collector endpoint override",
+    )
+    parser.add_argument(
+        "--phoenix-api-key",
+        default=None,
+        help="Phoenix API key override",
+    )
+    parser.add_argument(
+        "--phoenix-auto-instrument",
+        action="store_true",
+        help="Enable Phoenix auto-instrument integrations",
+    )
+    parser.add_argument(
+        "--phoenix-no-batch",
+        action="store_true",
+        help="Disable batch span exporting for Phoenix",
+    )
+
+
 def run() -> None:
     logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 
@@ -121,6 +159,7 @@ def run() -> None:
         dest="summarize",
         help="Disable summary generation",
     )
+    _add_phoenix_args(ingest_parser)
 
     # ---- query subcommand ------------------------------------------------
     query_parser = subparsers.add_parser("query", help="Query the RAG system")
@@ -233,6 +272,7 @@ def run() -> None:
             "against the same retrieval context."
         ),
     )
+    _add_phoenix_args(query_parser)
 
     # ---- benchmark subcommand -------------------------------------------
     benchmark_parser = subparsers.add_parser(
@@ -320,11 +360,14 @@ def run() -> None:
             "Rewrites [N, p.XX] pages when claim-to-chunk matching indicates a stronger page."
         ),
     )
+    _add_phoenix_args(benchmark_parser)
 
     args = parser.parse_args()
 
     if getattr(args, "cite", None) and getattr(args, "no_cite", None):
         parser.error("Conflicting flags: use only one of --cite or --no-cite.")
+    if getattr(args, "phoenix", False) and getattr(args, "no_phoenix", False):
+        parser.error("Conflicting flags: use only one of --phoenix or --no-phoenix.")
     if getattr(args, "fts_rebuild_batch_size", 0) < 0:
         parser.error("--fts-rebuild-batch-size must be >= 0.")
     if getattr(args, "dump_prompt", False) and getattr(args, "no_generate", False):
@@ -348,6 +391,12 @@ def run() -> None:
             limit=args.limit,
             lock_intent_to_annotation=(args.intent_routing == "annotated"),
             citation_verification=bool(args.citation_verification),
+            phoenix_enabled=(True if args.phoenix else False if args.no_phoenix else None),
+            phoenix_project_name=args.phoenix_project,
+            phoenix_endpoint=args.phoenix_endpoint,
+            phoenix_api_key=args.phoenix_api_key,
+            phoenix_auto_instrument=(True if args.phoenix_auto_instrument else None),
+            phoenix_batch=(False if args.phoenix_no_batch else None),
         )
         run_dir = BenchmarkRunner(runner_cfg).run()
         print(f"Benchmark completed: {run_dir}")
@@ -380,6 +429,12 @@ def run() -> None:
         intent_model=getattr(args, "intent_model", "mlx-community/LFM2-8B-A1B-4bit"),
         verbose=verbose,
         latency=getattr(args, "latency", False) and args.command == "query",
+        phoenix_enabled=(True if args.phoenix else False if args.no_phoenix else None),
+        phoenix_project_name=args.phoenix_project,
+        phoenix_endpoint=args.phoenix_endpoint,
+        phoenix_api_key=args.phoenix_api_key,
+        phoenix_auto_instrument=(True if args.phoenix_auto_instrument else None),
+        phoenix_batch=(False if args.phoenix_no_batch else None),
     )
 
     engine = RagEngine(engine_cfg)

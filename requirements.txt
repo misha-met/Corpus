@@ -18,6 +18,9 @@ uvicorn==0.40.0
 httpx==0.28.1
 python-multipart==0.0.22
 
+# Observability (Arize Phoenix + OpenTelemetry)
+arize-phoenix-otel==0.15.0
+
 # Offline Speech-to-Text (MLX Whisper)
 mlx-whisper==0.4.3
 soundfile==0.13.1   # audio decoding (WAV, WebM, OGG)

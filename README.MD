@@ -420,6 +420,48 @@ curl -F "file=@paper.pdf" -F "source_id=my_paper" -F "summarize=true" \
   http://127.0.0.1:8000/api/sources/upload
 ```
 
+### Phoenix Observability (Arize)
+
+Corpus now includes native Phoenix tracing for:
+
+- Intent classification
+- Retrieval stage pipeline (hybrid search, rerank, dedup, threshold filter, budget expand, context expansion)
+- Token budget packing
+- Prompt construction
+- LLM generation (synchronous and streaming)
+- Benchmark retrieval-mode traces (`hybrid_rrf`, `vector_only`, `bm25_only`)
+
+Enable tracing via environment variables:
+
+```bash
+export RAG_PHOENIX_ENABLED=1
+export PHOENIX_PROJECT_NAME=corpus-local
+export PHOENIX_COLLECTOR_ENDPOINT=http://127.0.0.1:6006/v1/traces
+```
+
+Optional cloud auth:
+
+```bash
+export PHOENIX_API_KEY=your-api-key
+```
+
+CLI overrides are also available on `query`, `ingest`, `benchmark`, and retrieval-only benchmark commands:
+
+```bash
+python -m src.cli query "Compare these arguments" --phoenix --phoenix-project corpus-cli
+
+python -m src.benchmark.retrieval_only benchmarks/ground_truth/bm25vsvector.json \
+    --phoenix --phoenix-project corpus-retrieval-bench
+```
+
+Check runtime tracing status from health:
+
+```bash
+curl http://127.0.0.1:8000/api/health
+```
+
+Health responses now include `phoenix_configured`, `phoenix_active`, `phoenix_project_name`, and `phoenix_endpoint`.
+
 ---
 
 ## Project Structure
