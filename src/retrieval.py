@@ -36,6 +36,7 @@ from .metrics import (
 )
 from .phoenix_tracing import (
     SPAN_KIND_RETRIEVER,
+    set_retrieval_documents,
     set_span_attributes,
     start_span,
 )
@@ -637,6 +638,66 @@ class RetrievalEngine:
             ))
         return results
 
+    @staticmethod
+    def _build_retrieval_documents_from_items(
+        items: list[dict[str, Any]],
+        *,
+        limit: int = 8,
+        max_content_chars: int = 220,
+    ) -> list[dict[str, Any]]:
+        documents: list[dict[str, Any]] = []
+        for item in items:
+            if len(documents) >= max(1, limit):
+                break
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            content = (item.get("text") or "").strip()
+            if len(content) > max_content_chars:
+                content = content[:max_content_chars] + "..."
+            documents.append(
+                {
+                    "document.id": item.get("id"),
+                    "document.score": round(float(item.get("rerank_score", item.get("score", 0.0))), 6),
+                    "document.content": content,
+                    "document.metadata": {
+                        "source_id": metadata.get("source_id"),
+                        "page_number": metadata.get("page_number"),
+                        "display_page": metadata.get("display_page"),
+                        "header_path": metadata.get("header_path"),
+                    },
+                }
+            )
+        return documents
+
+    @staticmethod
+    def _build_retrieval_documents_from_results(
+        results: list[RetrievalResult],
+        *,
+        limit: int = 8,
+        max_content_chars: int = 220,
+    ) -> list[dict[str, Any]]:
+        documents: list[dict[str, Any]] = []
+        for result in results:
+            if len(documents) >= max(1, limit):
+                break
+            metadata = result.metadata if isinstance(result.metadata, dict) else {}
+            content = (result.text or "").strip()
+            if len(content) > max_content_chars:
+                content = content[:max_content_chars] + "..."
+            documents.append(
+                {
+                    "document.id": result.child_id,
+                    "document.score": round(float(result.score), 6),
+                    "document.content": content,
+                    "document.metadata": {
+                        "source_id": metadata.get("source_id"),
+                        "page_number": metadata.get("page_number"),
+                        "display_page": metadata.get("display_page"),
+                        "header_path": metadata.get("header_path"),
+                    },
+                }
+            )
+        return documents
+
     def search(
         self,
         query: str,
@@ -697,6 +758,7 @@ class RetrievalEngine:
             span_kind=SPAN_KIND_RETRIEVER,
             attributes={
                 "input.value": query,
+                "input.mime_type": "text/plain",
                 "rag.intent": intent,
                 "rag.source_id": source_id,
                 "rag.query_chars": len(query),
@@ -813,7 +875,17 @@ class RetrievalEngine:
                         "rag.items_before": threshold_metrics.items_before_threshold,
                         "rag.items_after": threshold_metrics.items_after_threshold,
                         "rag.safety_net_triggered": threshold_metrics.safety_net_triggered,
+                        "input.value": f"{threshold_metrics.items_before_threshold} candidates before thresholding",
+                        "input.mime_type": "text/plain",
+                        "output.value": (
+                            f"{threshold_metrics.items_after_threshold} candidates after threshold={threshold:.6f}"
+                        ),
+                        "output.mime_type": "text/plain",
                     },
+                )
+                set_retrieval_documents(
+                    stage_span,
+                    self._build_retrieval_documents_from_items(reranked),
                 )
 
             reranker_metrics = compute_reranker_stats(raw_scores)
@@ -913,6 +985,7 @@ class RetrievalEngine:
                         "rag.stage": "context_expand",
                         "rag.results_count": len(results),
                         "rag.sources_count": len(unique_sources),
+                        "output.mime_type": "text/plain",
                         "output.value": f"{len(results)} retrieved passages",
                     },
                 )
@@ -972,8 +1045,13 @@ class RetrievalEngine:
                     "rag.threshold.safety_net": threshold_metrics.safety_net_triggered,
                     "rag.top_source_ids": sorted(set(top_source_ids))[:10],
                     "rag.top_results": top_results_preview,
+                    "output.mime_type": "text/plain",
                     "output.value": f"{len(results)} retrieval results",
                 },
+            )
+            set_retrieval_documents(
+                search_span,
+                self._build_retrieval_documents_from_results(results),
             )
 
             return results

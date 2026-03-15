@@ -354,6 +354,37 @@ def set_span_attributes(span: Any, attributes: dict[str, Any], *, max_text_chars
         set_span_attribute(span, key, value, max_text_chars=max_text_chars)
 
 
+def set_retrieval_documents(
+    span: Any,
+    documents: list[dict[str, Any]],
+    *,
+    max_text_chars: int = 4096,
+) -> None:
+    """Set retrieval documents using canonical and flattened OpenInference keys."""
+
+    if span is None:
+        return
+
+    docs = documents if isinstance(documents, list) else []
+    # OpenTelemetry attributes cannot carry nested object arrays directly.
+    # Keep the canonical key as a string array so UI code that expects an array
+    # does not crash, and provide flattened keys for structured inspection.
+    docs_json = [
+        to_json(doc) if isinstance(doc, dict) else str(doc)
+        for doc in docs
+    ]
+    set_span_attribute(span, "retrieval.documents", docs_json, max_text_chars=max_text_chars)
+
+    # Also emit flattened keys (retrieval.documents.{i}.document.*) for UIs that
+    # rely on OpenInference flattening patterns.
+    for index, doc in enumerate(docs):
+        if not isinstance(doc, dict):
+            continue
+        prefix = f"retrieval.documents.{index}"
+        for key, value in doc.items():
+            set_span_attribute(span, f"{prefix}.{key}", value, max_text_chars=max_text_chars)
+
+
 @contextmanager
 def start_span(
     tracer: Any,

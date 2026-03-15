@@ -5,6 +5,7 @@ from unittest import mock
 
 from src.phoenix_tracing import (
     resolve_phoenix_tracing_settings,
+    set_retrieval_documents,
     set_span_attributes,
     start_span,
 )
@@ -70,3 +71,24 @@ def test_set_span_attributes_serializes_complex_values() -> None:
 def test_start_span_no_tracer_yields_none() -> None:
     with start_span(None, "test") as span:
         assert span is None
+
+
+def test_set_retrieval_documents_emits_array_and_flattened_keys() -> None:
+    span = _DummySpan()
+    docs = [
+        {
+            "document.id": "chunk-1",
+            "document.score": 0.91,
+            "document.content": "hello",
+        }
+    ]
+
+    set_retrieval_documents(span, docs)
+
+    retrieval_docs = span.attrs.get("retrieval.documents")
+    assert isinstance(retrieval_docs, list)
+    assert retrieval_docs
+    assert isinstance(retrieval_docs[0], str)
+    assert '"document.id": "chunk-1"' in retrieval_docs[0]
+    assert span.attrs["retrieval.documents.0.document.id"] == "chunk-1"
+    assert span.attrs["retrieval.documents.0.document.score"] == 0.91

@@ -58,9 +58,11 @@ from .phoenix_tracing import (
     PhoenixTracingStatus,
     get_phoenix_tracer,
     mark_span_error,
+    set_retrieval_documents,
     set_span_attribute,
     set_span_attributes,
     start_span,
+    to_json,
 )
 from .retrieval import (
     RetrievalEngine,
@@ -280,6 +282,38 @@ def _dedupe_context(texts: Iterable[str]) -> str:
             seen.add(cleaned)
             unique_texts.append(cleaned)
     return "\n\n".join(unique_texts)
+
+
+def _build_openinference_retrieval_documents(
+    results: Iterable[RetrievalResult],
+    *,
+    limit: int = 8,
+    max_content_chars: int = 320,
+) -> list[dict[str, Any]]:
+    docs: list[dict[str, Any]] = []
+    for result in results:
+        if len(docs) >= max(1, limit):
+            break
+
+        metadata = result.metadata if isinstance(result.metadata, dict) else {}
+        content = (result.text or "").strip()
+        if len(content) > max_content_chars:
+            content = content[:max_content_chars] + "..."
+
+        docs.append(
+            {
+                "document.id": result.child_id,
+                "document.score": round(float(result.score), 6),
+                "document.content": content,
+                "document.metadata": {
+                    "source_id": metadata.get("source_id"),
+                    "page_number": metadata.get("page_number"),
+                    "display_page": metadata.get("display_page"),
+                    "header_path": metadata.get("header_path"),
+                },
+            }
+        )
+    return docs
 
 
 def _check_novel_proper_nouns(output: str, context: str) -> None:
@@ -863,7 +897,9 @@ class RagEngine:
             span_kind=SPAN_KIND_CHAIN,
             attributes={
                 "rag.request_id": query_request_id,
+                "session.id": query_request_id,
                 "input.value": query_text,
+                "input.mime_type": "text/plain",
                 "rag.source_id": source_id,
                 "rag.intent_override": intent_override,
                 "rag.no_generate": no_generate,
@@ -951,6 +987,7 @@ class RagEngine:
                         {
                             "rag.finish_reason": "collection_empty",
                             "rag.latency_wall_ms": profiler.wall_ms,
+                            "output.mime_type": "text/plain",
                             "output.value": "No documents found in the database.",
                         },
                     )
@@ -976,6 +1013,7 @@ class RagEngine:
                             "rag.finish_reason": "no_generate",
                             "rag.context_chars": len(packed.context),
                             "rag.latency_wall_ms": profiler.wall_ms,
+                            "output.mime_type": "text/plain",
                             "output.value": f"Context-only response ({len(packed.context)} chars)",
                         },
                     )
@@ -1050,6 +1088,7 @@ class RagEngine:
                             "rag.context_chars": len(packed.context),
                             "rag.prompt.message_count": len(messages),
                             "rag.latency_wall_ms": profiler.wall_ms,
+                            "output.mime_type": "text/plain",
                             "output.value": f"Prompt dump with {len(messages)} messages",
                         },
                     )
@@ -1085,6 +1124,16 @@ class RagEngine:
                     span_kind=SPAN_KIND_LLM,
                     attributes={
                         "rag.intent": intent_result.intent.value,
+                        "llm.model_name": (self._cfg.model or config.llm_model),
+                        "llm.invocation_parameters": to_json(
+                            {
+                                "temperature": gen_config.temperature,
+                                "top_p": gen_config.top_p,
+                                "top_k": gen_config.top_k,
+                                "max_tokens": gen_config.max_tokens,
+                                "context_window": gen_config.context_window,
+                            }
+                        ),
                         "llm.temperature": gen_config.temperature,
                         "llm.top_p": gen_config.top_p,
                         "llm.top_k": gen_config.top_k,
@@ -1104,6 +1153,8 @@ class RagEngine:
                             generation_span,
                             {
                                 "output.value": raw_answer,
+                                "output.mime_type": "text/plain",
+                                "llm.token_count.completion": _gen_tokens,
                                 "llm.token_count.total": _gen_tokens,
                                 "rag.output_chars": len(raw_answer),
                             },
@@ -1136,6 +1187,7 @@ class RagEngine:
                         "rag.output_chars": len(raw_answer),
                         "llm.token_count.total": _gen_tokens,
                         "rag.latency_wall_ms": profiler.wall_ms,
+                        "output.mime_type": "text/plain",
                         "output.value": answer,
                     },
                 )
@@ -1204,7 +1256,9 @@ class RagEngine:
             span_kind=SPAN_KIND_CHAIN,
             attributes={
                 "rag.request_id": stream_request_id,
+                "session.id": stream_request_id,
                 "input.value": query_text,
+                "input.mime_type": "text/plain",
                 "rag.source_id": source_id,
                 "rag.intent_override": intent_override,
                 "rag.citations_requested": citations_enabled,
@@ -1230,6 +1284,8 @@ class RagEngine:
                     stream_span,
                     {
                         "rag.finish_reason": finish_reason,
+                        "output.mime_type": "text/plain",
+                        "output.value": f"stream finished: {finish_reason}",
                         "llm.token_count.completion": completion_tokens,
                     },
                 )
@@ -1249,6 +1305,8 @@ class RagEngine:
                     stream_span,
                     {
                         "rag.finish_reason": "error",
+                        "output.mime_type": "text/plain",
+                        "output.value": "stream finished: error",
                         "llm.token_count.completion": completion_tokens,
                     },
                 )
@@ -1532,6 +1590,18 @@ class RagEngine:
             span_kind=SPAN_KIND_LLM,
             attributes={
                 "rag.intent": intent_result.intent.value,
+                "llm.model_name": (self._cfg.model or config.llm_model),
+                "llm.invocation_parameters": to_json(
+                    {
+                        "temperature": gen_config.temperature,
+                        "top_p": gen_config.top_p,
+                        "top_k": gen_config.top_k,
+                        "max_tokens": gen_config.max_tokens,
+                        "max_internal_tokens": gen_config.max_internal_tokens,
+                        "context_window": gen_config.context_window,
+                        "enable_thinking": gen_params.enable_thinking,
+                    }
+                ),
                 "rag.thinking_enabled": gen_params.enable_thinking,
                 "llm.temperature": gen_config.temperature,
                 "llm.top_p": gen_config.top_p,
@@ -1589,6 +1659,8 @@ class RagEngine:
                 generation_span,
                 {
                     "output.value": "".join(answer_tokens),
+                    "output.mime_type": "text/plain",
+                    "llm.token_count.completion": token_count,
                     "llm.token_count.total": token_count,
                     "rag.output_chars": len("".join(answer_tokens)),
                 },
@@ -1715,6 +1787,7 @@ class RagEngine:
             span_kind=SPAN_KIND_RETRIEVER,
             attributes={
                 "input.value": query_text,
+                "input.mime_type": "text/plain",
                 "rag.intent": classified.intent_result.intent.value,
                 "rag.source_id": source_id,
                 "rag.no_generate": no_generate,
@@ -1759,9 +1832,12 @@ class RagEngine:
                             "rag.retrieve.path": "collection",
                             "rag.retrieve.results_count": 0,
                             "rag.retrieve.sources_count": 0,
+                            "output.mime_type": "text/plain",
+                            "output.value": "No collection documents found",
                             "rag.citations_enabled": cite,
                         },
                     )
+                    set_retrieval_documents(retrieve_span, [])
                     return _RetrieveResult(
                         context=None,
                         results=[],
@@ -1818,6 +1894,7 @@ class RagEngine:
                         "score": round(float(result.score), 6),
                     }
                 )
+            retrieval_documents = _build_openinference_retrieval_documents(results)
             logger.info(
                 "INTENT_AWARE | intent=%s | retrieval_results=%d | top_score=%.4f | low_score=%.4f | "
                 "params: top_k_dense=%d top_k_fused=%d top_k_rerank=%d top_k_final=%d threshold=%.4f",
@@ -1856,9 +1933,12 @@ class RagEngine:
                     "rag.retrieve.preload_started": generator_preload_future is not None,
                     "rag.retrieve.extra_instructions": bool(extra_instructions),
                     "rag.retrieve.top_results": top_results_preview,
+                    "output.mime_type": "text/plain",
+                    "output.value": f"{len(results)} retrieved passages",
                     "rag.citations_enabled": cite,
                 },
             )
+            set_retrieval_documents(retrieve_span, retrieval_documents)
             if retrieval_metrics is not None:
                 set_span_attributes(
                     retrieve_span,
@@ -2037,6 +2117,11 @@ class RagEngine:
 
             unique_packed_source_ids = sorted(set(packed_source_ids))
             unique_packed_chunk_ids = list(dict.fromkeys(packed_chunk_ids))
+            packed_retrieval_documents = _build_openinference_retrieval_documents(
+                packed_results_for_preview,
+                limit=8,
+                max_content_chars=220,
+            )
 
             set_span_attributes(
                 budget_span,
@@ -2065,9 +2150,12 @@ class RagEngine:
                     "rag.budget.packed_results_count": len(packed_results_for_preview),
                     "rag.budget.packed_source_ids": unique_packed_source_ids[:10],
                     "rag.budget.packed_chunk_ids": unique_packed_chunk_ids[:10],
+                    "output.mime_type": "text/plain",
+                    "output.value": f"Packed {len(packed_results_for_preview)} passages",
                     "rag.context_chars": len(context or ""),
                 },
             )
+            set_retrieval_documents(budget_span, packed_retrieval_documents)
 
             return _PackResult(
                 context=context,
