@@ -20,7 +20,7 @@ _GLINER_MODEL = "urchade/gliner_medium-v2.1"
 _NER_LABELS = ["city"]
 _NER_THRESHOLD = 0.4
 _BATCH_SIZE = 16
-_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z\-']{1,}")
+_TOKEN_RE = re.compile(r"[^\W\d_](?:[^\W\d_]|['-])+", flags=re.UNICODE)
 _NONSPACE_RE = re.compile(r"\S+")
 _GLINER_MAX_SEQUENCE_TOKENS = 384
 _GLINER_SAFE_SEQUENCE_TOKENS = 350
@@ -43,7 +43,7 @@ _PERSON_BLOCKLIST = {
     "abstract",
     "supplement",
 }
-_PERSON_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z\-'.]*$")
+_PERSON_TOKEN_RE = re.compile(r"^[^\W\d_][^\W\d_\-'.]*$", flags=re.UNICODE)
 
 _model = None
 _model_lock = threading.Lock()
@@ -111,9 +111,23 @@ def _extract_context_words(text: str, start: int, end: int, window_words: int) -
 
 
 def _coerce_bounds(text: str, candidate: str, raw_start: object, raw_end: object) -> tuple[int, int]:
-    ent_start = int(raw_start) if isinstance(raw_start, (int, float)) else text.find(candidate)
-    if ent_start < 0:
-        ent_start = 0
+    if isinstance(raw_start, (int, float)):
+        ent_start = int(raw_start)
+    else:
+        # Fallback: search all occurrences and warn if ambiguous instead of silently
+        # using the first occurrence, which can be wrong for repeated mentions.
+        positions = [m.start() for m in re.finditer(re.escape(candidate), text)]
+        if not positions:
+            ent_start = 0
+        elif len(positions) == 1:
+            ent_start = positions[0]
+        else:
+            log.warning(
+                "Ambiguous bounds for candidate %r (%d occurrences); using first occurrence.",
+                candidate,
+                len(positions),
+            )
+            ent_start = positions[0]
 
     ent_end = int(raw_end) if isinstance(raw_end, (int, float)) else ent_start + len(candidate)
     ent_end = max(ent_start, min(len(text), ent_end))
@@ -253,14 +267,26 @@ def _predict_entities_windowed(
     while start_idx < total_words:
         end_idx = min(start_idx + _GLINER_WINDOW_TOKENS, total_words)
         window_start_char = spans[start_idx][0]
+
+        # Use a binary search to find the largest end index within this window
+        # whose estimated token count does not exceed the safe maximum, instead
+        # of shrinking the window one token at a time.
+        lo = start_idx + 1
+        hi = end_idx
+        best_end_idx = lo
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            mid_end_char = spans[mid - 1][1]
+            window_text = text[window_start_char:mid_end_char]
+            if _estimate_token_count(window_text, model=model) <= _GLINER_SAFE_SEQUENCE_TOKENS:
+                best_end_idx = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+
+        end_idx = best_end_idx
         window_end_char = spans[end_idx - 1][1]
         window_text = text[window_start_char:window_end_char]
-
-        # Tighten window if token estimation still exceeds safe maximum.
-        while end_idx - start_idx > 1 and _estimate_token_count(window_text, model=model) > _GLINER_SAFE_SEQUENCE_TOKENS:
-            end_idx -= 1
-            window_end_char = spans[end_idx - 1][1]
-            window_text = text[window_start_char:window_end_char]
 
         entities = model.predict_entities(window_text, labels, threshold=threshold)
         for ent in entities:
@@ -309,43 +335,107 @@ def _predict_entity_candidates(
     if model is None:
         raise RuntimeError("GLiNER model unavailable")
 
-    results: list[list[_EntityCandidate]] = []
-    for start_idx in range(0, len(texts), _BATCH_SIZE):
-        batch = texts[start_idx : start_idx + _BATCH_SIZE]
-        for text in batch:
-            entities = _predict_entities_windowed(
+    n = len(texts)
+    if n == 0:
+        return []
+
+    # Pre-compute which texts are short enough for single-pass inference without
+    # windowing so we can use true batched GLiNER inference where safe.
+    word_counts = [len(text.split()) for text in texts]
+    token_estimates = [_estimate_token_count(text, model=model) for text in texts]
+    needs_window = [
+        token_estimates[i] > _GLINER_SAFE_SEQUENCE_TOKENS or word_counts[i] > _GLINER_SAFE_SEQUENCE_TOKENS
+        for i in range(n)
+    ]
+
+    results: list[list[_EntityCandidate]] = [[] for _ in range(n)]
+    indices = list(range(n))
+
+    for batch_start in range(0, n, _BATCH_SIZE):
+        batch_indices = indices[batch_start : batch_start + _BATCH_SIZE]
+
+        # Short texts: try true batched inference.
+        short_indices = [i for i in batch_indices if not needs_window[i] and texts[i].strip()]
+        if short_indices:
+            batch_texts = [texts[i] for i in short_indices]
+            try:
+                raw_batch_entities = model.predict_entities(batch_texts, labels, threshold=threshold)
+            except TypeError:
+                # Older GLiNER versions may not support list inputs; fall back to per-text.
+                for i in short_indices:
+                    results[i] = _predict_entities_windowed(
+                        model,
+                        texts[i],
+                        labels=labels,
+                        threshold=threshold,
+                    )
+            else:
+                # GLiNER should return a list of lists (one per input text). If we
+                # instead get a flat list or a non-list type, treat that as an
+                # unsupported batch mode and fall back to per-text windowed inference
+                # for this batch to avoid mis-aligning entities to texts.
+                if not isinstance(raw_batch_entities, list):
+                    batch_entities: list[list[dict]] | None = None
+                elif raw_batch_entities and all(
+                    not isinstance(item, list) for item in raw_batch_entities
+                ):
+                    batch_entities = None
+                else:
+                    batch_entities = [
+                        ents if isinstance(ents, list) else [] for ents in raw_batch_entities
+                    ]
+
+                if batch_entities is None:
+                    for i in short_indices:
+                        results[i] = _predict_entities_windowed(
+                            model,
+                            texts[i],
+                            labels=labels,
+                            threshold=threshold,
+                        )
+                else:
+                    for idx_in_batch, i in enumerate(short_indices):
+                        entities_for_text = (
+                            batch_entities[idx_in_batch] if idx_in_batch < len(batch_entities) else []
+                        )
+                        rows: list[_EntityCandidate] = []
+                        for ent in entities_for_text or []:
+                            candidate = str(ent.get("text", "")).strip()
+                            if not candidate:
+                                continue
+                            ent_start, ent_end = _coerce_bounds(
+                                texts[i],
+                                candidate,
+                                ent.get("start"),
+                                ent.get("end"),
+                            )
+                            score_raw = ent.get("score", 0.0)
+                            try:
+                                score = float(score_raw)
+                            except (TypeError, ValueError):
+                                score = 0.0
+                            rows.append(
+                                {
+                                    "text": candidate,
+                                    "entity_type": str(ent.get("label", "")).upper().strip() or "UNKNOWN",
+                                    "score": score,
+                                    "start": ent_start,
+                                    "end": ent_end,
+                                }
+                            )
+                        results[i] = rows
+
+        # Long texts: fall back to windowed inference, which already dedupes overlapping
+        # mentions but preserves distinct mentions at different offsets.
+        long_indices = [i for i in batch_indices if needs_window[i] and texts[i].strip()]
+        for i in long_indices:
+            results[i] = _predict_entities_windowed(
                 model,
-                text,
+                texts[i],
                 labels=labels,
                 threshold=threshold,
             )
-            # Preserve first-seen order while keeping the highest score per (label, text).
-            ordered_keys: list[tuple[str, str]] = []
-            by_key: dict[tuple[str, str], _EntityCandidate] = {}
-            for ent in entities:
-                candidate = str(ent.get("text", "")).strip()
-                if not candidate:
-                    continue
-                label = str(ent.get("entity_type", "")).upper().strip() or "UNKNOWN"
 
-                row: _EntityCandidate = {
-                    "text": candidate,
-                    "entity_type": label,
-                    "score": float(ent.get("score", 0.0)),
-                    "start": int(ent.get("start", 0)),
-                    "end": int(ent.get("end", 0)),
-                }
-
-                key = (label, candidate.lower())
-                if key not in by_key:
-                    ordered_keys.append(key)
-                    by_key[key] = row
-                    continue
-
-                if row["score"] > by_key[key]["score"]:
-                    by_key[key] = row
-
-            results.append([by_key[key] for key in ordered_keys])
     return results
 
 
@@ -381,7 +471,16 @@ def _to_place_candidates(
     return candidates
 
 
-def _looks_like_person_name(value: str) -> bool:
+def _is_predominantly_lowercase(text: str, threshold: float = 0.1) -> bool:
+    """Return True if fewer than `threshold` fraction of alphabetic characters are uppercase."""
+    alpha_chars = [ch for ch in text if ch.isalpha()]
+    if not alpha_chars:
+        return False
+    upper_count = sum(1 for ch in alpha_chars if ch.isupper())
+    return (upper_count / len(alpha_chars)) < threshold
+
+
+def _looks_like_person_name(value: str, *, source_text: str | None = None) -> bool:
     text = value.strip()
     if len(text) < 3:
         return False
@@ -389,8 +488,14 @@ def _looks_like_person_name(value: str) -> bool:
         return False
     if text.lower() in _PERSON_BLOCKLIST:
         return False
-    if text == text.lower():
-        return False
+
+    # If the surrounding source text appears predominantly lowercase (e.g., OCR
+    # or chat logs), relax the casing requirement; otherwise, continue to reject
+    # all-lowercase candidate strings to reduce false positives like section
+    # headings or generic nouns.
+    if source_text is None or not _is_predominantly_lowercase(source_text):
+        if text == text.lower():
+            return False
 
     tokens = [token for token in re.split(r"\s+", text) if token]
     if not tokens:
@@ -400,6 +505,15 @@ def _looks_like_person_name(value: str) -> bool:
 
     for token in tokens:
         if token.lower() in _PERSON_BLOCKLIST:
+            return False
+        # Require that person-name tokens start with a letter and contain at
+        # least one alphabetic character overall, but allow Unicode letters and
+        # common punctuation such as hyphens and apostrophes.
+        if not any(ch.isalpha() for ch in token):
+            return False
+        if not token[0].isalpha():
+            return False
+        if any(ch.isdigit() for ch in token):
             return False
         if not _PERSON_TOKEN_RE.match(token):
             return False
@@ -420,7 +534,7 @@ def _to_person_candidates(
             continue
         if row["score"] < min_score:
             continue
-        if not _looks_like_person_name(row["text"]):
+        if not _looks_like_person_name(row["text"], source_text=text):
             continue
         candidates.append(
             {
@@ -462,8 +576,9 @@ def extract_place_candidates_ner(
             )
             for text, rows in zip(texts, predicted)
         ]
-    except Exception as exc:
-        log.warning("GLiNER inference failed, falling back to regex: %s", exc)
+    except RuntimeError as exc:
+        # Expected when the GLiNER model is unavailable; fall back to regex.
+        log.warning("GLiNER inference unavailable, falling back to regex: %s", exc)
 
     from .geocoder import extract_places_from_query
 
@@ -511,8 +626,10 @@ def extract_person_candidates_ner(
             )
             for text, rows in zip(texts, predicted)
         ]
-    except Exception as exc:
-        log.warning("GLiNER person inference failed; returning no person candidates: %s", exc)
+    except RuntimeError as exc:
+        # Expected when the GLiNER model is unavailable; we currently do not
+        # have a robust regex-based person extractor to fall back to.
+        log.warning("GLiNER person inference unavailable; returning no person candidates: %s", exc)
         return [[] for _ in texts]
 
 
