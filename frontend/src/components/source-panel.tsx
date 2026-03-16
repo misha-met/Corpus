@@ -542,6 +542,7 @@ export function SourcePanel({
         <IngestModal
           onClose={() => setShowIngestModal(false)}
           onStartUpload={handleStartUpload}
+          existingSourceIds={displaySources.map((s) => s.source_id)}
         />
       )}
     </div>

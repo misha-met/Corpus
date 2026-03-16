@@ -1332,6 +1332,20 @@ def _sanitize_source_id(name: str) -> str:
     return safe[:120] or "uploaded_doc"
 
 
+def _source_id_exists(storage: object, source_id: str) -> bool:
+    """Return True if a source_id already exists in storage."""
+    sid = source_id.strip()
+    if not sid:
+        return False
+
+    source_ids = storage.list_source_ids()  # type: ignore[attr-defined]
+    if sid in source_ids:
+        return True
+
+    detail = storage.get_source_detail(sid)  # type: ignore[attr-defined]
+    return detail is not None
+
+
 @app.post("/api/sources/upload", response_model=IngestResponse)
 async def upload_source(
     file: UploadFile = File(...),
@@ -1381,6 +1395,19 @@ async def upload_source(
     if not sid:
         sid = _sanitize_source_id(filename)
 
+    # --- Reject duplicate source IDs (prevent silent replacement) ---
+    engine = await asyncio.to_thread(_get_engine)
+    storage = engine.storage  # type: ignore[union-attr]
+    exists = await asyncio.to_thread(_source_id_exists, storage, sid)
+    if exists:
+        return JSONResponse(
+            status_code=409,
+            content=http_error_body(
+                "SOURCE_ALREADY_EXISTS",
+                f"A source with ID '{sid}' already exists. Choose a different Source ID or delete the existing source first.",
+            ),
+        )
+
     # --- Save uploaded file to data/uploads/ ---
     _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     dest = _UPLOAD_DIR / f"{sid}{ext}"
@@ -1388,7 +1415,6 @@ async def upload_source(
     logger.info("Saved upload to %s (%d bytes)", dest, len(contents))
 
     try:
-        engine = await asyncio.to_thread(_get_engine)
 
         ingest_kwargs = {
             "source_id": sid,

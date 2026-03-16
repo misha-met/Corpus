@@ -20,6 +20,8 @@ interface IngestModalProps {
   onClose: () => void;
   /** Called when the user confirms upload. Modal closes immediately after. */
   onStartUpload: (reqs: UploadRequest[]) => void;
+  /** Existing/pending source IDs used to prevent accidental replacement. */
+  existingSourceIds?: string[];
 }
 
 const ALLOWED_EXTENSIONS = [".pdf", ".md", ".markdown"];
@@ -34,7 +36,11 @@ function sanitizeSourceId(filename: string): string {
     .slice(0, 120) || "uploaded_doc";
 }
 
-export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
+export function IngestModal({
+  onClose,
+  onStartUpload,
+  existingSourceIds = [],
+}: IngestModalProps) {
   const [files, setFiles] = useState<File[]>([]);
   const [sourceIds, setSourceIds] = useState<string[]>([]);
   const [citationRefs, setCitationRefs] = useState<string[]>([]);
@@ -126,6 +132,15 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
       return;
     }
 
+    const existing = new Set(existingSourceIds);
+    const duplicate = normalizedSourceIds.find((sid) => existing.has(sid));
+    if (duplicate) {
+      setValidationError(
+        `A source with ID "${duplicate}" already exists. Choose a different Source ID.`
+      );
+      return;
+    }
+
     const reqs: UploadRequest[] = files.map((file, idx) => ({
       file,
       sourceId: normalizedSourceIds[idx],
@@ -137,7 +152,17 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
 
     onStartUpload(reqs);
     onClose();
-  }, [files, sourceIds, citationRefs, pageOffset, summarize, geotag, onStartUpload, onClose]);
+  }, [
+    files,
+    sourceIds,
+    citationRefs,
+    pageOffset,
+    summarize,
+    geotag,
+    existingSourceIds,
+    onStartUpload,
+    onClose,
+  ]);
 
   return (
     <div
@@ -405,29 +430,31 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
           )}
 
           {/* Summarize checkbox */}
-          <label className="flex items-center gap-2.5 cursor-pointer">
+          <div className="flex items-center gap-2.5">
             <Checkbox
+              id="ingest-summarize"
               checked={summarize}
               onChange={setSummarize}
             />
-            <span className="text-sm text-muted-foreground">
+            <label htmlFor="ingest-summarize" className="text-sm text-muted-foreground cursor-pointer">
               Generate summary during ingest
-            </span>
-          </label>
+            </label>
+          </div>
 
           {/* Geotag checkbox */}
-          <label className="flex items-center gap-2.5 cursor-pointer">
+          <div className="flex items-start gap-2.5">
             <Checkbox
+              id="ingest-geotag"
               checked={geotag}
               onChange={setGeotag}
             />
-            <div className="text-sm text-muted-foreground">
+            <label htmlFor="ingest-geotag" className="text-sm text-muted-foreground cursor-pointer">
               <p>Index location mentions (map)</p>
               <p className="text-[11px] text-(--muted-foreground)/70">
                 Runs place NER + geocoding during ingest to populate the Map tab.
               </p>
-            </div>
-          </label>
+            </label>
+          </div>
 
           {/* Validation error */}
           {validationError && (

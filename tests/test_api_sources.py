@@ -223,6 +223,62 @@ class TestIngestEndpoint:
 
 
 # ---------------------------------------------------------------------------
+# POST /api/sources/upload
+# ---------------------------------------------------------------------------
+
+
+class TestUploadEndpoint:
+    @pytest.mark.anyio
+    async def test_upload_rejects_duplicate_source_id(self, mock_engine, sample_file) -> None:
+        mock_engine.ingest(str(sample_file), source_id="dup_doc")
+
+        with patch("src.api._get_engine", return_value=mock_engine):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                with sample_file.open("rb") as handle:
+                    resp = await client.post(
+                        "/api/sources/upload",
+                        files={"file": ("sample.md", handle, "text/markdown")},
+                        data={
+                            "source_id": "dup_doc",
+                            "summarize": "true",
+                            "geotag": "false",
+                            "page_offset": "1",
+                        },
+                    )
+
+        assert resp.status_code == 409
+        data = resp.json()
+        assert data["error"]["code"] == "SOURCE_ALREADY_EXISTS"
+
+    @pytest.mark.anyio
+    async def test_upload_rejects_duplicate_when_source_id_is_auto_derived(self, mock_engine, sample_file) -> None:
+        # source_id auto-derives from filename stem: sample.md -> sample
+        mock_engine.ingest(str(sample_file), source_id="sample")
+
+        with patch("src.api._get_engine", return_value=mock_engine):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                with sample_file.open("rb") as handle:
+                    resp = await client.post(
+                        "/api/sources/upload",
+                        files={"file": ("sample.md", handle, "text/markdown")},
+                        data={
+                            "source_id": "",
+                            "summarize": "true",
+                            "geotag": "false",
+                            "page_offset": "1",
+                        },
+                    )
+
+        assert resp.status_code == 409
+        data = resp.json()
+        assert data["error"]["code"] == "SOURCE_ALREADY_EXISTS"
+
+
+# ---------------------------------------------------------------------------
 # DELETE /api/sources/{source_id}
 # ---------------------------------------------------------------------------
 
