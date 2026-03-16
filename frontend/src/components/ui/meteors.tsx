@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useMemo } from "react"
 import { cn } from "@/lib/utils"
 
 export interface MeteorsProps {
@@ -22,6 +22,11 @@ interface MeteorData {
   duration: number
 }
 
+function seededUnit(seed: number): number {
+  const x = Math.sin(seed * 12.9898) * 43758.5453
+  return x - Math.floor(x)
+}
+
 export function Meteors({
   className,
   count = 12,
@@ -29,18 +34,16 @@ export function Meteors({
   color = "#ffffff",
   tailColor = "#ffffff",
 }: MeteorsProps) {
-  const [meteors, setMeteors] = useState<MeteorData[]>([])
-
-  useEffect(() => {
-    setMeteors(
+  const meteors = useMemo<MeteorData[]>(
+    () =>
       Array.from({ length: count }, (_, i) => ({
         id: i,
         left: i * (100 / count),
-        delay: Math.random() * 10,
-        duration: 6 + Math.random() * 10,
+        delay: seededUnit(i + 1) * 10,
+        duration: 6 + seededUnit((i + 1) * 7.13) * 10,
       })),
-    )
-  }, [count])
+    [count],
+  )
 
   return (
     <div className={cn("pointer-events-none absolute inset-0", className)}>
@@ -86,7 +89,7 @@ export function Meteors({
               left: "100%",
               width: "80px",
               height: "1px",
-              background: `linear-gradient(to right, rgba(255,255,255,0.8), transparent)`,
+              background: `linear-gradient(to right, ${tailColor}, transparent)`,
             }}
           />
         </span>

@@ -336,7 +336,7 @@ export function FreeformChatPanel({
 
   // ── Speech-to-text ─────────────────────────────────────────────────────────
   const applyTranscript = useCallback(
-    (chunk: string, _isFinal: boolean) => {
+    (chunk: string) => {
       if (!chunk) return;
       const el = textareaRef.current;
       setInputValue((prev) => {

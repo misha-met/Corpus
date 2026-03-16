@@ -69,8 +69,7 @@ PickerTrigger.displayName = "PickerTrigger"
 
 // ─── Dropdown content panel ───────────────────────────────────────────────────
 
-export interface PickerContentProps
-  extends React.ComponentPropsWithoutRef<typeof PopoverPrimitive.Content> {}
+export type PickerContentProps = React.ComponentPropsWithoutRef<typeof PopoverPrimitive.Content>
 
 export const PickerContent = React.forwardRef<
   React.ElementRef<typeof PopoverPrimitive.Content>,

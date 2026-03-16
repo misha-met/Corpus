@@ -18,7 +18,6 @@ import { useAppState, useAppDispatch } from "@/context/app-context";
  */
 export function CitationPanelReader() {
   const { activeCitation } = useAppState();
-  const dispatch = useAppDispatch();
 
   if (activeCitation === null) return null;
 
@@ -44,10 +43,6 @@ function CitationPanelReaderInner() {
 
   useEffect(() => {
     let cancelled = false;
-    setIsLoading(true);
-    setError(null);
-    setContent(null);
-    setChunkDetail(null);
 
     const promises: Promise<void>[] = [];
 
