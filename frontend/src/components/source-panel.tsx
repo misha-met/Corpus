@@ -273,12 +273,8 @@ export function SourcePanel({
     sources.length > 0 &&
     sources.every((s) => selectedSourceIds.includes(s.source_id));
 
-  function handleSelectAll() {
-    if (allSelected) {
-      onSelectedSourceIdsChange([]);
-    } else {
-      onSelectedSourceIdsChange(sources.map((s) => s.source_id));
-    }
+  function handleSelectAll(checked: boolean) {
+    onSelectedSourceIdsChange(checked ? sources.map((s) => s.source_id) : []);
   }
 
   function handleToggleSource(sourceId: string) {
@@ -411,15 +407,19 @@ export function SourcePanel({
           {/* Select all */}
           {displaySources.length > 0 && (
             <div className="px-4 py-2 border-b" style={{ borderColor: "#1e1e1e" }}>
-              <label className="flex items-center gap-2.5 cursor-pointer group" onClick={handleSelectAll}>
+              <div className="flex items-center gap-2.5 group">
                 <Checkbox
+                  id="source-panel-select-all"
                   checked={allSelected}
                   onChange={handleSelectAll}
                 />
-                <span className="text-xs text-muted-foreground group-hover:text-foreground transition-colors">
+                <label
+                  htmlFor="source-panel-select-all"
+                  className="cursor-pointer text-xs text-muted-foreground group-hover:text-foreground transition-colors"
+                >
                   Select all sources
-                </span>
-              </label>
+                </label>
+              </div>
             </div>
           )}
 
