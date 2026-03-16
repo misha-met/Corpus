@@ -569,10 +569,19 @@ def _coerce_embeddings(raw_embeddings: object) -> list[list[float]]:
     raise TypeError("Unsupported embeddings type.")
 
 
+def _context_snippet(text: str, start: int, end: int, radius: int = 120) -> str:
+    lo = max(0, int(start) - radius)
+    hi = min(len(text), int(end) + radius)
+    snippet = text[lo:hi].strip()
+    return re.sub(r"\s+", " ", snippet)
+
+
 def _geotag_chunks(
     source_id: str,
     child_chunks: list[ChildChunk],
     storage: StorageEngine,
+    *,
+    ner_lists: Optional[list[list[dict[str, Any]]]] = None,
 ) -> None:
     """Extract place mentions with NER, geocode, and store grouped mention rows."""
     try:
@@ -582,6 +591,7 @@ def _geotag_chunks(
         from .config import (
             GEOTAG_FUZZY_THRESHOLD,
             GEOTAG_MIN_CONFIDENCE,
+            GEOTAG_NER_THRESHOLD,
             GEOTAG_NER_CONTEXT_WINDOW,
         )
         from .geocoder import get_geocoder
@@ -601,11 +611,13 @@ def _geotag_chunks(
         if isinstance(version_info, dict):
             geocoder_version = str(version_info.get("checksum") or version_info.get("build_timestamp") or "unknown")
 
-        texts = [chunk.text for chunk in child_chunks]
-        ner_lists = extract_place_candidates_ner(
-            texts,
-            context_window_words=GEOTAG_NER_CONTEXT_WINDOW,
-        )
+        if ner_lists is None:
+            texts = [chunk.text for chunk in child_chunks]
+            ner_lists = extract_place_candidates_ner(
+                texts,
+                threshold=GEOTAG_NER_THRESHOLD,
+                context_window_words=GEOTAG_NER_CONTEXT_WINDOW,
+            )
         geocoded_at = time.time()
 
         mentions: list[dict] = []
@@ -677,6 +689,113 @@ def _geotag_chunks(
         logger.warning("Geotagging failed for %s (ingest unaffected): %s", source_id, exc)
 
 
+def _peopletag_chunks(
+    source_id: str,
+    child_chunks: list[ChildChunk],
+    storage: StorageEngine,
+    *,
+    ner_lists: Optional[list[list[dict[str, Any]]]] = None,
+) -> None:
+    """Extract person mentions, resolve canonical names, and persist mention rows."""
+    try:
+        import uuid
+
+        from .config import (
+            PEOPLETAG_MIN_CONFIDENCE,
+            PEOPLETAG_NER_CONTEXT_WINDOW,
+            PEOPLETAG_NER_THRESHOLD,
+        )
+        from .ner import extract_person_candidates_ner
+        from .person_resolver import get_person_resolver
+
+        # Re-ingest guard: clear prior mentions for this source before reprocessing.
+        storage.delete_person_mentions_by_source(source_id)
+
+        resolver = get_person_resolver()
+        resolver.warm_from_rows(storage.list_person_mentions_for_registry())
+
+        if ner_lists is None:
+            texts = [chunk.text for chunk in child_chunks]
+            ner_lists = extract_person_candidates_ner(
+                texts,
+                threshold=PEOPLETAG_NER_THRESHOLD,
+                context_window_words=PEOPLETAG_NER_CONTEXT_WINDOW,
+            )
+
+        mentions: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, int, int]] = set()
+
+        for chunk, candidates in zip(child_chunks, ner_lists):
+            for candidate in candidates:
+                raw_name = str(candidate.get("text", "")).strip()
+                if not raw_name:
+                    continue
+
+                try:
+                    ner_score = float(candidate.get("score", 0.0))
+                except (TypeError, ValueError):
+                    ner_score = 0.0
+                if ner_score < PEOPLETAG_MIN_CONFIDENCE:
+                    continue
+
+                try:
+                    start = int(candidate.get("start", 0))
+                except (TypeError, ValueError):
+                    start = 0
+                try:
+                    end = int(candidate.get("end", start + len(raw_name)))
+                except (TypeError, ValueError):
+                    end = start + len(raw_name)
+                start = max(0, start)
+                end = max(start, min(len(chunk.text), end))
+
+                key = (chunk.id, raw_name.lower(), start, end)
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                context_words = [
+                    word.strip()
+                    for word in candidate.get("context_words", [])
+                    if isinstance(word, str) and word.strip()
+                ]
+                snippet = _context_snippet(chunk.text, start, end)
+
+                resolved = resolver.resolve(
+                    raw_name=raw_name,
+                    source_id=source_id,
+                    ner_score=ner_score,
+                    context_words=context_words,
+                    context_snippet=snippet,
+                )
+                if not resolved:
+                    continue
+
+                confidence = float(resolved.get("confidence", 0.0))
+                if confidence < PEOPLETAG_MIN_CONFIDENCE:
+                    continue
+
+                mentions.append(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "source_id": source_id,
+                        "chunk_id": chunk.id,
+                        "raw_name": str(resolved.get("raw_name", raw_name)),
+                        "canonical_name": str(resolved.get("canonical_name", raw_name)),
+                        "confidence": confidence,
+                        "method": str(resolved.get("method", "new")),
+                        "role_hint": resolved.get("role_hint"),
+                        "context_snippet": str(resolved.get("context_snippet", snippet)),
+                    }
+                )
+
+        if mentions:
+            storage.upsert_person_mentions(mentions)
+            logger.info("Peopletagged %d mentions for source %s.", len(mentions), source_id)
+    except Exception as exc:
+        logger.warning("Peopletagging failed for %s (ingest unaffected): %s", source_id, exc)
+
+
 def ingest_file_to_storage(
     file_path: str | Path,
     *,
@@ -687,6 +806,7 @@ def ingest_file_to_storage(
     summarize: bool = False,
     summary_generator: Optional[MlxGenerator] = None,
     geotag: bool = False,
+    peopletag: bool = False,
     page_offset: int = 1,
     tracer: Optional[Any] = None,
 ) -> tuple[int, int]:
@@ -704,6 +824,7 @@ def ingest_file_to_storage(
             "rag.ingest.page_offset": page_offset,
             "rag.ingest.summarize": summarize,
             "rag.ingest.geotag": geotag,
+            "rag.ingest.peopletag": peopletag,
         },
     ) as ingest_span:
         try:
@@ -780,8 +901,40 @@ def ingest_file_to_storage(
                         logger.exception("Rollback delete_source('%s') also failed", source_id)
                     raise
 
-            if geotag:
-                _geotag_chunks(source_id, children, storage)
+            if geotag and peopletag:
+                from .config import (
+                    GEOTAG_NER_CONTEXT_WINDOW,
+                    GEOTAG_NER_THRESHOLD,
+                    PEOPLETAG_NER_CONTEXT_WINDOW,
+                    PEOPLETAG_NER_THRESHOLD,
+                )
+                from .ner import extract_place_and_person_candidates_ner
+
+                texts = [child.text for child in children]
+                place_candidates, person_candidates = extract_place_and_person_candidates_ner(
+                    texts,
+                    geo_threshold=GEOTAG_NER_THRESHOLD,
+                    people_threshold=PEOPLETAG_NER_THRESHOLD,
+                    geo_context_window_words=GEOTAG_NER_CONTEXT_WINDOW,
+                    people_context_window_words=PEOPLETAG_NER_CONTEXT_WINDOW,
+                )
+                _geotag_chunks(
+                    source_id,
+                    children,
+                    storage,
+                    ner_lists=place_candidates,
+                )
+                _peopletag_chunks(
+                    source_id,
+                    children,
+                    storage,
+                    ner_lists=person_candidates,
+                )
+            else:
+                if geotag:
+                    _geotag_chunks(source_id, children, storage)
+                if peopletag:
+                    _peopletag_chunks(source_id, children, storage)
 
             if summarize:
                 generator = summary_generator

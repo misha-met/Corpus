@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { NumberTicker } from "@/components/ui/number-ticker";
 import { TypewriterText } from "@/components/ui/typewriter-text";
-import { useAppState } from "@/context/app-context";
+import { useAppDispatch, useAppState } from "@/context/app-context";
 import { useIndexedStats } from "@/hooks/useIndexedStats";
 import { useSpeechToText } from "@/hooks/useSpeechToText";
 import { useSystemRam } from "@/hooks/useSystemRam";
@@ -142,23 +142,27 @@ const ThreadWelcome: FC = () => {
 };
 
 const ThreadSuggestions: FC = () => {
+  const { chatMode, selectedSourceIds } = useAppState();
+  const canSendSuggestion = chatMode !== "rag" || selectedSourceIds.length > 0;
+
   return (
     <div className="aui-thread-welcome-suggestions grid w-full @md:grid-cols-2 gap-2 pb-4">
       <ThreadPrimitive.Suggestions
         components={{
-          Suggestion: ThreadSuggestionItem,
+          Suggestion: () => <ThreadSuggestionItem canSend={canSendSuggestion} />,
         }}
       />
     </div>
   );
 };
 
-const ThreadSuggestionItem: FC = () => {
+const ThreadSuggestionItem: FC<{ canSend?: boolean }> = ({ canSend = true }) => {
   return (
     <div className="aui-thread-welcome-suggestion-display @md:nth-[n+3]:block nth-[n+3]:hidden">
-      <SuggestionPrimitive.Trigger send asChild>
+      <SuggestionPrimitive.Trigger send={canSend} asChild>
         <Button
           variant="ghost"
+          disabled={!canSend}
           className="aui-thread-welcome-suggestion h-auto w-full @md:flex-col flex-wrap items-start justify-start gap-1 rounded-2xl border border-[#2a2a2a] hover:border-[#3a3a3a] bg-[#1a1a1a] hover:bg-[#222222] px-4 py-3 text-left text-sm transition-colors"
         >
           <span className="aui-thread-welcome-suggestion-text-1 font-medium">
@@ -296,6 +300,8 @@ const ComposerSpeechButton: FC<{ disabled?: boolean }> = ({ disabled = false }) 
 const Composer: FC = () => {
   const aui = useAui();
   const api = useAssistantApi();
+  const { chatMode, selectedSourceIds } = useAppState();
+  const dispatch = useAppDispatch();
   const isEmpty = useAuiState((s) => s.composer.isEmpty);
   const isRunning = useAuiState((s) => s.thread.isRunning);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -311,6 +317,16 @@ const Composer: FC = () => {
       ),
     [systemRamGb],
   );
+
+  const canSendWithoutSources = chatMode !== "rag" || selectedSourceIds.length > 0;
+
+  const showSourceSelectionError = useCallback(() => {
+    dispatch({
+      type: "SET_ERROR",
+      message: "Select at least one source before sending a RAG query.",
+      isLockBusy: false,
+    });
+  }, [dispatch]);
 
   // Register enableThinking in model context so the backend receives it
   useEffect(() => {
@@ -355,6 +371,10 @@ const Composer: FC = () => {
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
+              if (!canSendWithoutSources) {
+                showSourceSelectionError();
+                return;
+              }
               if (!isRunning) {
                 aui.composer().send();
               }
@@ -417,6 +437,12 @@ const Composer: FC = () => {
 
           {/* Send — visible when text present & not running */}
           <ComposerPrimitive.Send
+            disabled={!canSendWithoutSources}
+            onClick={(event) => {
+              if (canSendWithoutSources) return;
+              event.preventDefault();
+              showSourceSelectionError();
+            }}
             className="absolute inset-0 flex items-center justify-center rounded-full transition-all duration-150 group-data-[empty=true]/composer:scale-0 group-data-[empty=true]/composer:opacity-0 group-data-[empty=true]/composer:pointer-events-none group-data-[running=true]/composer:scale-0 group-data-[running=true]/composer:opacity-0 group-data-[running=true]/composer:pointer-events-none"
             aria-label="Send message"
           >

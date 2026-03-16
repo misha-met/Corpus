@@ -8,6 +8,7 @@ export interface UploadRequest {
   sourceId: string;
   summarize: boolean;
   geotag: boolean;
+  peopletag: boolean;
   /** Optional citation reference string for Harvard/footnote copy feature.
    *  e.g. "Smith, J. et al. (2024) 'Climate Change Review'"
    *  Stored in localStorage keyed by source_id. */
@@ -49,6 +50,7 @@ export function IngestModal({
   const [showPageOffset, setShowPageOffset] = useState(false);
   const [summarize, setSummarize] = useState(true);
   const [geotag, setGeotag] = useState(false);
+  const [peopletag, setPeopletag] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -146,6 +148,7 @@ export function IngestModal({
       sourceId: normalizedSourceIds[idx],
       summarize,
       geotag,
+      peopletag,
       citationRef: citationRefs[idx]?.trim() || undefined,
       pageOffset: pageOffset > 1 ? pageOffset : undefined,
     }));
@@ -159,6 +162,7 @@ export function IngestModal({
     pageOffset,
     summarize,
     geotag,
+    peopletag,
     existingSourceIds,
     onStartUpload,
     onClose,
@@ -452,6 +456,21 @@ export function IngestModal({
               <p>Index locations</p>
               <p className="text-[11px] text-(--muted-foreground)/70">
                 Runs place NER + geocoding
+              </p>
+            </label>
+          </div>
+
+          {/* Peopletag checkbox */}
+          <div className="flex items-start gap-2.5">
+            <Checkbox
+              id="ingest-peopletag"
+              checked={peopletag}
+              onChange={setPeopletag}
+            />
+            <label htmlFor="ingest-peopletag" className="text-sm text-muted-foreground cursor-pointer">
+              <p>Index people names</p>
+              <p className="text-[11px] text-(--muted-foreground)/70">
+                Runs person NER + canonical dictionary matching
               </p>
             </label>
           </div>

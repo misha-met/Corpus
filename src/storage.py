@@ -45,6 +45,7 @@ class StorageEngine:
     _PARENTS_TABLE = "parent_chunks"
     _SUMMARIES_TABLE = "source_summaries"
     _GEO_MENTIONS_TABLE = "geo_mentions"
+    _PERSON_MENTIONS_TABLE = "person_mentions"
     _MAX_IN_CLAUSE_VALUES = 256
     _GEO_MENTIONS_SCHEMA = pa.schema([
         pa.field("id", pa.string()),
@@ -66,6 +67,17 @@ class StorageEngine:
         pa.field("ner_score", pa.float64()),
         pa.field("geocoder_version", pa.string()),
         pa.field("geocoded_at", pa.float64()),
+    ])
+    _PERSON_MENTIONS_SCHEMA = pa.schema([
+        pa.field("id", pa.string()),
+        pa.field("source_id", pa.string()),
+        pa.field("chunk_id", pa.string()),
+        pa.field("raw_name", pa.string()),
+        pa.field("canonical_name", pa.string()),
+        pa.field("confidence", pa.float32()),
+        pa.field("method", pa.string()),
+        pa.field("role_hint", pa.string()),
+        pa.field("context_snippet", pa.string()),
     ])
 
     def __init__(self, config: StorageConfig) -> None:
@@ -116,6 +128,15 @@ class StorageEngine:
             self._geo_mentions = self._db.open_table(self._GEO_MENTIONS_TABLE)
             self._migrate_geo_mentions_schema()
             self._ensure_geo_mentions_indexes()
+        except ValueError:
+            pass  # Table does not exist yet
+
+        # --- person mentions (no vectors) ---
+        self._person_mentions: Optional[lancedb.table.Table] = None
+        self._person_mentions_indexes_ready = False
+        try:
+            self._person_mentions = self._db.open_table(self._PERSON_MENTIONS_TABLE)
+            self._ensure_person_mentions_indexes()
         except ValueError:
             pass  # Table does not exist yet
 
@@ -227,6 +248,50 @@ class StorageEngine:
                 logger.debug("Skipping geo_mentions index for %s: %s", column, exc)
             self._geo_mentions_indexes_ready = True
 
+    def _ensure_person_mentions_indexes(self) -> None:
+        """Best-effort scalar indexes for person mention filters."""
+        if self._person_mentions is None or self._person_mentions_indexes_ready:
+            return
+        for column in ("source_id", "canonical_name", "confidence"):
+            try:
+                self._person_mentions.create_scalar_index(column)
+            except TypeError:
+                try:
+                    self._person_mentions.create_scalar_index(column, replace=False)
+                except Exception as exc:
+                    logger.debug("Skipping person_mentions index for %s: %s", column, exc)
+            except Exception as exc:
+                logger.debug("Skipping person_mentions index for %s: %s", column, exc)
+        self._person_mentions_indexes_ready = True
+
+    def _ensure_person_mentions_table(self) -> Optional[lancedb.table.Table]:
+        if self._person_mentions is not None:
+            self._ensure_person_mentions_indexes()
+            return self._person_mentions
+        try:
+            self._person_mentions = self._db.create_table(
+                self._PERSON_MENTIONS_TABLE,
+                schema=self._PERSON_MENTIONS_SCHEMA,
+                exist_ok=True,
+            )
+            self._person_mentions_indexes_ready = False
+            self._ensure_person_mentions_indexes()
+            return self._person_mentions
+        except Exception as exc:
+            logger.error("Failed to create/open '%s': %s", self._PERSON_MENTIONS_TABLE, exc)
+            return None
+
+    def _recreate_person_mentions_table(self) -> Optional[lancedb.table.Table]:
+        """Drop and recreate person_mentions for explicit schema reset workflows."""
+        try:
+            self._db.drop_table(self._PERSON_MENTIONS_TABLE)
+        except Exception as exc:
+            logger.debug("Could not drop '%s' before recreate: %s", self._PERSON_MENTIONS_TABLE, exc)
+
+        self._person_mentions = None
+        self._person_mentions_indexes_ready = False
+        return self._ensure_person_mentions_table()
+
     @staticmethod
     def _escape_sql_literal(value: str) -> str:
         return value.replace("'", "''")
@@ -320,6 +385,7 @@ class StorageEngine:
             self._PARENTS_TABLE,
             self._SUMMARIES_TABLE,
             self._GEO_MENTIONS_TABLE,
+            self._PERSON_MENTIONS_TABLE,
         ):
             try:
                 self._db.drop_table(table_name)
@@ -331,6 +397,9 @@ class StorageEngine:
         self._parents = None
         self._summaries = None
         self._geo_mentions = None
+        self._person_mentions = None
+        self._geo_mentions_indexes_ready = False
+        self._person_mentions_indexes_ready = False
         self._fts_dirty = False
         self._pending_fts_rows = 0
 
@@ -1075,8 +1144,388 @@ class StorageEngine:
                 return
         table.delete(self._where_eq("id", mention_id))
 
+    def upsert_person_mentions(self, mentions: list[dict]) -> None:
+        """Batch write person mentions. Creates table if not present."""
+        if not mentions:
+            return
+        table = self._ensure_person_mentions_table()
+        if table is None:
+            return
+
+        records: list[dict[str, Any]] = []
+        for row in mentions:
+            mention_id = str(row.get("id", "")).strip()
+            source_id = str(row.get("source_id", "")).strip()
+            chunk_id = str(row.get("chunk_id", "")).strip()
+            raw_name = str(row.get("raw_name", "")).strip()
+            canonical_name = str(row.get("canonical_name", "")).strip()
+            method = str(row.get("method", "")).strip()
+
+            if not mention_id or not source_id or not chunk_id or not raw_name or not canonical_name:
+                continue
+            try:
+                confidence = float(row.get("confidence"))
+            except (TypeError, ValueError):
+                continue
+
+            role_hint_raw = row.get("role_hint")
+            role_hint = str(role_hint_raw).strip() if role_hint_raw is not None else ""
+            context_snippet_raw = row.get("context_snippet")
+            context_snippet = str(context_snippet_raw).strip() if context_snippet_raw is not None else ""
+
+            records.append(
+                {
+                    "id": mention_id,
+                    "source_id": source_id,
+                    "chunk_id": chunk_id,
+                    "raw_name": raw_name,
+                    "canonical_name": canonical_name,
+                    "confidence": confidence,
+                    "method": method,
+                    "role_hint": role_hint or None,
+                    "context_snippet": context_snippet,
+                }
+            )
+
+        if not records:
+            return
+
+        unique_ids = list(dict.fromkeys(record["id"] for record in records))
+        try:
+            for id_batch in self._chunk(unique_ids, self._MAX_IN_CLAUSE_VALUES):
+                table.delete(self._where_in("id", id_batch))
+            table.add(records)
+        except Exception as exc:
+            logger.error("Failed to upsert person mentions: %s", exc)
+            raise
+
+    def get_person_mentions(
+        self,
+        source_id: str | None = None,
+        source_ids: Optional[list[str]] = None,
+        canonical_name: str | None = None,
+        min_confidence: float = 0.0,
+        q: str | None = None,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Return mention-level person rows with source_id/source_ids union semantics."""
+        try:
+            normalized_min_confidence = float(min_confidence)
+        except (TypeError, ValueError):
+            raise ValueError("min_confidence must be a finite float in range [0.0, 1.0].")
+
+        if not math.isfinite(normalized_min_confidence) or not (0.0 <= normalized_min_confidence <= 1.0):
+            raise ValueError("min_confidence must be a finite float in range [0.0, 1.0].")
+        if limit < 1:
+            raise ValueError("limit must be >= 1.")
+        if offset < 0:
+            raise ValueError("offset must be >= 0.")
+
+        normalized_single = source_id.strip() if isinstance(source_id, str) else ""
+        normalized_sources: list[str] = []
+        if source_ids is not None:
+            for raw in source_ids:
+                if raw is None:
+                    continue
+                sid = str(raw).strip()
+                if sid and sid not in normalized_sources:
+                    normalized_sources.append(sid)
+
+        if normalized_single and normalized_single not in normalized_sources:
+            normalized_sources.append(normalized_single)
+
+        if source_ids is not None and not normalized_sources and not normalized_single:
+            return []
+
+        normalized_canonical = canonical_name.strip() if isinstance(canonical_name, str) else ""
+        if canonical_name is not None and not normalized_canonical:
+            return []
+
+        search_text = q.strip().lower() if isinstance(q, str) else ""
+
+        table = self._person_mentions
+        if table is None:
+            try:
+                table = self._db.open_table(self._PERSON_MENTIONS_TABLE)
+                self._person_mentions = table
+                self._person_mentions_indexes_ready = False
+                self._ensure_person_mentions_indexes()
+            except ValueError:
+                return []
+
+        where_parts = [f"confidence >= {normalized_min_confidence}"]
+        if normalized_sources:
+            where_parts.append(self._where_in("source_id", normalized_sources))
+        elif normalized_single:
+            where_parts.append(self._where_eq("source_id", normalized_single))
+        if normalized_canonical:
+            where_parts.append(self._where_eq("canonical_name", normalized_canonical))
+        where = " AND ".join(f"({part})" for part in where_parts)
+
+        base_query = (
+            table.search()
+            .where(where, prefilter=True)
+            .select([
+                "id",
+                "source_id",
+                "chunk_id",
+                "raw_name",
+                "canonical_name",
+                "confidence",
+                "method",
+                "role_hint",
+                "context_snippet",
+            ])
+        )
+
+        if search_text:
+            rows = base_query.to_list()
+            filtered: list[dict[str, Any]] = []
+            for row in rows:
+                canonical = str(row.get("canonical_name", ""))
+                raw_name = str(row.get("raw_name", ""))
+                if search_text in canonical.lower() or search_text in raw_name.lower():
+                    filtered.append(row)
+            rows = filtered[offset : offset + limit]
+        else:
+            rows = base_query.offset(offset).limit(limit).to_list()
+
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            if row.get("id") is None:
+                continue
+            confidence_raw = row.get("confidence")
+            try:
+                confidence = float(confidence_raw)
+            except (TypeError, ValueError):
+                continue
+            result.append(
+                {
+                    "id": str(row.get("id", "")),
+                    "source_id": str(row.get("source_id", "")),
+                    "chunk_id": str(row.get("chunk_id", "")),
+                    "raw_name": str(row.get("raw_name", "")),
+                    "canonical_name": str(row.get("canonical_name", "")),
+                    "confidence": confidence,
+                    "method": str(row.get("method", "")),
+                    "role_hint": str(row.get("role_hint", "")) if row.get("role_hint") is not None else None,
+                    "context_snippet": str(row.get("context_snippet", "")),
+                }
+            )
+        return result
+
+    def get_person_mentions_by_canonical(
+        self,
+        canonical_name: str,
+        *,
+        source_id: str | None = None,
+        source_ids: Optional[list[str]] = None,
+        min_confidence: float = 0.0,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> list[dict]:
+        return self.get_person_mentions(
+            source_id=source_id,
+            source_ids=source_ids,
+            canonical_name=canonical_name,
+            min_confidence=min_confidence,
+            limit=limit,
+            offset=offset,
+        )
+
+    def get_person_mention(self, mention_id: str) -> Optional[dict[str, Any]]:
+        table = self._person_mentions
+        if table is None:
+            try:
+                table = self._db.open_table(self._PERSON_MENTIONS_TABLE)
+                self._person_mentions = table
+            except ValueError:
+                return None
+
+        rows = (
+            table.search()
+            .where(self._where_eq("id", mention_id), prefilter=True)
+            .select([
+                "id",
+                "source_id",
+                "chunk_id",
+                "raw_name",
+                "canonical_name",
+                "confidence",
+                "method",
+                "role_hint",
+                "context_snippet",
+            ])
+            .limit(1)
+            .to_list()
+        )
+        if not rows:
+            return None
+
+        row = rows[0]
+        confidence_raw = row.get("confidence")
+        try:
+            confidence = float(confidence_raw)
+        except (TypeError, ValueError):
+            confidence = 0.0
+
+        return {
+            "id": str(row.get("id", "")),
+            "source_id": str(row.get("source_id", "")),
+            "chunk_id": str(row.get("chunk_id", "")),
+            "raw_name": str(row.get("raw_name", "")),
+            "canonical_name": str(row.get("canonical_name", "")),
+            "confidence": confidence,
+            "method": str(row.get("method", "")),
+            "role_hint": str(row.get("role_hint", "")) if row.get("role_hint") is not None else None,
+            "context_snippet": str(row.get("context_snippet", "")),
+        }
+
+    def delete_person_mentions_by_source(self, source_id: str) -> None:
+        table = self._person_mentions
+        if table is None:
+            try:
+                table = self._db.open_table(self._PERSON_MENTIONS_TABLE)
+                self._person_mentions = table
+            except ValueError:
+                return
+        table.delete(self._where_eq("source_id", source_id))
+
+    def delete_person_mention(self, mention_id: str) -> None:
+        table = self._person_mentions
+        if table is None:
+            try:
+                table = self._db.open_table(self._PERSON_MENTIONS_TABLE)
+                self._person_mentions = table
+            except ValueError:
+                return
+        table.delete(self._where_eq("id", mention_id))
+
+    def merge_person_canonical_names(
+        self,
+        source_canonical_name: str,
+        target_canonical_name: str,
+    ) -> int:
+        """Merge all mentions from one canonical name into another.
+
+        Returns the number of mention rows rewritten.
+        """
+        source = source_canonical_name.strip()
+        target = target_canonical_name.strip()
+        if not source or not target:
+            raise ValueError("source_canonical_name and target_canonical_name must be non-empty.")
+        if source == target:
+            return 0
+
+        table = self._person_mentions
+        if table is None:
+            try:
+                table = self._db.open_table(self._PERSON_MENTIONS_TABLE)
+                self._person_mentions = table
+            except ValueError:
+                return 0
+
+        source_rows = (
+            table.search()
+            .where(self._where_eq("canonical_name", source), prefilter=True)
+            .select([
+                "id",
+                "source_id",
+                "chunk_id",
+                "raw_name",
+                "canonical_name",
+                "confidence",
+                "method",
+                "role_hint",
+                "context_snippet",
+            ])
+            .to_list()
+        )
+        if not source_rows:
+            return 0
+
+        rewritten: list[dict[str, Any]] = []
+        mention_ids: list[str] = []
+        for row in source_rows:
+            mention_id = str(row.get("id", "")).strip()
+            source_id = str(row.get("source_id", "")).strip()
+            chunk_id = str(row.get("chunk_id", "")).strip()
+            raw_name = str(row.get("raw_name", "")).strip()
+            method = str(row.get("method", "")).strip()
+            if not mention_id or not source_id or not chunk_id or not raw_name:
+                continue
+
+            try:
+                confidence = float(row.get("confidence"))
+            except (TypeError, ValueError):
+                confidence = 0.0
+
+            role_hint_raw = row.get("role_hint")
+            role_hint = str(role_hint_raw).strip() if role_hint_raw is not None else ""
+            context_snippet_raw = row.get("context_snippet")
+            context_snippet = str(context_snippet_raw).strip() if context_snippet_raw is not None else ""
+
+            mention_ids.append(mention_id)
+            rewritten.append(
+                {
+                    "id": mention_id,
+                    "source_id": source_id,
+                    "chunk_id": chunk_id,
+                    "raw_name": raw_name,
+                    "canonical_name": target,
+                    "confidence": confidence,
+                    "method": method,
+                    "role_hint": role_hint or None,
+                    "context_snippet": context_snippet,
+                }
+            )
+
+        if not rewritten:
+            return 0
+
+        try:
+            for id_batch in self._chunk(mention_ids, self._MAX_IN_CLAUSE_VALUES):
+                table.delete(self._where_in("id", id_batch))
+            table.add(rewritten)
+        except Exception as exc:
+            logger.error(
+                "Failed to merge canonical names from '%s' into '%s': %s",
+                source,
+                target,
+                exc,
+            )
+            raise
+
+        return len(rewritten)
+
+    def list_person_mentions_for_registry(self) -> list[dict[str, Any]]:
+        """Return minimal row shape used by PersonResolver warm/re-warm."""
+        table = self._person_mentions
+        if table is None:
+            try:
+                table = self._db.open_table(self._PERSON_MENTIONS_TABLE)
+                self._person_mentions = table
+            except ValueError:
+                return []
+
+        rows = (
+            table.search()
+            .select(["source_id", "raw_name", "canonical_name"])
+            .to_list()
+        )
+        return [
+            {
+                "source_id": str(row.get("source_id", "")),
+                "raw_name": str(row.get("raw_name", "")),
+                "canonical_name": str(row.get("canonical_name", "")),
+            }
+            for row in rows
+            if row.get("canonical_name") is not None and row.get("raw_name") is not None
+        ]
+
     def delete_source(self, source_id: str) -> bool:
-        """Delete all data for a source: children, parents, summary, geo mentions.
+        """Delete all data for a source: children, parents, summary, geo/person mentions.
 
         Returns True if the source existed (had any data), False otherwise.
         Raises ``RuntimeError`` if any individual delete step fails so
@@ -1127,6 +1576,14 @@ class StorageEngine:
         except Exception as exc:
             logger.error("Failed to delete geo mentions for source '%s': %s", sid, exc)
             errors.append(f"geo_mentions: {exc}")
+
+        # Delete person mentions
+        try:
+            self.delete_person_mentions_by_source(sid)
+            logger.info("Deleted person mentions for source '%s'", sid)
+        except Exception as exc:
+            logger.error("Failed to delete person mentions for source '%s': %s", sid, exc)
+            errors.append(f"person_mentions: {exc}")
 
         if errors:
             raise RuntimeError(

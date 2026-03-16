@@ -788,26 +788,25 @@ def _build_classification_prompt(query: str) -> str:
 Return ONLY a single JSON object and nothing else.
 No markdown, no code fences, no explanations.
 
-Classify the user's intent into exactly one category.
+Classify the research query into exactly one intent.
 
-Categories:
-- overview: User wants a brief, high-level description of what the document is and its purpose
-- summarize: User wants a detailed summary with key points and bullet points
-- explain: User wants the content explained simply, for non-experts
-- compare: User wants a side-by-side comparison or contrast between two or more named ideas, theories, positions, or documents
-- critique: User explicitly asks to evaluate, critique, or assess the merits of an argument — uses words like "evaluate", "critique", "strengths", "weaknesses", "how convincing"
-- analyze: User wants to understand how or why something works, or wants analysis of themes, patterns, causes, or mechanisms (default for "how does X" and "why does X" questions)
-- factual: User wants a direct factual answer extracted from the text (who, what, when, where, which, how many)
-- collection: User wants to know what documents are available or wants an overview of all documents in the corpus
-- extract: User wants specific structured data pulled out — names, dates, figures, definitions, entities — formatted as a list or table
-- timeline: User wants events ordered chronologically; query uses words like "timeline", "chronological", "sequence of events", "when did X happen then Y"
-- how_to: User wants step-by-step procedural instructions describing a process from the source material; query uses "how to", "steps to", "instructions for", "walk me through"
-- quote_evidence: User wants direct verbatim quotes or textual evidence supporting a claim; query uses "quote", "verbatim", "word for word", "direct evidence", "supporting this claim"
+Intents:
+- overview: what is this document / what is it about
+- summarize: summarise, give me a summary, key points
+- explain: explain, what does X mean, simplify
+- analyze: why, how does X work, themes, patterns, causes
+- compare: compare, contrast, difference between X and Y
+- critique: evaluate, critique, strengths, weaknesses, how convincing
+- factual: who, what, when, where, how many, which
+- collection: what documents, what sources, what is in the corpus
+- extract: list all, find every, extract all X, names/dates/figures
+- timeline: timeline, chronological, sequence, when did X then Y
+- how_to: how to, steps to, instructions for, walk me through
+- quote_evidence: quote, verbatim, word for word, direct evidence
 
-User query: "{query}"
+Query: "{query}"
 
-Respond with ONLY a JSON object in this exact format:
-{{"intent": "<overview|summarize|explain|compare|critique|analyze|factual|collection|extract|timeline|how_to|quote_evidence>", "confidence": <0.0-1.0>}}"""
+Respond with: {{"intent": "<intent>"}}"""
 
 
 def _parse_llm_response(response: str) -> Optional[tuple[Intent, float]]:
@@ -827,7 +826,13 @@ def _parse_llm_response(response: str) -> Optional[tuple[Intent, float]]:
         intent = _INTENT_MAP.get(data.get("intent", "").lower().strip())
         if intent is None:
             return None
-        return (intent, max(0.0, min(1.0, float(data.get("confidence", 0.5)))))
+
+        if "confidence" in data:
+            confidence = max(0.0, min(1.0, float(data.get("confidence", 0.5))))
+        else:
+            # The streamlined prompt intentionally requests intent-only JSON.
+            confidence = 0.75
+        return (intent, confidence)
     except (json.JSONDecodeError, ValueError, TypeError):
         return None
 

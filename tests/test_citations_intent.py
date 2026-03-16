@@ -380,6 +380,13 @@ class TestLLMResponseParsing:
         assert parsed is not None
         assert parsed[0] == Intent.CRITIQUE
 
+    def test_parse_intent_only_defaults_confidence(self):
+        response = '{"intent": "analyze"}'
+        parsed = _parse_llm_response(response)
+        assert parsed is not None
+        assert parsed[0] == Intent.ANALYZE
+        assert parsed[1] == pytest.approx(0.75)
+
 
 # ===========================================================================
 # Generation message building

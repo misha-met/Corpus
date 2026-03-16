@@ -377,6 +377,24 @@ class TestChatValidation:
             resp = await client.post("/api/chat", json={})
         assert resp.status_code == 422
 
+    @pytest.mark.anyio
+    async def test_empty_source_selection_rejected(self) -> None:
+        """Explicitly empty source_ids should be rejected for RAG chat."""
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                "/api/chat",
+                json={
+                    "messages": [{"role": "user", "content": "What is this?"}],
+                    "data": {"source_ids": []},
+                },
+            )
+
+        assert resp.status_code == 422
+        body = resp.json()
+        assert body["error"]["code"] == "NO_SOURCES_SELECTED"
+
 
 # ---------------------------------------------------------------------------
 # Chat endpoint — error handling

@@ -184,6 +184,10 @@ class IngestRequest(BaseModel):
         default=False,
         description="Whether to run ingest-time place NER/geocoding and persist geo mentions.",
     )
+    peopletag: bool = Field(
+        default=False,
+        description="Whether to run ingest-time person NER/canonicalization and persist person mentions.",
+    )
     page_offset: int = Field(
         default=1,
         ge=1,
@@ -317,6 +321,82 @@ class ChunkBatchResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     chunks: list[ChunkBatchItem]
+
+
+class PersonMention(BaseModel):
+    """Mention-level row for a canonical person."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    source_id: str
+    chunk_id: str
+    raw_name: str
+    canonical_name: str
+    confidence: float
+    method: str
+    role_hint: Optional[str] = None
+    context_snippet: str = ""
+
+
+class PersonSummary(BaseModel):
+    """Aggregated canonical person summary for list endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    canonical_name: str
+    mention_count: int
+    source_count: int
+    source_ids: list[str] = Field(default_factory=list)
+    variants: list[str] = Field(default_factory=list)
+    roles: list[str] = Field(default_factory=list)
+    avg_confidence: float
+
+
+class PeopleListResponse(BaseModel):
+    """Response body for ``GET /api/people``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    count: int
+    people: list[PersonSummary]
+
+
+class PersonMentionsResponse(BaseModel):
+    """Response body for ``GET /api/people/mentions``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    canonical_name: str
+    count: int
+    mentions: list[PersonMention]
+
+
+class PeopleMergeRequest(BaseModel):
+    """Request body for manual canonical-name merge operations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_canonical_name: str = Field(
+        ...,
+        min_length=1,
+        description="Canonical name to merge from.",
+    )
+    target_canonical_name: str = Field(
+        ...,
+        min_length=1,
+        description="Canonical name to merge into.",
+    )
+
+
+class PeopleMergeResponse(BaseModel):
+    """Response body for manual canonical-name merge operations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_canonical_name: str
+    target_canonical_name: str
+    merged_count: int
 
 
 # ---------------------------------------------------------------------------

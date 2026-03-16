@@ -19,11 +19,12 @@ import { SourcePanel } from "@/components/source-panel";
 import { FreeformChatPanel } from "@/components/freeform-chat-panel";
 import { HistoryPanel } from "@/components/history-panel";
 import { CorpusMap } from "@/components/map/CorpusMap";
+import { PeopleDictionary } from "@/components/people/PeopleDictionary";
 import { useAppDispatch, useAppState } from "@/context/app-context";
 import { parseCustomEvent } from "@/lib/event-parser";
 import type { ChatSession } from "@/lib/session-store";
 import type { FreeChatMessage } from "@/lib/session-store";
-import { Map as MapIcon, PaletteIcon, Plus, X } from "lucide-react";
+import { Map as MapIcon, PaletteIcon, Plus, UserRound, X } from "lucide-react";
 import {
   PickerRoot,
   PickerTrigger,
@@ -42,10 +43,17 @@ import { useTheme, type BackgroundTheme } from "@/context/theme-context";
 
 const MAP_THRESHOLD_STORAGE_KEY = "dh-map-threshold-v1";
 const DEFAULT_MAP_THRESHOLD = 0.75;
+const PEOPLE_THRESHOLD_STORAGE_KEY = "dh-people-threshold-v1";
+const DEFAULT_PEOPLE_THRESHOLD = 0.7;
 
 function clampMapThreshold(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_MAP_THRESHOLD;
   return Math.max(0.5, Math.min(0.99, value));
+}
+
+function clampPeopleThreshold(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_PEOPLE_THRESHOLD;
+  return Math.max(0.3, Math.min(0.99, value));
 }
 
 function MessageIdTracker() {
@@ -149,11 +157,15 @@ export default function Page() {
   const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([]);
   const [mapThreshold, setMapThreshold] = useState<number>(DEFAULT_MAP_THRESHOLD);
   const [isMapThresholdHydrated, setIsMapThresholdHydrated] = useState(false);
+  const [peopleThreshold, setPeopleThreshold] = useState<number>(DEFAULT_PEOPLE_THRESHOLD);
+  const [isPeopleThresholdHydrated, setIsPeopleThresholdHydrated] = useState(false);
 
   // History panel
   const [showHistory, setShowHistory] = useState(false);
   const [isMapOpen, setIsMapOpen] = useState(false);
+  const [isPeopleOpen, setIsPeopleOpen] = useState(false);
   const [mapRefreshNonce, setMapRefreshNonce] = useState(0);
+  const [peopleRefreshNonce, setPeopleRefreshNonce] = useState(0);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -168,19 +180,47 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem(PEOPLE_THRESHOLD_STORAGE_KEY);
+      if (raw) {
+        setPeopleThreshold(clampPeopleThreshold(Number(raw)));
+      }
+    } finally {
+      setIsPeopleThresholdHydrated(true);
+    }
+  }, []);
+
+  useEffect(() => {
     if (typeof window === "undefined" || !isMapThresholdHydrated) return;
     window.localStorage.setItem(MAP_THRESHOLD_STORAGE_KEY, String(mapThreshold));
   }, [mapThreshold, isMapThresholdHydrated]);
 
-  const chromeBg = isMapOpen ? "rgba(0,0,0,0.58)" : panelBg;
-  const chromeBackdrop = isMapOpen ? "blur(16px) saturate(115%)" : panelBackdrop;
-  const chromeBorderColor = isMapOpen ? "rgba(255,255,255,0.14)" : panelBorderColor;
-  const chromeFadeOpacity = isMapOpen ? 0.9 : 0;
+  useEffect(() => {
+    if (typeof window === "undefined" || !isPeopleThresholdHydrated) return;
+    window.localStorage.setItem(PEOPLE_THRESHOLD_STORAGE_KEY, String(peopleThreshold));
+  }, [peopleThreshold, isPeopleThresholdHydrated]);
+
+  useEffect(() => {
+    dispatch({ type: "SET_SELECTED_SOURCE_IDS", sourceIds: selectedSourceIds });
+  }, [dispatch, selectedSourceIds]);
+
+  const isOverlayOpen = isMapOpen || isPeopleOpen;
+
+  const chromeBg = isOverlayOpen ? "rgba(0,0,0,0.58)" : panelBg;
+  const chromeBackdrop = isOverlayOpen ? "blur(16px) saturate(115%)" : panelBackdrop;
+  const chromeBorderColor = isOverlayOpen ? "rgba(255,255,255,0.14)" : panelBorderColor;
+  const chromeFadeOpacity = isOverlayOpen ? 0.9 : 0;
   const mapOverlayTransform = isMapOpen ? "translateY(0px) scale(1)" : "translateY(10px) scale(0.992)";
   const mapOverlayFilter = isMapOpen ? "blur(0px)" : "blur(1.75px)";
   const mapScrimOpacity = isMapOpen ? 1 : 0;
   const mapCardOpacity = isMapOpen ? 1 : 0;
   const mapCardTransform = isMapOpen ? "translateY(0px) scale(1)" : "translateY(18px) scale(0.972)";
+  const peopleOverlayTransform = isPeopleOpen ? "translateY(0px) scale(1)" : "translateY(10px) scale(0.992)";
+  const peopleOverlayFilter = isPeopleOpen ? "blur(0px)" : "blur(1.75px)";
+  const peopleScrimOpacity = isPeopleOpen ? 1 : 0;
+  const peopleCardOpacity = isPeopleOpen ? 1 : 0;
+  const peopleCardTransform = isPeopleOpen ? "translateY(0px) scale(1)" : "translateY(18px) scale(0.972)";
 
   // New chat reset keys
   const [ragKey, setRagKey] = useState(0);
@@ -379,7 +419,13 @@ export default function Page() {
             </button>
 
             <button
-              onClick={() => setIsMapOpen((v) => !v)}
+              onClick={() => {
+                setIsMapOpen((v) => {
+                  const next = !v;
+                  if (next) setIsPeopleOpen(false);
+                  return next;
+                });
+              }}
               className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
                 isMapOpen
                   ? "bg-white/15 text-white border border-white/25 shadow-sm"
@@ -389,6 +435,25 @@ export default function Page() {
             >
               <MapIcon className="w-3.5 h-3.5 shrink-0" />
               Map
+            </button>
+
+            <button
+              onClick={() => {
+                setIsPeopleOpen((v) => {
+                  const next = !v;
+                  if (next) setIsMapOpen(false);
+                  return next;
+                });
+              }}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
+                isPeopleOpen
+                  ? "bg-white/15 text-white border border-white/25 shadow-sm"
+                  : "text-white/40 hover:text-white/70 hover:bg-white/8"
+              }`}
+              title="Open people dictionary"
+            >
+              <UserRound className="w-3.5 h-3.5 shrink-0" />
+              People
             </button>
           </div>
 
@@ -498,7 +563,10 @@ export default function Page() {
                   selectedSourceIds={selectedSourceIds}
                   onSelectedSourceIdsChange={setSelectedSourceIds}
                   onCollapse={() => setIsPanelCollapsed(true)}
-                  onSourcesChanged={() => setMapRefreshNonce((n) => n + 1)}
+                  onSourcesChanged={() => {
+                    setMapRefreshNonce((n) => n + 1);
+                    setPeopleRefreshNonce((n) => n + 1);
+                  }}
                 />
               )}
             </div>
@@ -602,6 +670,59 @@ export default function Page() {
                     refreshNonce={mapRefreshNonce}
                     threshold={mapThreshold}
                     sourceIds={selectedSourceIds}
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div
+              className="absolute inset-0 z-20 p-2 sm:p-3 md:p-4"
+              style={{
+                opacity: isPeopleOpen ? 1 : 0,
+                transform: peopleOverlayTransform,
+                filter: peopleOverlayFilter,
+                pointerEvents: isPeopleOpen ? "auto" : "none",
+                transition: "opacity 420ms cubic-bezier(0.22,1,0.36,1), transform 520ms cubic-bezier(0.22,1,0.36,1), filter 420ms ease",
+                willChange: "opacity, transform, filter",
+                transformOrigin: "center center",
+              }}
+            >
+              <div
+                className="pointer-events-none absolute inset-0"
+                style={{
+                  background:
+                    "linear-gradient(180deg, rgba(12,9,4,0.84) 0%, rgba(12,9,4,0.92) 100%), radial-gradient(120% 80% at 50% 50%, rgba(251,191,36,0.05) 0%, rgba(251,191,36,0.00) 68%)",
+                  opacity: peopleScrimOpacity,
+                  transition: "opacity 520ms cubic-bezier(0.22,1,0.36,1)",
+                }}
+              />
+
+              <div
+                className="relative h-full w-full"
+                style={{
+                  opacity: peopleCardOpacity,
+                  transform: peopleCardTransform,
+                  transition: "opacity 460ms cubic-bezier(0.22,1,0.36,1), transform 560ms cubic-bezier(0.22,1,0.36,1)",
+                  willChange: "opacity, transform",
+                }}
+              >
+                <div className="relative h-full w-full overflow-hidden rounded-2xl border border-white/20 bg-black/92 shadow-[0_20px_60px_rgba(0,0,0,0.66),inset_0_1px_0_rgba(255,255,255,0.08)]">
+                  <div className="pointer-events-none absolute inset-x-0 top-0 z-20 h-16 bg-gradient-to-b from-black/65 via-black/30 to-transparent" />
+
+                  <button
+                    onClick={() => setIsPeopleOpen(false)}
+                    className="absolute top-3 right-3 z-30 p-2 rounded-full bg-black/75 text-white/80 hover:text-white hover:bg-black border border-white/20 shadow-md"
+                    title="Close people dictionary"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+
+                  <PeopleDictionary
+                    active={isPeopleOpen}
+                    refreshNonce={peopleRefreshNonce}
+                    threshold={peopleThreshold}
+                    sourceIds={selectedSourceIds}
+                    onThresholdChange={(value) => setPeopleThreshold(clampPeopleThreshold(value))}
                   />
                 </div>
               </div>

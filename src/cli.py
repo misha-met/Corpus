@@ -165,6 +165,12 @@ def run() -> None:
         default=False,
         help="Enable ingest-time NER geotagging and geo mention persistence",
     )
+    ingest_parser.add_argument(
+        "--peopletag",
+        action="store_true",
+        default=False,
+        help="Enable ingest-time person NER/canonicalization and person mention persistence",
+    )
     _add_phoenix_args(ingest_parser)
 
     # ---- query subcommand ------------------------------------------------
@@ -478,6 +484,7 @@ def run() -> None:
             page_number=args.page_number,
             summarize=args.summarize,
             geotag=args.geotag,
+            peopletag=args.peopletag,
             page_offset=args.page_offset,
         )
         print(f"Ingested {result.parents_count} parents and {result.children_count} children.")

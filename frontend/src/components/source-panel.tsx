@@ -52,7 +52,7 @@ export function SourcePanel({
   const [isUploading, setIsUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<
     | null
-    | { stage: "uploading"; fileName: string; sourceId: string; queued: number; geotag: boolean }
+    | { stage: "uploading"; fileName: string; sourceId: string; queued: number; geotag: boolean; peopletag: boolean }
     | { stage: "error"; fileName: string; message: string }
   >(null);
   const uploadDismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -178,6 +178,7 @@ export function SourcePanel({
       sourceId: current.sourceId,
       queued: remaining,
       geotag: current.geotag,
+      peopletag: current.peopletag,
     });
 
     (async () => {
@@ -188,6 +189,7 @@ export function SourcePanel({
           current.summarize,
           current.pageOffset,
           current.geotag,
+          current.peopletag,
         );
         // Refresh the source list after each successful ingest
         const data = await sourceApi.listSources();
@@ -459,7 +461,13 @@ export function SourcePanel({
                   Ingesting {uploadStatus.fileName}...
                 </p>
                 <p className="text-xs text-gray-400 mt-0.5">
-                  Chunking &amp; embedding{uploadStatus.geotag ? ", geotagging" : ""}
+                  Chunking &amp; embedding
+                  {uploadStatus.geotag || uploadStatus.peopletag
+                    ? `, ${[
+                      uploadStatus.geotag ? "geotagging" : null,
+                      uploadStatus.peopletag ? "people indexing" : null,
+                    ].filter(Boolean).join(" + ")}`
+                    : ""}
                   {uploadStatus.queued > 0 ? ` · ${uploadStatus.queued} queued` : ""}
                 </p>
               </div>

@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 
 import lancedb
+import pyarrow as pa
 import pytest
 
 from src.models import ChildChunk, Metadata, ParentChunk
@@ -345,3 +346,174 @@ class TestStorageLatency:
             with Timer("parent_lookup", parent_id=parent.id) as t:
                 tmp_storage.get_parent_text(parent.id)
             logger.info(f"parent_lookup: {t.result.elapsed_ms:.2f}ms")
+
+
+# ===========================================================================
+# Person mentions table
+# ===========================================================================
+
+
+class TestPersonMentionsStorage:
+    @staticmethod
+    def _sample_rows() -> list[dict[str, object]]:
+        return [
+            {
+                "id": "pm-1",
+                "source_id": "doc_a",
+                "chunk_id": "c-a1",
+                "raw_name": "Noam Chomsky",
+                "canonical_name": "Noam Chomsky",
+                "confidence": 0.95,
+                "method": "new",
+                "role_hint": "author",
+                "context_snippet": "written by Noam Chomsky",
+            },
+            {
+                "id": "pm-2",
+                "source_id": "doc_b",
+                "chunk_id": "c-b1",
+                "raw_name": "Chomsky",
+                "canonical_name": "Noam Chomsky",
+                "confidence": 0.88,
+                "method": "fuzzy_last",
+                "role_hint": "cited",
+                "context_snippet": "according to Chomsky",
+            },
+            {
+                "id": "pm-3",
+                "source_id": "doc_b",
+                "chunk_id": "c-b2",
+                "raw_name": "Michel Foucault",
+                "canonical_name": "Michel Foucault",
+                "confidence": 0.62,
+                "method": "new",
+                "role_hint": "subject",
+                "context_snippet": "focuses on Michel Foucault",
+            },
+        ]
+
+    def test_person_mentions_table_auto_create(self, tmp_path: Path) -> None:
+        engine = StorageEngine(StorageConfig(lance_dir=tmp_path / "lance-auto"))
+        assert engine.get_person_mentions(min_confidence=0.0) == []
+
+        engine.upsert_person_mentions(self._sample_rows()[:1])
+        rows = engine.get_person_mentions(min_confidence=0.0)
+        assert len(rows) == 1
+        assert rows[0]["canonical_name"] == "Noam Chomsky"
+        engine.close()
+
+    def test_person_mentions_confidence_schema_float32(self) -> None:
+        schema = StorageEngine._PERSON_MENTIONS_SCHEMA
+        confidence_field = schema.field("confidence")
+        assert confidence_field.type == pa.float32()
+
+    def test_person_mentions_upsert_get_delete(self, tmp_storage: StorageEngine) -> None:
+        tmp_storage.upsert_person_mentions(self._sample_rows())
+
+        all_rows = tmp_storage.get_person_mentions(min_confidence=0.0)
+        assert len(all_rows) == 3
+
+        canonical_rows = tmp_storage.get_person_mentions_by_canonical(
+            "Noam Chomsky",
+            min_confidence=0.0,
+        )
+        assert len(canonical_rows) == 2
+
+        row = tmp_storage.get_person_mention("pm-2")
+        assert row is not None
+        assert row["raw_name"] == "Chomsky"
+
+        tmp_storage.delete_person_mention("pm-2")
+        assert tmp_storage.get_person_mention("pm-2") is None
+
+    def test_person_mentions_filters(self, tmp_storage: StorageEngine) -> None:
+        tmp_storage.upsert_person_mentions(self._sample_rows())
+
+        doc_a = tmp_storage.get_person_mentions(
+            source_ids=["doc_a"],
+            min_confidence=0.0,
+        )
+        assert len(doc_a) == 1
+        assert all(row["source_id"] == "doc_a" for row in doc_a)
+
+        high_conf = tmp_storage.get_person_mentions(min_confidence=0.9)
+        assert len(high_conf) == 1
+        assert high_conf[0]["id"] == "pm-1"
+
+    def test_recreate_person_mentions_table(self, tmp_storage: StorageEngine) -> None:
+        tmp_storage.upsert_person_mentions(self._sample_rows()[:2])
+        assert len(tmp_storage.get_person_mentions(min_confidence=0.0)) == 2
+
+        table = tmp_storage._recreate_person_mentions_table()
+        assert table is not None
+        assert tmp_storage.get_person_mentions(min_confidence=0.0) == []
+
+    def test_merge_person_canonical_names_rewrites_rows(self, tmp_storage: StorageEngine) -> None:
+        tmp_storage.upsert_person_mentions(self._sample_rows())
+
+        merged = tmp_storage.merge_person_canonical_names(
+            "Michel Foucault",
+            "Noam Chomsky",
+        )
+        assert merged == 1
+
+        old_rows = tmp_storage.get_person_mentions_by_canonical(
+            "Michel Foucault",
+            min_confidence=0.0,
+        )
+        assert old_rows == []
+
+        merged_rows = tmp_storage.get_person_mentions_by_canonical(
+            "Noam Chomsky",
+            min_confidence=0.0,
+        )
+        assert len(merged_rows) == 3
+        assert all(row["canonical_name"] == "Noam Chomsky" for row in merged_rows)
+
+    def test_delete_source_cascades_person_mentions(self, tmp_storage: StorageEngine) -> None:
+        parent = ParentChunk(
+            id="p-del",
+            text="delete-source test",
+            metadata=Metadata(
+                source_id="doc_del",
+                page_number=1,
+                page_label="1",
+                display_page="1",
+                header_path="Document",
+                parent_id=None,
+            ),
+        )
+        tmp_storage.add_parents([parent])
+        tmp_storage.upsert_person_mentions(
+            [
+                {
+                    "id": "pm-del",
+                    "source_id": "doc_del",
+                    "chunk_id": "c-del",
+                    "raw_name": "Noam Chomsky",
+                    "canonical_name": "Noam Chomsky",
+                    "confidence": 0.9,
+                    "method": "new",
+                    "role_hint": "author",
+                    "context_snippet": "context",
+                },
+                {
+                    "id": "pm-keep",
+                    "source_id": "doc_keep",
+                    "chunk_id": "c-keep",
+                    "raw_name": "Michel Foucault",
+                    "canonical_name": "Michel Foucault",
+                    "confidence": 0.9,
+                    "method": "new",
+                    "role_hint": "subject",
+                    "context_snippet": "context",
+                },
+            ]
+        )
+
+        tmp_storage.delete_source("doc_del")
+
+        deleted_rows = tmp_storage.get_person_mentions(source_id="doc_del", min_confidence=0.0)
+        kept_rows = tmp_storage.get_person_mentions(source_id="doc_keep", min_confidence=0.0)
+        assert deleted_rows == []
+        assert len(kept_rows) == 1

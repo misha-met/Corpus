@@ -38,10 +38,20 @@ class MockEngineWithStorage:
     def storage(self) -> StorageEngine:
         return self._storage
 
-    def ingest(self, file_path, *, source_id, summarize=True, page_number=None, page_offset=1):
+    def ingest(
+        self,
+        file_path,
+        *,
+        source_id,
+        summarize=True,
+        page_number=None,
+        geotag=False,
+        peopletag=False,
+        page_offset=1,
+    ):
         """Simulate ingest by storing parent chunks and a summary."""
         from src.models import Metadata, ParentChunk
-        _ = page_offset
+        _ = page_number, geotag, peopletag, page_offset
 
         # Read the file content
         text = Path(file_path).read_text(encoding="utf-8")
@@ -324,6 +334,25 @@ class TestIngestEndpoint:
         assert resp.status_code == 200
         assert resp.json()["summarized"] is False
 
+    @pytest.mark.anyio
+    async def test_ingest_accepts_peopletag(self, mock_engine, sample_file) -> None:
+        with patch("src.api._get_engine", return_value=mock_engine):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                resp = await client.post(
+                    "/api/sources/ingest",
+                    json={
+                        "file_path": str(sample_file),
+                        "source_id": "people_ingest_doc",
+                        "peopletag": True,
+                    },
+                )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["source_id"] == "people_ingest_doc"
+
 
 # ---------------------------------------------------------------------------
 # POST /api/sources/upload
@@ -379,6 +408,28 @@ class TestUploadEndpoint:
         assert resp.status_code == 409
         data = resp.json()
         assert data["error"]["code"] == "SOURCE_ALREADY_EXISTS"
+
+    @pytest.mark.anyio
+    async def test_upload_accepts_peopletag_form_field(self, mock_engine, sample_file) -> None:
+        with patch("src.api._get_engine", return_value=mock_engine):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                with sample_file.open("rb") as handle:
+                    resp = await client.post(
+                        "/api/sources/upload",
+                        files={"file": ("sample.md", handle, "text/markdown")},
+                        data={
+                            "source_id": "people_upload_doc",
+                            "summarize": "true",
+                            "geotag": "false",
+                            "peopletag": "true",
+                            "page_offset": "1",
+                        },
+                    )
+
+        assert resp.status_code == 200
+        assert resp.json()["source_id"] == "people_upload_doc"
 
 
 # ---------------------------------------------------------------------------

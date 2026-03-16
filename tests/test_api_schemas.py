@@ -20,6 +20,12 @@ from src.api_schemas import (
     HealthResponse,
     IngestRequest,
     IngestResponse,
+    PeopleListResponse,
+    PeopleMergeRequest,
+    PeopleMergeResponse,
+    PersonMention,
+    PersonMentionsResponse,
+    PersonSummary,
     SourceContentResponse,
     SourceDeleteResponse,
     SourceInfo,
@@ -184,12 +190,21 @@ class TestIngestRequest:
         assert req.file_path == "/docs/paper.pdf"
         assert req.source_id == "paper_1"
         assert req.summarize is True  # default
+        assert req.peopletag is False
 
     def test_no_summarize(self) -> None:
         req = IngestRequest(
             file_path="doc.md", source_id="doc", summarize=False
         )
         assert req.summarize is False
+
+    def test_peopletag_enabled(self) -> None:
+        req = IngestRequest(
+            file_path="doc.md",
+            source_id="doc",
+            peopletag=True,
+        )
+        assert req.peopletag is True
 
     def test_empty_file_path_rejected(self) -> None:
         with pytest.raises(ValidationError):
@@ -310,3 +325,79 @@ class TestHealthResponse:
         assert data["status"] == "ok"
         assert data["engine_loaded"] is True
         assert "system_ram_gb" in data  # optional field, may be None
+
+
+# ---------------------------------------------------------------------------
+# People schemas
+# ---------------------------------------------------------------------------
+
+
+class TestPeopleSchemas:
+    def test_person_mention_model(self) -> None:
+        mention = PersonMention(
+            id="pm-1",
+            source_id="doc_a",
+            chunk_id="chunk-1",
+            raw_name="Noam Chomsky",
+            canonical_name="Noam Chomsky",
+            confidence=0.94,
+            method="exact",
+            role_hint="author",
+            context_snippet="...written by Noam Chomsky...",
+        )
+        assert mention.canonical_name == "Noam Chomsky"
+
+    def test_people_list_response(self) -> None:
+        resp = PeopleListResponse(
+            count=1,
+            people=[
+                PersonSummary(
+                    canonical_name="Noam Chomsky",
+                    mention_count=3,
+                    source_count=2,
+                    source_ids=["doc_a", "doc_b"],
+                    variants=["Noam Chomsky", "Chomsky"],
+                    roles=["author"],
+                    avg_confidence=0.91,
+                )
+            ],
+        )
+        assert resp.count == 1
+        assert resp.people[0].mention_count == 3
+
+    def test_person_mentions_response(self) -> None:
+        resp = PersonMentionsResponse(
+            canonical_name="Noam Chomsky",
+            count=1,
+            mentions=[
+                PersonMention(
+                    id="pm-1",
+                    source_id="doc_a",
+                    chunk_id="chunk-1",
+                    raw_name="Noam Chomsky",
+                    canonical_name="Noam Chomsky",
+                    confidence=0.94,
+                    method="exact",
+                    role_hint="author",
+                    context_snippet="context",
+                )
+            ],
+        )
+        assert resp.canonical_name == "Noam Chomsky"
+        assert resp.count == 1
+
+    def test_people_merge_request(self) -> None:
+        req = PeopleMergeRequest(
+            source_canonical_name="Collins",
+            target_canonical_name="Michael Collins",
+        )
+        assert req.source_canonical_name == "Collins"
+        assert req.target_canonical_name == "Michael Collins"
+
+    def test_people_merge_response(self) -> None:
+        resp = PeopleMergeResponse(
+            source_canonical_name="Collins",
+            target_canonical_name="Michael Collins",
+            merged_count=4,
+        )
+        assert resp.merged_count == 4

@@ -42,6 +42,10 @@ from .api_schemas import (
     HealthResponse,
     IngestRequest,
     IngestResponse,
+    PeopleListResponse,
+    PeopleMergeRequest,
+    PeopleMergeResponse,
+    PersonMentionsResponse,
     QueryRequest,
     QueryResponse,
     SourceContentResponse,
@@ -520,6 +524,230 @@ async def delete_geo_mention(mention_id: str) -> None:
     await asyncio.to_thread(storage.delete_geo_mention, mention_id)
 
 
+@app.get("/api/people", response_model=PeopleListResponse)
+async def get_people(
+    request: Request,
+    source_id: str | None = None,
+    source_ids: list[str] | None = Query(default=None),
+    min_confidence: float = Query(0.0, ge=0.0, le=1.0),
+    q: str | None = Query(default=None),
+    limit: int = Query(200, ge=1, le=50_000),
+    offset: int = Query(0, ge=0),
+) -> PeopleListResponse:
+    """Return canonical people grouped from mention-level rows."""
+    normalized_source_id = source_id.strip() if isinstance(source_id, str) else ""
+
+    raw_source_ids = request.query_params.getlist("source_ids")
+    source_ids_provided = "source_ids" in request.query_params
+    normalized_source_ids: list[str] = []
+    if source_ids_provided:
+        for raw in raw_source_ids:
+            sid = raw.strip()
+            if sid and sid not in normalized_source_ids:
+                normalized_source_ids.append(sid)
+
+    if source_ids_provided and not normalized_source_ids and not normalized_source_id:
+        return PeopleListResponse(count=0, people=[])
+
+    effective_source_ids: list[str] | None = None
+    union: list[str] = []
+    if normalized_source_id:
+        union.append(normalized_source_id)
+    for sid in normalized_source_ids:
+        if sid not in union:
+            union.append(sid)
+    if union:
+        effective_source_ids = union
+
+    engine = await asyncio.to_thread(_get_engine)
+    storage = engine.storage  # type: ignore[union-attr]
+
+    try:
+        rows = await asyncio.to_thread(
+            storage.get_person_mentions,
+            source_id=normalized_source_id or None,
+            source_ids=effective_source_ids,
+            min_confidence=min_confidence,
+            q=q,
+            limit=50_000,
+            offset=0,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    grouped: dict[str, dict[str, object]] = {}
+    for row in rows:
+        canonical = str(row.get("canonical_name", "")).strip()
+        if not canonical:
+            continue
+
+        group = grouped.get(canonical)
+        if group is None:
+            group = {
+                "canonical_name": canonical,
+                "mention_count": 0,
+                "source_ids": set(),
+                "variants": set(),
+                "roles": set(),
+                "confidence_sum": 0.0,
+            }
+            grouped[canonical] = group
+
+        group["mention_count"] = int(group["mention_count"]) + 1
+        source_set = group["source_ids"]
+        if isinstance(source_set, set):
+            source_set.add(str(row.get("source_id", "")))
+
+        variants_set = group["variants"]
+        if isinstance(variants_set, set):
+            raw_name = str(row.get("raw_name", "")).strip()
+            if raw_name:
+                variants_set.add(raw_name)
+
+        roles_set = group["roles"]
+        if isinstance(roles_set, set):
+            role = row.get("role_hint")
+            if role is not None and str(role).strip():
+                roles_set.add(str(role).strip())
+
+        try:
+            conf = float(row.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            conf = 0.0
+        group["confidence_sum"] = float(group["confidence_sum"]) + conf
+
+    ordered = sorted(
+        grouped.values(),
+        key=lambda item: (-int(item["mention_count"]), str(item["canonical_name"]).lower()),
+    )
+
+    paged = ordered[offset : offset + limit]
+    people = [
+        {
+            "canonical_name": str(item["canonical_name"]),
+            "mention_count": int(item["mention_count"]),
+            "source_count": len(item["source_ids"]) if isinstance(item["source_ids"], set) else 0,
+            "source_ids": sorted(item["source_ids"]) if isinstance(item["source_ids"], set) else [],
+            "variants": sorted(item["variants"]) if isinstance(item["variants"], set) else [],
+            "roles": sorted(item["roles"]) if isinstance(item["roles"], set) else [],
+            "avg_confidence": round(
+                float(item["confidence_sum"]) / max(1, int(item["mention_count"])),
+                4,
+            ),
+        }
+        for item in paged
+    ]
+    return PeopleListResponse(count=len(ordered), people=people)
+
+
+@app.post("/api/people/merge", response_model=PeopleMergeResponse)
+async def merge_people(request: PeopleMergeRequest) -> PeopleMergeResponse:
+    """Merge one canonical person name into another and re-warm resolver state."""
+    from .person_resolver import get_person_resolver
+
+    source = request.source_canonical_name.strip()
+    target = request.target_canonical_name.strip()
+    if not source or not target:
+        raise HTTPException(status_code=422, detail="source_canonical_name and target_canonical_name must be non-empty")
+
+    engine = await asyncio.to_thread(_get_engine)
+    storage = engine.storage  # type: ignore[union-attr]
+
+    merged_count = await asyncio.to_thread(
+        storage.merge_person_canonical_names,
+        source,
+        target,
+    )
+
+    resolver = get_person_resolver()
+    rows = await asyncio.to_thread(storage.list_person_mentions_for_registry)
+    await asyncio.to_thread(resolver.warm_from_rows, rows)
+
+    return PeopleMergeResponse(
+        source_canonical_name=source,
+        target_canonical_name=target,
+        merged_count=merged_count,
+    )
+
+
+@app.get("/api/people/mentions", response_model=PersonMentionsResponse)
+async def get_people_mentions(
+    request: Request,
+    canonical_name: str = Query(..., min_length=1),
+    source_id: str | None = None,
+    source_ids: list[str] | None = Query(default=None),
+    min_confidence: float = Query(0.0, ge=0.0, le=1.0),
+    limit: int = Query(1000, ge=1, le=50_000),
+    offset: int = Query(0, ge=0),
+) -> PersonMentionsResponse:
+    """Return mention rows for one canonical person."""
+    normalized_source_id = source_id.strip() if isinstance(source_id, str) else ""
+
+    raw_source_ids = request.query_params.getlist("source_ids")
+    source_ids_provided = "source_ids" in request.query_params
+    normalized_source_ids: list[str] = []
+    if source_ids_provided:
+        for raw in raw_source_ids:
+            sid = raw.strip()
+            if sid and sid not in normalized_source_ids:
+                normalized_source_ids.append(sid)
+
+    if source_ids_provided and not normalized_source_ids and not normalized_source_id:
+        return PersonMentionsResponse(canonical_name=canonical_name, count=0, mentions=[])
+
+    effective_source_ids: list[str] | None = None
+    union: list[str] = []
+    if normalized_source_id:
+        union.append(normalized_source_id)
+    for sid in normalized_source_ids:
+        if sid not in union:
+            union.append(sid)
+    if union:
+        effective_source_ids = union
+
+    engine = await asyncio.to_thread(_get_engine)
+    storage = engine.storage  # type: ignore[union-attr]
+    try:
+        mentions = await asyncio.to_thread(
+            storage.get_person_mentions_by_canonical,
+            canonical_name,
+            source_id=normalized_source_id or None,
+            source_ids=effective_source_ids,
+            min_confidence=min_confidence,
+            limit=limit,
+            offset=offset,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return PersonMentionsResponse(
+        canonical_name=canonical_name,
+        count=len(mentions),
+        mentions=mentions,
+    )
+
+
+@app.delete("/api/people/mentions/{mention_id}", status_code=204)
+async def delete_people_mention(mention_id: str) -> None:
+    """Delete one person mention and eagerly update resolver registry."""
+    from .person_resolver import get_person_resolver
+
+    engine = await asyncio.to_thread(_get_engine)
+    storage = engine.storage  # type: ignore[union-attr]
+
+    mention = await asyncio.to_thread(storage.get_person_mention, mention_id)
+    await asyncio.to_thread(storage.delete_person_mention, mention_id)
+
+    if mention is not None:
+        resolver = get_person_resolver()
+        await asyncio.to_thread(
+            resolver.remove_mention,
+            canonical_name=str(mention.get("canonical_name", "")),
+            raw_name=str(mention.get("raw_name", "")),
+            source_id=str(mention.get("source_id", "")),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Speech-to-Text  (MLX Whisper — fully offline)
 # ---------------------------------------------------------------------------
@@ -837,6 +1065,28 @@ async def chat(request: Request, chat_request: ChatRequest):
             status_code=429,
             content=http_error_body("LOCK_BUSY", "Another query is already in progress"),
         )
+
+    if chat_request.data and "source_ids" in chat_request.data:
+        source_id_raw = chat_request.data.get("source_id")
+        has_source_id = isinstance(source_id_raw, str) and bool(source_id_raw.strip())
+        source_ids_raw = chat_request.data.get("source_ids")
+        normalized_source_ids: list[str] = []
+        if isinstance(source_ids_raw, list):
+            for value in source_ids_raw:
+                if value is None:
+                    continue
+                sid = str(value).strip()
+                if sid and sid not in normalized_source_ids:
+                    normalized_source_ids.append(sid)
+
+        if not has_source_id and not normalized_source_ids:
+            return JSONResponse(
+                status_code=422,
+                content=http_error_body(
+                    "NO_SOURCES_SELECTED",
+                    "Select at least one source before sending a RAG query.",
+                ),
+            )
 
     logger.info("Chat: request received")
 
@@ -1191,13 +1441,20 @@ async def query_endpoint(request: Request, query_request: QueryRequest):
     """Query endpoint with optional AI SDK UI message stream output."""
     source_id = None
     normalized_source_ids: list[str] = []
-    if query_request.source_ids:
+    if query_request.source_ids is not None:
         for value in query_request.source_ids:
             if value is None:
                 continue
             sid = str(value).strip()
             if sid and sid not in normalized_source_ids:
                 normalized_source_ids.append(sid)
+
+    if query_request.source_ids is not None and not normalized_source_ids:
+        raise HTTPException(
+            status_code=422,
+            detail="Select at least one source before sending a RAG query.",
+        )
+
     if len(normalized_source_ids) == 1:
         source_id = normalized_source_ids[0]
     elif len(normalized_source_ids) > 1:
@@ -1363,6 +1620,8 @@ async def ingest_source(request: IngestRequest):
         }
         if request.geotag:
             ingest_kwargs["geotag"] = True
+        if request.peopletag:
+            ingest_kwargs["peopletag"] = True
 
         # Run ingest in thread (blocking operation)
         result = await asyncio.to_thread(
@@ -1427,6 +1686,7 @@ async def upload_source(
     source_id: str = Form(""),
     summarize: bool = Form(True),
     geotag: bool = Form(False),
+    peopletag: bool = Form(False),
     page_offset: int = Form(1),
 ):
     """Upload and ingest a document (PDF or Markdown) from the browser.
@@ -1498,6 +1758,8 @@ async def upload_source(
         }
         if geotag:
             ingest_kwargs["geotag"] = True
+        if peopletag:
+            ingest_kwargs["peopletag"] = True
 
         # Run ingest in thread (blocking operation)
         result = await asyncio.to_thread(
@@ -1535,6 +1797,7 @@ async def upload_source(
 async def delete_source(source_id: str):
     """Delete a source and all its chunks, summary, and cached snapshot."""
     from .source_cache import delete_snapshot
+    from .person_resolver import get_person_resolver
 
     try:
         engine = await asyncio.to_thread(_get_engine)
@@ -1546,6 +1809,14 @@ async def delete_source(source_id: str):
 
         # Delete from storage (children, parents, summary)
         deleted = await asyncio.to_thread(storage.delete_source, source_id)
+
+        # Keep in-memory resolver registry aligned with persisted table rows.
+        try:
+            resolver = get_person_resolver()
+            rows = await asyncio.to_thread(storage.list_person_mentions_for_registry)
+            await asyncio.to_thread(resolver.warm_from_rows, rows)
+        except Exception:
+            logger.warning("Failed to re-warm person resolver after source delete", exc_info=True)
 
         # Delete snapshot file
         if snapshot_path:
