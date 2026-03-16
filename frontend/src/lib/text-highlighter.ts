@@ -18,6 +18,13 @@ export interface MatchResult {
   length: number;
 }
 
+interface RawMatchResult {
+  /** Start character index in the raw document text. */
+  start: number;
+  /** Raw character length of the matched substring. */
+  length: number;
+}
+
 /**
  * Find an exact (normalised) substring match of `needle` inside `haystack`,
  * with a progressive prefix fallback for robustness against minor whitespace
@@ -156,6 +163,22 @@ function buildNormToRaw(raw: string): number[] {
   return normToRaw;
 }
 
+/** Convert a normalised match into raw-text indices. */
+function findRawMatch(rawText: string, needle: string): RawMatchResult | null {
+  const result = findBestMatch(rawText, needle);
+  if (!result) return null;
+
+  const normToRaw = buildNormToRaw(rawText);
+  if (normToRaw.length === 0) return null;
+
+  const rawStart = normToRaw[result.start] ?? 0;
+  const rawEnd = normToRaw[result.start + result.length - 1] ?? rawStart;
+  return {
+    start: rawStart,
+    length: Math.max(1, rawEnd - rawStart + 1),
+  };
+}
+
 /**
  * Find `chunkText` in the container's text, wrap it with `<mark>`, and
  * return the element to scroll to.
@@ -169,26 +192,58 @@ function buildNormToRaw(raw: string): number[] {
 export function findAndHighlight(
   container: HTMLElement,
   chunkText: string,
-  scrollToText?: string
+  scrollToText?: string,
+  scopeText?: string,
 ): HTMLElement | null {
   clearHighlights(container);
   const rawText = container.innerText ?? container.textContent ?? "";
-  const result = findBestMatch(rawText, chunkText);
-  if (!result) return null;
 
-  const normToRaw = buildNormToRaw(rawText);
+  let scopeRawMatch: RawMatchResult | null = null;
+  let targetRawMatch: RawMatchResult | null = null;
 
-  const rawMatchStart = normToRaw[result.start] ?? 0;
-  const rawMatchEnd =
-    normToRaw[result.start + result.length - 1] ?? rawMatchStart;
-  const rawLength = rawMatchEnd - rawMatchStart + 1;
+  if (scopeText) {
+    scopeRawMatch = findRawMatch(rawText, scopeText);
+    if (scopeRawMatch) {
+      const scopeSlice = rawText.slice(
+        scopeRawMatch.start,
+        scopeRawMatch.start + scopeRawMatch.length,
+      );
+      const localTargetMatch = findRawMatch(scopeSlice, chunkText);
+      if (localTargetMatch) {
+        targetRawMatch = {
+          start: scopeRawMatch.start + localTargetMatch.start,
+          length: localTargetMatch.length,
+        };
+      }
+    }
+  }
+
+  if (!targetRawMatch) {
+    targetRawMatch = findRawMatch(rawText, chunkText);
+  }
+  if (!targetRawMatch) return null;
+
+  const rawMatchStart = targetRawMatch.start;
+  const rawLength = targetRawMatch.length;
 
   // Compute the raw offset of the scroll target BEFORE mutating the DOM.
   let scrollRawOffset: number | null = null;
   if (scrollToText) {
-    const scrollResult = findBestMatch(rawText, scrollToText);
-    if (scrollResult) {
-      scrollRawOffset = normToRaw[scrollResult.start] ?? null;
+    if (scopeRawMatch) {
+      const scopeSlice = rawText.slice(
+        scopeRawMatch.start,
+        scopeRawMatch.start + scopeRawMatch.length,
+      );
+      const localScrollMatch = findRawMatch(scopeSlice, scrollToText);
+      if (localScrollMatch) {
+        scrollRawOffset = scopeRawMatch.start + localScrollMatch.start;
+      }
+    }
+    if (scrollRawOffset === null) {
+      const globalScrollMatch = findRawMatch(rawText, scrollToText);
+      if (globalScrollMatch) {
+        scrollRawOffset = globalScrollMatch.start;
+      }
     }
   }
 

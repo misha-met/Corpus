@@ -292,6 +292,28 @@ class TestChatHappyPath:
         assert any("specific_doc" in a["sourceIds"] for a in source_anns)
 
     @pytest.mark.anyio
+    async def test_multi_source_ids_do_not_collapse_to_first_source(self, mock_engine) -> None:
+        """When multiple source_ids are provided, backend should not pin to source_ids[0]."""
+        with patch("src.api._get_engine", return_value=mock_engine):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                resp = await client.post(
+                    "/api/chat",
+                    json={
+                        "messages": [{"role": "user", "content": "Query"}],
+                        "data": {"source_ids": ["doc_a", "doc_b"]},
+                    },
+                )
+
+        assert resp.status_code == 200
+        events = _parse_sse_events(resp.text)
+        source_anns = _get_sse_annotations_by_type(events, "sources")
+        assert len(source_anns) >= 1
+        # Mock engine emits "test_source" when source pinning is not applied.
+        assert any("test_source" in a["sourceIds"] for a in source_anns)
+
+    @pytest.mark.anyio
     async def test_chat_with_history(self, mock_engine) -> None:
         """Chat with multiple messages works (last message is the query)."""
         with patch("src.api._get_engine", return_value=mock_engine):

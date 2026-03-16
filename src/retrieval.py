@@ -772,6 +772,7 @@ class RetrievalEngine:
                     source_id,
                     timing,
                 )
+
                 set_span_attributes(
                     stage_span,
                     {

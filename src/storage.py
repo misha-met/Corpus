@@ -2,9 +2,9 @@
 
 Architecture
 ~~~~~~~~~~~~
-- Three LanceDB tables: ``child_chunks`` (dense vectors + FTS text index),
+- Four LanceDB tables: ``child_chunks`` (dense vectors + FTS text index),
   ``parent_chunks`` (text only, no vectors), ``source_summaries`` (source
-  metadata and file paths).
+  metadata and file paths), and ``geo_mentions`` (ingest-time geocoded mentions).
 - FTS index rebuild is controlled by a policy (``immediate``, ``deferred``,
   ``batch``) to trade ingest throughput against query-time freshness.  The
   ``_fts_dirty`` flag tracks whether a rebuild is pending so hybrid_search
@@ -18,6 +18,7 @@ Architecture
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -43,7 +44,29 @@ class StorageEngine:
 
     _PARENTS_TABLE = "parent_chunks"
     _SUMMARIES_TABLE = "source_summaries"
+    _GEO_MENTIONS_TABLE = "geo_mentions"
     _MAX_IN_CLAUSE_VALUES = 256
+    _GEO_MENTIONS_SCHEMA = pa.schema([
+        pa.field("id", pa.string()),
+        pa.field("source_id", pa.string()),
+        pa.field("chunk_id", pa.string()),
+        pa.field("place_name", pa.string()),
+        pa.field("matched_input", pa.string()),
+        pa.field("matched_on", pa.string()),
+        pa.field("geonameid", pa.int64()),
+        pa.field("lat", pa.float64()),
+        pa.field("lon", pa.float64()),
+        pa.field("confidence", pa.float64()),
+        pa.field("method", pa.string()),
+        pa.field("raw_score", pa.float64()),
+        pa.field("is_ambiguous", pa.bool_()),
+        pa.field("candidate_count", pa.int32()),
+        pa.field("margin_score", pa.float64()),
+        pa.field("entity_type", pa.string()),
+        pa.field("ner_score", pa.float64()),
+        pa.field("geocoder_version", pa.string()),
+        pa.field("geocoded_at", pa.float64()),
+    ])
 
     def __init__(self, config: StorageConfig) -> None:
         self._config = config
@@ -83,6 +106,16 @@ class StorageEngine:
         try:
             self._summaries = self._db.open_table(self._SUMMARIES_TABLE)
             self._migrate_summaries_schema()
+        except ValueError:
+            pass  # Table does not exist yet
+
+        # --- geo mentions (no vectors) ---
+        self._geo_mentions: Optional[lancedb.table.Table] = None
+        self._geo_mentions_indexes_ready = False
+        try:
+            self._geo_mentions = self._db.open_table(self._GEO_MENTIONS_TABLE)
+            self._migrate_geo_mentions_schema()
+            self._ensure_geo_mentions_indexes()
         except ValueError:
             pass  # Table does not exist yet
 
@@ -159,6 +192,40 @@ class StorageEngine:
             self._SUMMARIES_TABLE,
             [f.name for f in missing],
         )
+
+    def _migrate_geo_mentions_schema(self) -> None:
+        """Ensure geo_mentions includes all diagnostic columns."""
+        if self._geo_mentions is None:
+            return
+        existing = set(self._geo_mentions.schema.names)
+        missing = [field for field in self._GEO_MENTIONS_SCHEMA if field.name not in existing]
+        if not missing:
+            return
+        self._geo_mentions.add_columns(missing)
+        self._geo_mentions = self._db.open_table(self._GEO_MENTIONS_TABLE)
+        self._geo_mentions_indexes_ready = False
+        logger.info(
+            "Migrated '%s' table: added columns %s",
+            self._GEO_MENTIONS_TABLE,
+            [f.name for f in missing],
+        )
+
+    def _ensure_geo_mentions_indexes(self) -> None:
+        """Best-effort scalar indexes for common geo mention filters."""
+        if self._geo_mentions is None or self._geo_mentions_indexes_ready:
+            return
+        for column in ("source_id", "confidence", "geonameid"):
+            try:
+                self._geo_mentions.create_scalar_index(column)
+            except TypeError:
+                # Older LanceDB signatures use keyword arguments.
+                try:
+                    self._geo_mentions.create_scalar_index(column, replace=False)
+                except Exception as exc:
+                    logger.debug("Skipping geo_mentions index for %s: %s", column, exc)
+            except Exception as exc:
+                logger.debug("Skipping geo_mentions index for %s: %s", column, exc)
+            self._geo_mentions_indexes_ready = True
 
     @staticmethod
     def _escape_sql_literal(value: str) -> str:
@@ -248,7 +315,12 @@ class StorageEngine:
 
     def reset_all_tables(self) -> None:
         """Drop all managed tables and clear in-memory handles."""
-        for table_name in (self._table_name, self._PARENTS_TABLE, self._SUMMARIES_TABLE):
+        for table_name in (
+            self._table_name,
+            self._PARENTS_TABLE,
+            self._SUMMARIES_TABLE,
+            self._GEO_MENTIONS_TABLE,
+        ):
             try:
                 self._db.drop_table(table_name)
                 logger.warning("Dropped LanceDB table '%s'", table_name)
@@ -258,6 +330,7 @@ class StorageEngine:
         self._table = None
         self._parents = None
         self._summaries = None
+        self._geo_mentions = None
         self._fts_dirty = False
         self._pending_fts_rows = 0
 
@@ -394,6 +467,7 @@ class StorageEngine:
 
         if self._table is None:
             self._table = self._db.create_table(self._table_name, records)
+            self._migrate_children_schema()
             # Create FTS index on the text column for hybrid search
             self._ensure_fts_index(force_rebuild=True)
             logger.info(
@@ -730,8 +804,279 @@ class StorageEngine:
             "page_offset": int(r.get("page_offset") or 1),
         }
 
+    def _ensure_geo_mentions_table(self) -> Optional[lancedb.table.Table]:
+        if self._geo_mentions is not None:
+            self._migrate_geo_mentions_schema()
+            self._ensure_geo_mentions_indexes()
+            return self._geo_mentions
+        try:
+            self._geo_mentions = self._db.create_table(
+                self._GEO_MENTIONS_TABLE,
+                schema=self._GEO_MENTIONS_SCHEMA,
+                exist_ok=True,
+            )
+            self._geo_mentions_indexes_ready = False
+        except Exception as exc:
+            logger.error("Failed to create/open '%s': %s", self._GEO_MENTIONS_TABLE, exc)
+            return None
+        self._migrate_geo_mentions_schema()
+        self._ensure_geo_mentions_indexes()
+        return self._geo_mentions
+
+    def upsert_geo_mentions(self, mentions: list[dict]) -> None:
+        """Batch write geo mentions. Creates table if not present."""
+        if not mentions:
+            return
+        table = self._ensure_geo_mentions_table()
+        if table is None:
+            return
+
+        records: list[dict[str, Any]] = []
+        for row in mentions:
+            mention_id = str(row.get("id", "")).strip()
+            source_id = str(row.get("source_id", "")).strip()
+            chunk_id = str(row.get("chunk_id", "")).strip()
+            place_name = str(row.get("place_name", "")).strip()
+            matched_input = str(row.get("matched_input", "")).strip()
+            matched_on = str(row.get("matched_on", "")).strip()
+            method = str(row.get("method", "")).strip()
+            if not mention_id or not source_id or not chunk_id or not place_name:
+                continue
+            try:
+                geonameid = int(row.get("geonameid"))
+                lat = float(row.get("lat"))
+                lon = float(row.get("lon"))
+                confidence = float(row.get("confidence"))
+            except (TypeError, ValueError):
+                continue
+
+            raw_score = row.get("raw_score")
+            raw_score_value: float | None
+            if raw_score is None:
+                raw_score_value = None
+            else:
+                try:
+                    raw_score_value = float(raw_score)
+                except (TypeError, ValueError):
+                    raw_score_value = None
+
+            margin_score = row.get("margin_score")
+            margin_score_value: float | None
+            if margin_score is None:
+                margin_score_value = None
+            else:
+                try:
+                    margin_score_value = float(margin_score)
+                except (TypeError, ValueError):
+                    margin_score_value = None
+
+            ner_score = row.get("ner_score")
+            ner_score_value: float | None
+            if ner_score is None:
+                ner_score_value = None
+            else:
+                try:
+                    ner_score_value = float(ner_score)
+                except (TypeError, ValueError):
+                    ner_score_value = None
+
+            geocoded_at = row.get("geocoded_at")
+            geocoded_at_value: float | None
+            if geocoded_at is None:
+                geocoded_at_value = None
+            else:
+                try:
+                    geocoded_at_value = float(geocoded_at)
+                except (TypeError, ValueError):
+                    geocoded_at_value = None
+
+            candidate_count = row.get("candidate_count")
+            try:
+                candidate_count_value = max(1, int(candidate_count if candidate_count is not None else 1))
+            except (TypeError, ValueError):
+                candidate_count_value = 1
+
+            entity_type = row.get("entity_type")
+            entity_type_value = str(entity_type).strip() if entity_type is not None else ""
+            geocoder_version = row.get("geocoder_version")
+            geocoder_version_value = str(geocoder_version).strip() if geocoder_version is not None else ""
+
+            records.append(
+                {
+                    "id": mention_id,
+                    "source_id": source_id,
+                    "chunk_id": chunk_id,
+                    "place_name": place_name,
+                    "matched_input": matched_input,
+                    "matched_on": matched_on,
+                    "geonameid": geonameid,
+                    "lat": lat,
+                    "lon": lon,
+                    "confidence": confidence,
+                    "method": method,
+                    "raw_score": raw_score_value,
+                    "is_ambiguous": bool(row.get("is_ambiguous", False)),
+                    "candidate_count": candidate_count_value,
+                    "margin_score": margin_score_value,
+                    "entity_type": entity_type_value or None,
+                    "ner_score": ner_score_value,
+                    "geocoder_version": geocoder_version_value or None,
+                    "geocoded_at": geocoded_at_value,
+                }
+            )
+
+        if not records:
+            return
+
+        unique_ids = list(dict.fromkeys(record["id"] for record in records))
+        try:
+            for id_batch in self._chunk(unique_ids, self._MAX_IN_CLAUSE_VALUES):
+                table.delete(self._where_in("id", id_batch))
+            table.add(records)
+        except Exception as exc:
+            logger.error("Failed to upsert geo mentions: %s", exc)
+            raise
+
+    def get_geo_mentions(
+        self,
+        source_id: str | None = None,
+        source_ids: Optional[list[str]] = None,
+        min_confidence: float = 0.0,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Return mentions filtered by confidence and optional source_id/source_ids union."""
+        try:
+            normalized_min_confidence = float(min_confidence)
+        except (TypeError, ValueError):
+            raise ValueError("min_confidence must be a finite float in range [0.0, 1.0].")
+
+        if not math.isfinite(normalized_min_confidence) or not (0.0 <= normalized_min_confidence <= 1.0):
+            raise ValueError("min_confidence must be a finite float in range [0.0, 1.0].")
+
+        if limit < 1:
+            raise ValueError("limit must be >= 1.")
+        if offset < 0:
+            raise ValueError("offset must be >= 0.")
+
+        normalized_single = source_id.strip() if isinstance(source_id, str) else ""
+        normalized_sources: list[str] = []
+        if source_ids is not None:
+            for raw in source_ids:
+                if raw is None:
+                    continue
+                sid = str(raw).strip()
+                if sid and sid not in normalized_sources:
+                    normalized_sources.append(sid)
+
+        if normalized_single and normalized_single not in normalized_sources:
+            normalized_sources.append(normalized_single)
+
+        if source_ids is not None and not normalized_sources and not normalized_single:
+            return []
+
+        table = self._geo_mentions
+        if table is None:
+            try:
+                table = self._db.open_table(self._GEO_MENTIONS_TABLE)
+                self._geo_mentions = table
+                self._geo_mentions_indexes_ready = False
+                self._migrate_geo_mentions_schema()
+                self._ensure_geo_mentions_indexes()
+            except ValueError:
+                return []
+
+        where_parts = [f"confidence >= {normalized_min_confidence}"]
+        if normalized_sources:
+            where_parts.append(self._where_in("source_id", normalized_sources))
+        elif normalized_single:
+            where_parts.append(self._where_eq("source_id", normalized_single))
+        where = " AND ".join(f"({part})" for part in where_parts)
+
+        rows = (
+            table.search()
+            .where(where, prefilter=True)
+            .select([
+                "id",
+                "source_id",
+                "chunk_id",
+                "place_name",
+                "matched_input",
+                "matched_on",
+                "geonameid",
+                "lat",
+                "lon",
+                "confidence",
+                "method",
+                "raw_score",
+                "is_ambiguous",
+                "candidate_count",
+                "margin_score",
+                "entity_type",
+                "ner_score",
+                "geocoder_version",
+                "geocoded_at",
+            ])
+            .offset(offset)
+            .limit(limit)
+            .to_list()
+        )
+        return [
+            {
+                "id": str(row.get("id", "")),
+                "source_id": str(row.get("source_id", "")),
+                "chunk_id": str(row.get("chunk_id", "")),
+                "place_name": str(row.get("place_name", "")),
+                "matched_input": str(row.get("matched_input", "")),
+                "matched_on": str(row.get("matched_on", "")),
+                "geonameid": int(row.get("geonameid")),
+                "lat": float(row.get("lat")),
+                "lon": float(row.get("lon")),
+                "confidence": float(row.get("confidence")),
+                "method": str(row.get("method", "")),
+                "raw_score": float(row.get("raw_score")) if row.get("raw_score") is not None else None,
+                "is_ambiguous": bool(row.get("is_ambiguous", False)),
+                "candidate_count": int(row.get("candidate_count")) if row.get("candidate_count") is not None else None,
+                "margin_score": float(row.get("margin_score")) if row.get("margin_score") is not None else None,
+                "entity_type": str(row.get("entity_type", "")) if row.get("entity_type") is not None else None,
+                "ner_score": float(row.get("ner_score")) if row.get("ner_score") is not None else None,
+                "geocoder_version": str(row.get("geocoder_version", "")) if row.get("geocoder_version") is not None else None,
+                "geocoded_at": float(row.get("geocoded_at")) if row.get("geocoded_at") is not None else None,
+            }
+            for row in rows
+            if row.get("id") is not None
+            and row.get("source_id") is not None
+            and row.get("chunk_id") is not None
+            and row.get("geonameid") is not None
+            and row.get("lat") is not None
+            and row.get("lon") is not None
+            and row.get("confidence") is not None
+        ]
+
+    def delete_geo_mentions_by_source(self, source_id: str) -> None:
+        """Called from delete_source() — cascading delete."""
+        table = self._geo_mentions
+        if table is None:
+            try:
+                table = self._db.open_table(self._GEO_MENTIONS_TABLE)
+                self._geo_mentions = table
+            except ValueError:
+                return
+        table.delete(self._where_eq("source_id", source_id))
+
+    def delete_geo_mention(self, mention_id: str) -> None:
+        """Single row delete by UUID for manual correction."""
+        table = self._geo_mentions
+        if table is None:
+            try:
+                table = self._db.open_table(self._GEO_MENTIONS_TABLE)
+                self._geo_mentions = table
+            except ValueError:
+                return
+        table.delete(self._where_eq("id", mention_id))
+
     def delete_source(self, source_id: str) -> bool:
-        """Delete all data for a source: children, parents, and summary.
+        """Delete all data for a source: children, parents, summary, geo mentions.
 
         Returns True if the source existed (had any data), False otherwise.
         Raises ``RuntimeError`` if any individual delete step fails so
@@ -774,6 +1119,14 @@ class StorageEngine:
             except Exception as exc:
                 logger.error("Failed to delete summary for source '%s': %s", sid, exc)
                 errors.append(f"summary: {exc}")
+
+        # Delete geo mentions
+        try:
+            self.delete_geo_mentions_by_source(sid)
+            logger.info("Deleted geo mentions for source '%s'", sid)
+        except Exception as exc:
+            logger.error("Failed to delete geo mentions for source '%s': %s", sid, exc)
+            errors.append(f"geo_mentions: {exc}")
 
         if errors:
             raise RuntimeError(

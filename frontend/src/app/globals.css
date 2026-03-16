@@ -185,6 +185,18 @@ mark.citation-highlight {
   box-shadow: none;
 }
 
+/* Corpus map hover popup: remove default white maplibre popup chrome. */
+.corpus-map-popup .maplibregl-popup-content {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  padding: 0;
+}
+
+.corpus-map-popup .maplibregl-popup-tip {
+  display: none;
+}
+
 
 /* Markdown content prose overrides for dark theme */
 .markdown-content {

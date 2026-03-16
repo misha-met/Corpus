@@ -29,6 +29,10 @@ export interface Citation {
   header_path?: string | null;
   /** Raw chunk text from the retrieval result. */
   chunk_text?: string;
+  /** Optional exact text to highlight inside the source viewer. */
+  highlight_text?: string;
+  /** Optional text scope used to disambiguate repeated highlight_text matches. */
+  highlight_scope_text?: string;
 }
 
 // ---------------------------------------------------------------------------

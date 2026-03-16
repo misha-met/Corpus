@@ -30,15 +30,13 @@ logger = logging.getLogger(__name__)
 # different style goal: orient the reader to what the document is and contains.
 # ---------------------------------------------------------------------------
 
-_INGEST_SUMMARY_SYSTEM = """You are a research assistant that writes concise document overviews.
-Your job is to help a researcher quickly understand what a newly-ingested document is.
+_INGEST_SUMMARY_SYSTEM = """You are a research assistant that writes concise document summaries.
 
 Rules:
 1. Use ONLY the provided text. Do not rely on outside knowledge.
-2. Do NOT include citation markers such as [1], [2], etc. — there are no numbered passages.
-3. Do NOT use bullet points. Write in clear prose paragraphs.
-4. Do NOT include meta-commentary, self-evaluations, or sign-offs.
-5. Stop immediately after your final sentence."""
+2. Write in plain prose. No bullet points, numbered lists, or inline references like [1] or (Author, Year).
+3. No meta-commentary, sign-offs, or opinions on the document.
+4. Stop after your final sentence."""
 
 _INGEST_SUMMARY_QUESTION = (
     "Write a 3-4 paragraph summary of this document. "

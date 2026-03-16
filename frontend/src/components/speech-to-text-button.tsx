@@ -28,7 +28,7 @@ export function SpeechToTextButton({
   const lastInsertedRef = useRef("");
 
   const applyTranscript = useCallback(
-    (chunk: string, _isFinal: boolean) => {
+    (chunk: string) => {
       const normalized = chunk.trim();
       if (!normalized) return;
       const el = inputRef.current;

@@ -36,7 +36,6 @@ const TypewriterText = React.forwardRef<HTMLSpanElement, TypewriterTextProps>(
 
       let timeoutRef: ReturnType<typeof setTimeout> = setTimeout(tick, typingSpeed);
       return () => clearTimeout(timeoutRef);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [text, typingSpeed]);
 
     return (

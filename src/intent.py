@@ -641,7 +641,12 @@ def _apply_tiebreaks(scores: dict["Intent", int]) -> tuple["Intent", int]:
     matching_intents = [i for i, s in scores.items() if s > 0]
 
     # Dedicated intents take priority when they have the highest score
-    _dedicated_intents = (Intent.EXTRACT, Intent.TIMELINE, Intent.HOW_TO, Intent.QUOTE_EVIDENCE)
+    _dedicated_intents = (
+        Intent.EXTRACT,
+        Intent.TIMELINE,
+        Intent.HOW_TO,
+        Intent.QUOTE_EVIDENCE,
+    )
     _dedicated_best_score = max(scores[i] for i in _dedicated_intents)
     _dedicated_wins = _dedicated_best_score > 0 and _dedicated_best_score >= max(
         scores[Intent.COLLECTION], scores[Intent.FACTUAL],

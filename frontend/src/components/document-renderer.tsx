@@ -11,6 +11,8 @@ export interface HighlightPayload {
   chunk_text?: string;
   /** Text to scroll to within the highlighted region (typically the child chunk). */
   scroll_to_text?: string;
+  /** Optional scope text to disambiguate repeated chunk_text matches. */
+  scope_text?: string;
 }
 
 interface DocumentRendererProps {
@@ -40,7 +42,7 @@ function PlainTextRenderer({
     if (!searchText) return;
 
     const timer = setTimeout(() => {
-      const mark = findAndHighlight(el, searchText, highlight?.scroll_to_text);
+      const mark = findAndHighlight(el, searchText, highlight?.scroll_to_text, highlight?.scope_text);
       if (mark) {
         mark.scrollIntoView({ behavior: "smooth", block: "center" });
       }

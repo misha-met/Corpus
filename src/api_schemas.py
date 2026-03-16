@@ -132,7 +132,7 @@ class QueryRequest(BaseModel):
     mode: Optional[str] = Field(default=None, description="Optional mode override")
     source_ids: Optional[list[str]] = Field(
         default=None,
-        description="Optional selected source IDs (single source filter supported by backend)",
+        description="Optional selected source IDs; backend currently applies single-source pinning only when exactly one ID is provided.",
     )
     citations_enabled: bool = Field(
         default=True,
@@ -179,6 +179,10 @@ class IngestRequest(BaseModel):
     summarize: bool = Field(
         default=True,
         description="Whether to generate a summary during ingest.",
+    )
+    geotag: bool = Field(
+        default=False,
+        description="Whether to run ingest-time place NER/geocoding and persist geo mentions.",
     )
     page_offset: int = Field(
         default=1,

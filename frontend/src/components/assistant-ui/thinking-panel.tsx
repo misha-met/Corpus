@@ -13,7 +13,7 @@
 import { useAppState } from "@/context/app-context";
 import { ChatMarkdown } from "@/components/chat-markdown";
 import { useAuiState } from "@assistant-ui/react";
-import { type FC, useEffect, useState } from "react";
+import { type FC, useState } from "react";
 import {
   ReasoningRoot,
   ReasoningTrigger,
@@ -40,13 +40,9 @@ export const ThinkingPanel: FC = () => {
   );
   const hasReasoning = reasoningText.length > 0;
 
-  // Controlled open state — auto-opens when reasoning tokens start streaming
+  // Controlled open state.
   const [open, setOpen] = useState(false);
-  useEffect(() => {
-    if (isRunning && hasReasoning && !hasText) {
-      setOpen(true);
-    }
-  }, [isRunning, hasReasoning, hasText]);
+  const autoOpen = isRunning && hasReasoning && !hasText;
 
   if (!isRunning && thinkingSteps.length === 0 && !hasReasoning) return null;
 
@@ -60,7 +56,7 @@ export const ThinkingPanel: FC = () => {
         : "Searching...";
 
   return (
-    <ReasoningRoot variant="ghost" open={open} onOpenChange={setOpen}>
+    <ReasoningRoot variant="ghost" open={open || autoOpen} onOpenChange={setOpen}>
       <ReasoningTrigger active={active} label={triggerLabel} />
       <ReasoningContent aria-busy={isRunning} className="rounded-md bg-white/5 backdrop-blur-md mt-1">
         <ReasoningText className="text-foreground/70">

@@ -18,7 +18,6 @@ import { useAppState, useAppDispatch } from "@/context/app-context";
  */
 export function CitationPanelReader() {
   const { activeCitation } = useAppState();
-  const dispatch = useAppDispatch();
 
   if (activeCitation === null) return null;
 
@@ -44,10 +43,6 @@ function CitationPanelReaderInner() {
 
   useEffect(() => {
     let cancelled = false;
-    setIsLoading(true);
-    setError(null);
-    setContent(null);
-    setChunkDetail(null);
 
     const promises: Promise<void>[] = [];
 
@@ -85,16 +80,30 @@ function CitationPanelReaderInner() {
     ? String(citation.page)
     : (chunkDetail?.display_page ?? chunkDetail?.page_number ?? undefined);
 
-  const highlightPayload: HighlightPayload = {
-    page_number: resolvedPageNumber,
-    header_path: chunkDetail?.header_path ?? citation.header_path ?? undefined,
-    // Highlight the full parent chunk (expanded context); scroll to the child
-    // chunk position within it so the view lands on the cited content.
-    chunk_text: chunkDetail?.parent_text ?? chunkDetail?.chunk_text ?? citation.chunk_text,
-    scroll_to_text: chunkDetail?.parent_text
-      ? (chunkDetail.chunk_text ?? citation.chunk_text)
-      : undefined,
-  };
+  const exactHighlightText = citation.highlight_text?.trim();
+  const exactHighlightScope = citation.highlight_scope_text?.trim();
+  const fallbackChunkText = chunkDetail?.parent_text ?? chunkDetail?.chunk_text ?? citation.chunk_text;
+  const fallbackScrollText = chunkDetail?.parent_text
+    ? (chunkDetail.chunk_text ?? citation.chunk_text)
+    : undefined;
+
+  const highlightPayload: HighlightPayload = exactHighlightText
+    ? {
+      page_number: resolvedPageNumber,
+      header_path: chunkDetail?.header_path ?? citation.header_path ?? undefined,
+      chunk_text: exactHighlightText,
+      scope_text: exactHighlightScope ?? chunkDetail?.chunk_text ?? chunkDetail?.parent_text ?? citation.chunk_text,
+    }
+    : {
+      page_number: resolvedPageNumber,
+      header_path: chunkDetail?.header_path ?? citation.header_path ?? undefined,
+      // Highlight the full parent chunk (expanded context); scroll to the child
+      // chunk position within it so the view lands on the cited content.
+      chunk_text: fallbackChunkText,
+      scroll_to_text: fallbackScrollText,
+    };
+
+  const sourcePreviewText = chunkDetail?.chunk_text ?? citation.chunk_text;
 
   const hasHighlightData = !!(
     highlightPayload.chunk_text ||
@@ -155,11 +164,11 @@ function CitationPanelReaderInner() {
               format={format}
               highlight={hasHighlightData ? highlightPayload : undefined}
             />
-            {highlightPayload.chunk_text && (
+            {sourcePreviewText && (
               <div className="mt-4 p-2.5 rounded-lg border border-gray-700 bg-gray-800/50">
-                <p className="text-[10px] text-gray-400 mb-1 font-medium uppercase tracking-wide">Source text</p>
+                <p className="text-[10px] text-gray-400 mb-1 font-medium uppercase tracking-wide">Source excerpt</p>
                 <p className="text-xs text-gray-300 whitespace-pre-wrap leading-relaxed">
-                  {highlightPayload.chunk_text}
+                  {sourcePreviewText}
                 </p>
               </div>
             )}

@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { useMemo, useState, useRef, useEffect } from "react";
+import { useMemo, useState, useRef } from "react";
 import { createPortal, useFrame } from "@react-three/fiber";
 import { useFBO } from "@react-three/drei";
 
@@ -60,7 +60,7 @@ export function Particles({
     m.uniforms.initialPositions.value =
       simulationMaterial.uniforms.positions.value;
     return m;
-  }, [simulationMaterial]);
+  }, [simulationMaterial, target.texture]);
 
   const [scene] = useState(() => new THREE.Scene());
   const [camera] = useState(
@@ -92,7 +92,7 @@ export function Particles({
 
     state.gl.setRenderTarget(target);
     state.gl.clear();
-    // @ts-ignore
+    // @ts-expect-error three.js renderer accepts these scene/camera objects at runtime.
     state.gl.render(scene, camera);
     state.gl.setRenderTarget(null);
 
@@ -119,6 +119,7 @@ export function Particles({
       setIsRevealing(false);
     }
 
+    // eslint-disable-next-line react-hooks/immutability
     dofPointsMaterial.uniforms.uTime.value = currentTime;
 
     dofPointsMaterial.uniforms.uFocus.value = focus;
@@ -132,6 +133,7 @@ export function Particles({
       delta
     );
 
+    // eslint-disable-next-line react-hooks/immutability
     simulationMaterial.uniforms.uTime.value = currentTime;
     simulationMaterial.uniforms.uNoiseScale.value = noiseScale;
     simulationMaterial.uniforms.uNoiseIntensity.value = noiseIntensity;
@@ -147,7 +149,7 @@ export function Particles({
   return (
     <>
       {createPortal(
-        // @ts-ignore
+        // @ts-expect-error custom shader material type extends three.js material at runtime.
         <mesh material={simulationMaterial}>
           <bufferGeometry>
             <bufferAttribute
@@ -157,10 +159,10 @@ export function Particles({
             <bufferAttribute attach="attributes-uv" args={[uvs, 2]} />
           </bufferGeometry>
         </mesh>,
-        // @ts-ignore
+        // @ts-expect-error portal scene target is valid for r3f runtime.
         scene
       )}
-      {/* @ts-ignore */}
+      {/* @ts-expect-error custom shader points material is valid at runtime. */}
       <points material={dofPointsMaterial} {...props}>
         <bufferGeometry>
           <bufferAttribute attach="attributes-position" args={[particles, 3]} />

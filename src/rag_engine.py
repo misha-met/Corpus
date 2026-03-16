@@ -409,7 +409,7 @@ def _enable_offline_if_cached(config: ModelConfig) -> None:
         logger.debug("HF cache dir %s does not exist; staying online", cache_dir)
         return
 
-    required_models = [config.llm_model, config.embedding_model]
+    required_models = [config.llm_model, config.embedding_model, config.summary_model]
     if config.reranker_enabled:
         required_models.append(config.reranker_model)
     for model_id in required_models:
@@ -462,6 +462,7 @@ class RagEngineConfig:
     collection: str = "child_chunks"
     mode: Optional[str] = None
     model: Optional[str] = None
+    summary_model: str = "mlx-community/LFM2-8B-A1B-4bit"
     fts_rebuild_policy: str = "deferred"
     fts_rebuild_batch_size: int = 0
     citations_enabled: Optional[bool] = None
@@ -566,7 +567,9 @@ class RagEngine:
         self._embedding_model: Any = None
         self._reranker: Any = None
         self._generator: Optional[MlxGenerator] = None
+        self._summary_generator: Optional[MlxGenerator] = None
         self._generator_load_lock = threading.Lock()
+        self._summary_generator_load_lock = threading.Lock()
         self._preload_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
     # -- properties --------------------------------------------------------
@@ -661,6 +664,31 @@ class RagEngine:
             logger.info("_ensure_generator: done")
         return self._generator
 
+    def ensure_summary_generator(self) -> MlxGenerator:
+        """Return the ingest-summary generator, loading it lazily if needed."""
+        if self._summary_generator is not None:
+            return self._summary_generator
+        with self._summary_generator_load_lock:
+            if self._summary_generator is not None:
+                return self._summary_generator
+            model_id = self._cfg.summary_model
+            logger.info(
+                "_ensure_summary_generator: loading summary LLM %s...",
+                model_id.split("/")[-1],
+            )
+            self._on_status(
+                f"Loading summary model ({model_id.split('/')[-1]})..."
+            )
+            try:
+                import mlx.core as mx
+
+                mx.set_cache_limit(0)
+            except Exception:
+                pass
+            self._summary_generator = MlxGenerator(model_id)
+            logger.info("_ensure_summary_generator: done")
+        return self._summary_generator
+
     def _start_generator_preload(self) -> Optional[concurrent.futures.Future[MlxGenerator]]:
         """Speculatively begin loading the LLM in the background.
 
@@ -727,12 +755,15 @@ class RagEngine:
         )
 
     def _release_generator_model(self) -> None:
-        if self._generator is None:
+        if self._generator is None and self._summary_generator is None:
             return
         self._generator = None
+        self._summary_generator = None
         gc.collect()
         _release_mlx_cache()
-        logger.info("Released generation model for retrieval-phase memory headroom")
+        logger.info(
+            "Released loaded generation models for retrieval-phase memory headroom"
+        )
 
     def _classify_intent(
         self,
@@ -833,6 +864,7 @@ class RagEngine:
         source_id: str,
         page_number: Optional[int] = None,
         summarize: bool = True,
+        geotag: bool = False,
         page_offset: int = 1,
     ) -> IngestResult:
         """Ingest a document (PDF or Markdown) into the RAG store."""
@@ -849,6 +881,7 @@ class RagEngine:
                 "rag.ingest.page_number": page_number,
                 "rag.ingest.page_offset": page_offset,
                 "rag.ingest.summarize": summarize,
+                "rag.ingest.geotag": geotag,
             },
         ) as ingest_span:
             try:
@@ -856,7 +889,7 @@ class RagEngine:
 
                 generator: Optional[MlxGenerator] = None
                 if summarize:
-                    generator = self.ensure_generator()
+                    generator = self.ensure_summary_generator()
 
                 parents_count, children_count = ingest_file_to_storage(
                     file_path,
@@ -866,6 +899,7 @@ class RagEngine:
                     embedding_model=embedding_model,
                     summarize=summarize,
                     summary_generator=generator,
+                    geotag=geotag,
                     page_offset=page_offset,
                     tracer=self._tracer,
                 )
@@ -2318,7 +2352,7 @@ class RagEngine:
             return "\n".join(lines), sources, False
 
         if missing:
-            generator = self.ensure_generator()
+            generator = self.ensure_summary_generator()
             for source in missing:
                 p_texts = self._storage.get_parent_texts_by_source(source_id=source)
                 context_text = "\n\n".join(p_texts)
@@ -2356,6 +2390,7 @@ class RagEngine:
         self._embedding_model = None
         self._reranker = None
         self._generator = None
+        self._summary_generator = None
         self._preload_executor.shutdown(wait=False)
         gc.collect()
         _release_mlx_cache()

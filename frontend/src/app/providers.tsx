@@ -1,9 +1,10 @@
 "use client";
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppProvider } from "@/context/app-context";
 import { ThemeProvider } from "@/context/theme-context";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 /**
  * Client-side root providers.
@@ -12,11 +13,25 @@ import type { ReactNode } from "react";
  * AppState and dispatch without prop-drilling.
  */
 export function Providers({ children }: { children: ReactNode }) {
+  const [queryClient] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: {
+          queries: {
+            staleTime: 30_000,
+            refetchOnWindowFocus: false,
+          },
+        },
+      }),
+  );
+
   return (
-    <ThemeProvider>
-      <AppProvider>
-        <TooltipProvider>{children}</TooltipProvider>
-      </AppProvider>
-    </ThemeProvider>
+    <QueryClientProvider client={queryClient}>
+      <ThemeProvider>
+        <AppProvider>
+          <TooltipProvider>{children}</TooltipProvider>
+        </AppProvider>
+      </ThemeProvider>
+    </QueryClientProvider>
   );
 }

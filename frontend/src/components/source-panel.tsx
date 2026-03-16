@@ -14,7 +14,10 @@ interface SourcePanelProps {
   selectedSourceIds: string[];
   onSelectedSourceIdsChange: (ids: string[]) => void;
   onCollapse: () => void;
+  onSourcesChanged?: () => void;
 }
+
+const SOURCE_SELECTION_STORAGE_KEY = "dh-selected-source-ids-v1";
 
 /**
  * Left sidebar showing ingested sources with checkboxes for query filtering.
@@ -31,6 +34,7 @@ export function SourcePanel({
   selectedSourceIds,
   onSelectedSourceIdsChange,
   onCollapse,
+  onSourcesChanged,
 }: SourcePanelProps) {
   type IngestState = "ingesting" | "queued";
   type DisplaySource = SourceInfo & { ingestState?: IngestState };
@@ -48,30 +52,93 @@ export function SourcePanel({
   const [isUploading, setIsUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<
     | null
-    | { stage: "uploading"; fileName: string; sourceId: string; queued: number }
+    | { stage: "uploading"; fileName: string; sourceId: string; queued: number; geotag: boolean }
     | { stage: "error"; fileName: string; message: string }
   >(null);
   const uploadDismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const persistedSelectionRef = useRef<string[] | null>(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem(SOURCE_SELECTION_STORAGE_KEY);
+      if (raw === null) {
+        persistedSelectionRef.current = null;
+        return;
+      }
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) {
+        persistedSelectionRef.current = [];
+        onSelectedSourceIdsChange([]);
+        return;
+      }
+      const hydrated = parsed
+        .map((value) => String(value).trim())
+        .filter((value, index, arr) => value.length > 0 && arr.indexOf(value) === index);
+      persistedSelectionRef.current = hydrated;
+      onSelectedSourceIdsChange(hydrated);
+    } catch {
+      persistedSelectionRef.current = null;
+    }
+  }, [onSelectedSourceIdsChange]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(SOURCE_SELECTION_STORAGE_KEY, JSON.stringify(selectedSourceIds));
+  }, [selectedSourceIds]);
 
   const fetchSources = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
       const data = await sourceApi.listSources();
+      const nextIds = data.map((source) => source.source_id);
+      const nextIdSet = new Set(nextIds);
+
+      let nextSelection: string[]
+      const persistedSelection = persistedSelectionRef.current;
+      if (persistedSelection !== null) {
+        nextSelection = persistedSelection.filter((id) => nextIdSet.has(id));
+        // Apply persisted selection once, then continue using live state.
+        persistedSelectionRef.current = null;
+      } else {
+        const previousIds = sources.map((source) => source.source_id);
+        const hadAllSelectedBefore =
+          previousIds.length > 0 &&
+          previousIds.every((id) => selectedSourceIds.includes(id));
+
+        if (hadAllSelectedBefore) {
+          nextSelection = nextIds;
+        } else {
+          const filteredSelection = selectedSourceIds.filter((id) => nextIdSet.has(id));
+          if (filteredSelection.length > 0 || selectedSourceIds.length > 0) {
+            nextSelection = filteredSelection;
+          } else {
+            // First load fallback when no persisted choice exists.
+            nextSelection = nextIds;
+          }
+        }
+      }
+
       setSources(data);
-      // Auto-select all on first load
-      if (data.length > 0) {
-        onSelectedSourceIdsChange(data.map((s) => s.source_id));
+      onSourcesChanged?.();
+
+      const sameSelection =
+        nextSelection.length === selectedSourceIds.length &&
+        nextSelection.every((id, idx) => selectedSourceIds[idx] === id);
+      if (!sameSelection) {
+        onSelectedSourceIdsChange(nextSelection);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load sources");
     } finally {
       setIsLoading(false);
     }
-  }, [onSelectedSourceIdsChange]);
+  }, [onSelectedSourceIdsChange, onSourcesChanged, selectedSourceIds, sources]);
 
   useEffect(() => {
     fetchSources();
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -110,15 +177,40 @@ export function SourcePanel({
       fileName: current.file.name,
       sourceId: current.sourceId,
       queued: remaining,
+      geotag: current.geotag,
     });
 
     (async () => {
       try {
-        await sourceApi.uploadDocument(current.file, current.sourceId, current.summarize, current.pageOffset);
+        await sourceApi.uploadDocument(
+          current.file,
+          current.sourceId,
+          current.summarize,
+          current.pageOffset,
+          current.geotag,
+        );
         // Refresh the source list after each successful ingest
         const data = await sourceApi.listSources();
+        const nextIds = data.map((item) => item.source_id);
+        const nextIdSet = new Set(nextIds);
+        const previousIds = sources.map((item) => item.source_id);
+        const hadAllSelectedBefore =
+          previousIds.length > 0 &&
+          previousIds.every((id) => selectedSourceIds.includes(id));
+
+        let nextSelection: string[];
+        if (hadAllSelectedBefore) {
+          nextSelection = nextIds;
+        } else {
+          nextSelection = selectedSourceIds.filter((id) => nextIdSet.has(id));
+          if (!nextSelection.includes(current.sourceId) && nextIdSet.has(current.sourceId)) {
+            nextSelection = [...nextSelection, current.sourceId];
+          }
+        }
+
         setSources(data);
-        onSelectedSourceIdsChange(data.map((s) => s.source_id));
+        onSourcesChanged?.();
+        onSelectedSourceIdsChange(nextSelection);
         // Briefly highlight + open the new source
         setHighlightSourceId(current.sourceId);
         setActiveSourceId(current.sourceId);
@@ -134,7 +226,7 @@ export function SourcePanel({
         setIsUploading(false);
       }
     })();
-  }, [isUploading, onSelectedSourceIdsChange, uploadQueue]);
+  }, [isUploading, onSelectedSourceIdsChange, onSourcesChanged, selectedSourceIds, sources, uploadQueue]);
 
   useEffect(() => {
     if (!isUploading && uploadQueue.length === 0 && uploadStatus?.stage === "uploading") {
@@ -181,12 +273,8 @@ export function SourcePanel({
     sources.length > 0 &&
     sources.every((s) => selectedSourceIds.includes(s.source_id));
 
-  function handleSelectAll() {
-    if (allSelected) {
-      onSelectedSourceIdsChange([]);
-    } else {
-      onSelectedSourceIdsChange(sources.map((s) => s.source_id));
-    }
+  function handleSelectAll(checked: boolean) {
+    onSelectedSourceIdsChange(checked ? sources.map((s) => s.source_id) : []);
   }
 
   function handleToggleSource(sourceId: string) {
@@ -207,6 +295,7 @@ export function SourcePanel({
       await sourceApi.deleteSource(sourceId);
       deleteCitationMeta(sourceId);
       setSources((prev) => prev.filter((s) => s.source_id !== sourceId));
+      onSourcesChanged?.();
       if (activeSourceId === sourceId) {
         setActiveSourceId(null);
       }
@@ -284,53 +373,58 @@ export function SourcePanel({
         </div>
       </div>
 
-      {/* Add sources button */}
-      <div className="px-4 pt-3 pb-2">
-        <button
-          onClick={() => setShowIngestModal(true)}
-          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm text-white/80 hover:text-white font-medium transition-all"
-          style={{
-            background: "rgba(255,255,255,0.04)",
-            border: "1px solid rgba(255,255,255,0.10)",
-            boxShadow: "0 2px 8px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.04)",
-          }}
-          onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.07)"; }}
-          onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.04)"; }}
-        >
-          <svg
-            className="w-4 h-4"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={2}
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M12 4v16m8-8H4"
-            />
-          </svg>
-          Add sources
-        </button>
-      </div>
+      <div className="flex flex-col flex-1 min-h-0">
+          {/* Add sources button */}
+          <div className="px-4 pt-3 pb-2">
+            <button
+              onClick={() => setShowIngestModal(true)}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm text-white/80 hover:text-white font-medium transition-all"
+              style={{
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid rgba(255,255,255,0.10)",
+                boxShadow: "0 2px 8px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.04)",
+              }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.07)"; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.04)"; }}
+            >
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M12 4v16m8-8H4"
+                />
+              </svg>
+              Add sources
+            </button>
+          </div>
 
-      {/* Select all */}
-      {displaySources.length > 0 && (
-        <div className="px-4 py-2 border-b" style={{ borderColor: "#1e1e1e" }}>
-          <label className="flex items-center gap-2.5 cursor-pointer group" onClick={handleSelectAll}>
-            <Checkbox
-              checked={allSelected}
-              onChange={handleSelectAll}
-            />
-            <span className="text-xs text-muted-foreground group-hover:text-foreground transition-colors">
-              Select all sources
-            </span>
-          </label>
-        </div>
-      )}
+          {/* Select all */}
+          {displaySources.length > 0 && (
+            <div className="px-4 py-2 border-b" style={{ borderColor: "#1e1e1e" }}>
+              <div className="flex items-center gap-2.5 group">
+                <Checkbox
+                  id="source-panel-select-all"
+                  checked={allSelected}
+                  onChange={handleSelectAll}
+                />
+                <label
+                  htmlFor="source-panel-select-all"
+                  className="cursor-pointer text-xs text-muted-foreground group-hover:text-foreground transition-colors"
+                >
+                  Select all sources
+                </label>
+              </div>
+            </div>
+          )}
 
-      {/* Source list */}
-      <div className="flex-1 overflow-y-auto">
+          {/* Source list */}
+          <div className="flex-1 overflow-y-auto">
         {error && (
           <div className="px-4 py-2 text-xs text-red-400 bg-red-900/20">
             {error}
@@ -365,7 +459,7 @@ export function SourcePanel({
                   Ingesting {uploadStatus.fileName}...
                 </p>
                 <p className="text-xs text-gray-400 mt-0.5">
-                  Chunking, embedding &amp; summarizing
+                  Chunking &amp; embedding{uploadStatus.geotag ? ", geotagging" : ""}
                   {uploadStatus.queued > 0 ? ` · ${uploadStatus.queued} queued` : ""}
                 </p>
               </div>
@@ -514,12 +608,13 @@ export function SourcePanel({
             );
           })}
         </div>
-      </div>
+          </div>
 
-      {/* Footer */}
-      <div className="px-4 py-2 border-t text-xs text-[#555555]" style={{ borderColor: "#1e1e1e" }}>
-        {displaySources.length} source{displaySources.length !== 1 ? "s" : ""} &middot;{" "}
-        {selectedSourceIds.length} selected
+          {/* Footer */}
+          <div className="px-4 py-2 border-t text-xs text-[#555555]" style={{ borderColor: "#1e1e1e" }}>
+            {displaySources.length} source{displaySources.length !== 1 ? "s" : ""} &middot;{" "}
+            {selectedSourceIds.length} selected
+          </div>
       </div>
 
       {/* Ingest modal */}
@@ -527,6 +622,7 @@ export function SourcePanel({
         <IngestModal
           onClose={() => setShowIngestModal(false)}
           onStartUpload={handleStartUpload}
+          existingSourceIds={displaySources.map((s) => s.source_id)}
         />
       )}
     </div>

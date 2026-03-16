@@ -19,7 +19,10 @@ export function MessageReferences() {
     const messageParts = useAuiState((s) => s.message.content);
     const { citationsByMessage } = useAppState();
     const dispatch = useAppDispatch();
-    const citations = citationsByMessage[messageId] || [];
+    const citations = useMemo(
+        () => citationsByMessage[messageId] ?? [],
+        [citationsByMessage, messageId]
+    );
 
     const answerText = useMemo(() => {
         return (messageParts ?? [])

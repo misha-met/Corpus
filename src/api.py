@@ -27,11 +27,12 @@ from typing import AsyncGenerator, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from .rag_engine import RagEngine
 
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from . import config as app_config
 from .api_schemas import (
     ChatRequest,
     ChunkBatchItem,
@@ -238,6 +239,7 @@ async def lifespan(app: FastAPI):
         if os.environ.get("RAG_EAGER_LOAD", "").strip() == "1":
             logger.info("RAG_EAGER_LOAD=1: loading engine at startup...")
             await asyncio.to_thread(_get_engine)
+
     except Exception:
         logger.exception("Failed to initialize backend services at startup")
         
@@ -317,6 +319,205 @@ async def health():
         phoenix_endpoint=phoenix_status.endpoint,
         phoenix_error=phoenix_status.error,
     )
+
+
+@app.get("/api/geo/status")
+async def geo_status() -> dict:
+    """Return geocoder readiness, counts, version info, and attribution."""
+    from .geocoder import get_geocoder
+
+    geocoder = get_geocoder()
+    return geocoder.status()
+
+
+@app.get("/api/geocode")
+async def geocode_forward(
+    q: str,
+    threshold: int = 72,
+    context: str = "",
+) -> dict:
+    """Forward geocode a place query using the offline GeoNames index."""
+    from .geocoder import get_geocoder
+
+    geocoder = get_geocoder()
+
+    context_words = tuple(word.strip() for word in context.split(",") if word.strip())
+    result = geocoder.forward(q, threshold=threshold, context_words=context_words)
+    if result is None and not geocoder.is_available():
+        raise HTTPException(503, detail="Geocoder not ready. Check /api/geo/status.")
+    if not result:
+        raise HTTPException(404, detail=f"No match found for '{q}'")
+
+    return {
+        **result.place.to_dict(),
+        "matched_on": result.matched_on,
+        "score": result.score,
+        "confidence": result.confidence,
+        "method": result.method.value,
+        "ambiguous": result.ambiguous,
+        "candidates": [place.to_dict() for place in result.candidates],
+        "attribution": "GeoNames (https://www.geonames.org) - CC BY 4.0",
+    }
+
+
+@app.get("/api/geocode/near")
+async def geocode_near(
+    lat: float = Query(..., ge=-90.0, le=90.0),
+    lon: float = Query(..., ge=-180.0, le=180.0),
+    radius_km: float = Query(50.0, ge=0.0, le=1_000.0),
+    limit: int = 50,
+) -> dict:
+    """Find canonical places near a coordinate using offline geocoder KDTree."""
+    from .geocoder import get_geocoder
+
+    limit = min(limit, 200)
+
+    geocoder = get_geocoder()
+
+    places = geocoder.find_near(lat, lon, radius_km=radius_km, max_results=limit)
+    if not geocoder.is_available():
+        raise HTTPException(503, detail="Geocoder not ready. Check /api/geo/status.")
+    return {
+        "lat": lat,
+        "lon": lon,
+        "radius_km": radius_km,
+        "count": len(places),
+        "results": [place.to_dict() for place in places],
+        "attribution": "GeoNames (https://www.geonames.org) - CC BY 4.0",
+    }
+
+
+@app.get("/api/geocode/reverse")
+async def geocode_reverse(
+    lat: float,
+    lon: float,
+    k: int = Query(3, ge=1, le=10),
+) -> dict:
+    """Reverse geocode coordinates to nearest canonical places."""
+    from .geocoder import get_geocoder
+
+    geocoder = get_geocoder()
+
+    results = geocoder.reverse(lat, lon, k=k)
+    if not geocoder.is_available():
+        raise HTTPException(503, detail="Geocoder not ready. Check /api/geo/status.")
+    return {
+        "lat": lat,
+        "lon": lon,
+        "results": [
+            {**place.to_dict(), "distance_km": round(distance, 2)}
+            for distance, place in results
+        ],
+        "attribution": "GeoNames (https://www.geonames.org) - CC BY 4.0",
+    }
+
+
+@app.get("/api/geo/mentions")
+async def get_geo_mentions(
+    request: Request,
+    source_id: str | None = None,
+    source_ids: list[str] | None = Query(default=None),
+    min_confidence: float = Query(0.75, ge=0.0, le=1.0),
+    limit: int = Query(1000, ge=1, le=50_000),
+    offset: int = Query(0, ge=0),
+    detailed: bool = True,
+) -> dict:
+    """Return geocoded place mentions grouped by geonameid."""
+    normalized_source_id = source_id.strip() if isinstance(source_id, str) else ""
+
+    raw_source_ids = request.query_params.getlist("source_ids")
+    source_ids_provided = "source_ids" in request.query_params
+    normalized_source_ids: list[str] = []
+    if source_ids_provided:
+        for raw in raw_source_ids:
+            sid = raw.strip()
+            if sid and sid not in normalized_source_ids:
+                normalized_source_ids.append(sid)
+
+    effective_source_ids: list[str] | None = None
+    if app_config.USE_SOURCE_IDS_FILTER:
+        if source_ids_provided and not normalized_source_ids and not normalized_source_id:
+            return {"count": 0, "mentions": []}
+
+        union: list[str] = []
+        if normalized_source_id:
+            union.append(normalized_source_id)
+        for sid in normalized_source_ids:
+            if sid not in union:
+                union.append(sid)
+        if union:
+            effective_source_ids = union
+
+    engine = await asyncio.to_thread(_get_engine)
+    storage = engine.storage  # type: ignore[union-attr]
+    try:
+        rows = await asyncio.to_thread(
+            storage.get_geo_mentions,
+            source_id=normalized_source_id or None,
+            source_ids=effective_source_ids,
+            min_confidence=min_confidence,
+            limit=limit,
+            offset=offset,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    groups: dict[int, dict] = {}
+    for row in rows:
+        gid = row["geonameid"]
+        if gid not in groups:
+            group = {
+                "place_name": row["place_name"],
+                "geonameid": gid,
+                "lat": row["lat"],
+                "lon": row["lon"],
+                "mention_count": 0,
+                "max_confidence": 0.0,
+            }
+            if detailed:
+                group.update(
+                    {
+                        "matched_inputs": [],
+                        "source_ids": [],
+                        "chunk_ids": [],
+                        "mention_ids": [],
+                        "mentions": [],
+                    }
+                )
+            groups[gid] = group
+
+        group = groups[gid]
+        group["mention_count"] += 1
+        group["max_confidence"] = max(group["max_confidence"], row["confidence"])
+        if detailed:
+            if row["matched_input"] not in group["matched_inputs"]:
+                group["matched_inputs"].append(row["matched_input"])
+            if row["source_id"] not in group["source_ids"]:
+                group["source_ids"].append(row["source_id"])
+            if row["chunk_id"] not in group["chunk_ids"]:
+                group["chunk_ids"].append(row["chunk_id"])
+            group["mention_ids"].append(row["id"])
+            group["mentions"].append(
+                {
+                    "id": row["id"],
+                    "source_id": row["source_id"],
+                    "chunk_id": row["chunk_id"],
+                    "matched_input": row["matched_input"],
+                    "confidence": row["confidence"],
+                    "method": row["method"],
+                }
+            )
+
+    result = sorted(groups.values(), key=lambda item: item["mention_count"], reverse=True)
+    return {"count": len(result), "mentions": result}
+
+
+@app.delete("/api/geo/mentions/{mention_id}", status_code=204)
+async def delete_geo_mention(mention_id: str) -> None:
+    """Delete a single geo mention by UUID."""
+    engine = await asyncio.to_thread(_get_engine)
+    storage = engine.storage  # type: ignore[union-attr]
+    await asyncio.to_thread(storage.delete_geo_mention, mention_id)
 
 
 # ---------------------------------------------------------------------------
@@ -547,11 +748,29 @@ async def _chat_stream_generator(
     request_mode = "regular"
     intent_override = None
     if chat_request.data:
-        source_ids = chat_request.data.get("source_ids")
-        if isinstance(source_ids, list) and len(source_ids) == 1:
-            source_id = source_ids[0]
-        elif not source_ids:
-            source_id = chat_request.data.get("source_id")
+        source_id_raw = chat_request.data.get("source_id")
+        if isinstance(source_id_raw, str) and source_id_raw.strip():
+            source_id = source_id_raw.strip()
+
+        source_ids_raw = chat_request.data.get("source_ids")
+        normalized_source_ids: list[str] = []
+        if isinstance(source_ids_raw, list):
+            for value in source_ids_raw:
+                if value is None:
+                    continue
+                sid = str(value).strip()
+                if sid and sid not in normalized_source_ids:
+                    normalized_source_ids.append(sid)
+
+        if source_id is None and normalized_source_ids:
+            if len(normalized_source_ids) == 1:
+                source_id = normalized_source_ids[0]
+            else:
+                logger.info(
+                    "Chat request received %d source_ids; backend retrieval supports single-source pinning only, using all sources.",
+                    len(normalized_source_ids),
+                )
+
         if "citations_enabled" in chat_request.data:
             citations_enabled = bool(chat_request.data["citations_enabled"])
         raw_intent = chat_request.data.get("intent_override")
@@ -918,8 +1137,21 @@ async def _query_stream_generator(
 ) -> AsyncGenerator[str, None]:
     """Generate AI SDK UI message stream lines from ``RagEngine.query_events()``."""
     source_id = None
-    if query_request.source_ids and len(query_request.source_ids) == 1:
-        source_id = query_request.source_ids[0]
+    normalized_source_ids: list[str] = []
+    if query_request.source_ids:
+        for value in query_request.source_ids:
+            if value is None:
+                continue
+            sid = str(value).strip()
+            if sid and sid not in normalized_source_ids:
+                normalized_source_ids.append(sid)
+    if len(normalized_source_ids) == 1:
+        source_id = normalized_source_ids[0]
+    elif len(normalized_source_ids) > 1:
+        logger.info(
+            "Query stream received %d source_ids; backend retrieval supports single-source pinning only, using all sources.",
+            len(normalized_source_ids),
+        )
 
     request_mode = _FRONTEND_MODE_MAP.get(query_request.mode, query_request.mode) if query_request.mode else None
     pinned_engine = await asyncio.to_thread(_get_engine, request_mode)
@@ -958,8 +1190,21 @@ async def _query_stream_generator(
 async def query_endpoint(request: Request, query_request: QueryRequest):
     """Query endpoint with optional AI SDK UI message stream output."""
     source_id = None
-    if query_request.source_ids and len(query_request.source_ids) == 1:
-        source_id = query_request.source_ids[0]
+    normalized_source_ids: list[str] = []
+    if query_request.source_ids:
+        for value in query_request.source_ids:
+            if value is None:
+                continue
+            sid = str(value).strip()
+            if sid and sid not in normalized_source_ids:
+                normalized_source_ids.append(sid)
+    if len(normalized_source_ids) == 1:
+        source_id = normalized_source_ids[0]
+    elif len(normalized_source_ids) > 1:
+        logger.info(
+            "Query endpoint received %d source_ids; backend retrieval supports single-source pinning only, using all sources.",
+            len(normalized_source_ids),
+        )
 
     # Resolve mode: map frontend names, default to None (keep current engine)
     request_mode = _FRONTEND_MODE_MAP.get(query_request.mode, query_request.mode) if query_request.mode else None
@@ -1111,13 +1356,19 @@ async def ingest_source(request: IngestRequest):
     try:
         engine = await asyncio.to_thread(_get_engine)
 
+        ingest_kwargs = {
+            "source_id": source_id,
+            "summarize": request.summarize,
+            "page_offset": page_offset,
+        }
+        if request.geotag:
+            ingest_kwargs["geotag"] = True
+
         # Run ingest in thread (blocking operation)
         result = await asyncio.to_thread(
             engine.ingest,  # type: ignore[union-attr]
             file_path,
-            source_id=source_id,
-            summarize=request.summarize,
-            page_offset=page_offset,
+            **ingest_kwargs,
         )
 
         await _post_ingest_snapshot(engine, source_id, file_path, page_offset=page_offset)
@@ -1156,11 +1407,26 @@ def _sanitize_source_id(name: str) -> str:
     return safe[:120] or "uploaded_doc"
 
 
+def _source_id_exists(storage: object, source_id: str) -> bool:
+    """Return True if a source_id already exists in storage."""
+    sid = source_id.strip()
+    if not sid:
+        return False
+
+    source_ids = storage.list_source_ids()  # type: ignore[attr-defined]
+    if sid in source_ids:
+        return True
+
+    detail = storage.get_source_detail(sid)  # type: ignore[attr-defined]
+    return detail is not None
+
+
 @app.post("/api/sources/upload", response_model=IngestResponse)
 async def upload_source(
     file: UploadFile = File(...),
     source_id: str = Form(""),
     summarize: bool = Form(True),
+    geotag: bool = Form(False),
     page_offset: int = Form(1),
 ):
     """Upload and ingest a document (PDF or Markdown) from the browser.
@@ -1204,6 +1470,19 @@ async def upload_source(
     if not sid:
         sid = _sanitize_source_id(filename)
 
+    # --- Reject duplicate source IDs (prevent silent replacement) ---
+    engine = await asyncio.to_thread(_get_engine)
+    storage = engine.storage  # type: ignore[union-attr]
+    exists = await asyncio.to_thread(_source_id_exists, storage, sid)
+    if exists:
+        return JSONResponse(
+            status_code=409,
+            content=http_error_body(
+                "SOURCE_ALREADY_EXISTS",
+                f"A source with ID '{sid}' already exists. Choose a different Source ID or delete the existing source first.",
+            ),
+        )
+
     # --- Save uploaded file to data/uploads/ ---
     _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     dest = _UPLOAD_DIR / f"{sid}{ext}"
@@ -1211,15 +1490,20 @@ async def upload_source(
     logger.info("Saved upload to %s (%d bytes)", dest, len(contents))
 
     try:
-        engine = await asyncio.to_thread(_get_engine)
+
+        ingest_kwargs = {
+            "source_id": sid,
+            "summarize": summarize,
+            "page_offset": page_offset,
+        }
+        if geotag:
+            ingest_kwargs["geotag"] = True
 
         # Run ingest in thread (blocking operation)
         result = await asyncio.to_thread(
             engine.ingest,  # type: ignore[union-attr]
             str(dest),
-            source_id=sid,
-            summarize=summarize,
-            page_offset=page_offset,
+            **ingest_kwargs,
         )
 
         await _post_ingest_snapshot(engine, sid, str(dest), page_offset=page_offset)

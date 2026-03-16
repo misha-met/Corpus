@@ -92,6 +92,34 @@ export interface ChunkBatchResponse {
   chunks: ChunkBatchItem[];
 }
 
+export interface GeoMentionDetail {
+  id: string;
+  source_id: string;
+  chunk_id: string;
+  matched_input: string;
+  confidence: number;
+  method: string;
+}
+
+export interface GeoMentionGroup {
+  place_name: string;
+  geonameid: number;
+  lat: number;
+  lon: number;
+  mention_count: number;
+  max_confidence: number;
+  matched_inputs: string[];
+  source_ids: string[];
+  chunk_ids: string[];
+  mention_ids: string[];
+  mentions: GeoMentionDetail[];
+}
+
+export interface GeoMentionsResponse {
+  count: number;
+  mentions: GeoMentionGroup[];
+}
+
 export interface ApiError {
   error: {
     code: string;
@@ -181,7 +209,8 @@ class SourceApiClient {
   async ingest(
     filePath: string,
     sourceId: string,
-    summarize: boolean = true
+    summarize: boolean = true,
+    geotag: boolean = false,
   ): Promise<IngestResponse> {
     const res = await fetch(`${this.baseUrl}/sources/ingest`, {
       method: "POST",
@@ -190,6 +219,7 @@ class SourceApiClient {
         file_path: filePath,
         source_id: sourceId,
         summarize,
+        geotag,
       }),
     });
     if (!res.ok) {
@@ -203,12 +233,14 @@ class SourceApiClient {
     file: File,
     sourceId: string,
     summarize: boolean = true,
-    pageOffset?: number
+    pageOffset?: number,
+    geotag: boolean = false,
   ): Promise<IngestResponse> {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("source_id", sourceId);
     formData.append("summarize", String(summarize));
+    formData.append("geotag", String(geotag));
     formData.append("page_offset", String(pageOffset ?? 1));
 
     // Call the backend directly to bypass the Next.js dev proxy
@@ -252,6 +284,57 @@ class SourceApiClient {
       throw new Error(message);
     }
     return res.json();
+  }
+
+  async getGeoMentions(
+    sourceId?: string,
+    minConfidence: number = 0.75,
+    limit: number = 1000,
+    offset: number = 0,
+    detailed: boolean = true,
+    sourceIds?: string[],
+  ): Promise<GeoMentionsResponse> {
+    const params = new URLSearchParams({
+      min_confidence: String(minConfidence),
+      limit: String(limit),
+      offset: String(offset),
+      detailed: String(detailed),
+    });
+    if (sourceId) {
+      params.set("source_id", sourceId);
+    }
+    if (sourceIds !== undefined) {
+      if (sourceIds.length === 0) {
+        // Preserve explicit-empty contract for backend filtering.
+        params.append("source_ids", "");
+      } else {
+        const seen = new Set<string>();
+        for (const raw of sourceIds) {
+          const sid = String(raw).trim();
+          if (!sid || seen.has(sid)) continue;
+          seen.add(sid);
+          params.append("source_ids", sid);
+        }
+      }
+    }
+
+    const res = await fetch(`${this.baseUrl}/geo/mentions?${params.toString()}`);
+    if (!res.ok) {
+      const message = await this.parseErrorResponse(res);
+      throw new Error(message);
+    }
+    return res.json();
+  }
+
+  async deleteGeoMention(mentionId: string): Promise<void> {
+    const res = await fetch(
+      `${this.baseUrl}/geo/mentions/${encodeURIComponent(mentionId)}`,
+      { method: "DELETE" }
+    );
+    if (!res.ok) {
+      const message = await this.parseErrorResponse(res);
+      throw new Error(message);
+    }
   }
 }
 

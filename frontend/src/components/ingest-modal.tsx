@@ -7,6 +7,7 @@ export interface UploadRequest {
   file: File;
   sourceId: string;
   summarize: boolean;
+  geotag: boolean;
   /** Optional citation reference string for Harvard/footnote copy feature.
    *  e.g. "Smith, J. et al. (2024) 'Climate Change Review'"
    *  Stored in localStorage keyed by source_id. */
@@ -19,6 +20,8 @@ interface IngestModalProps {
   onClose: () => void;
   /** Called when the user confirms upload. Modal closes immediately after. */
   onStartUpload: (reqs: UploadRequest[]) => void;
+  /** Existing/pending source IDs used to prevent accidental replacement. */
+  existingSourceIds?: string[];
 }
 
 const ALLOWED_EXTENSIONS = [".pdf", ".md", ".markdown"];
@@ -33,7 +36,11 @@ function sanitizeSourceId(filename: string): string {
     .slice(0, 120) || "uploaded_doc";
 }
 
-export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
+export function IngestModal({
+  onClose,
+  onStartUpload,
+  existingSourceIds = [],
+}: IngestModalProps) {
   const [files, setFiles] = useState<File[]>([]);
   const [sourceIds, setSourceIds] = useState<string[]>([]);
   const [citationRefs, setCitationRefs] = useState<string[]>([]);
@@ -41,6 +48,7 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
   const [pageOffset, setPageOffset] = useState(1);
   const [showPageOffset, setShowPageOffset] = useState(false);
   const [summarize, setSummarize] = useState(true);
+  const [geotag, setGeotag] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -124,17 +132,37 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
       return;
     }
 
+    const existing = new Set(existingSourceIds);
+    const duplicate = normalizedSourceIds.find((sid) => existing.has(sid));
+    if (duplicate) {
+      setValidationError(
+        `A source with ID "${duplicate}" already exists. Choose a different Source ID.`
+      );
+      return;
+    }
+
     const reqs: UploadRequest[] = files.map((file, idx) => ({
       file,
       sourceId: normalizedSourceIds[idx],
       summarize,
+      geotag,
       citationRef: citationRefs[idx]?.trim() || undefined,
       pageOffset: pageOffset > 1 ? pageOffset : undefined,
     }));
 
     onStartUpload(reqs);
     onClose();
-  }, [files, sourceIds, citationRefs, pageOffset, summarize, onStartUpload, onClose]);
+  }, [
+    files,
+    sourceIds,
+    citationRefs,
+    pageOffset,
+    summarize,
+    geotag,
+    existingSourceIds,
+    onStartUpload,
+    onClose,
+  ]);
 
   return (
     <div
@@ -402,15 +430,31 @@ export function IngestModal({ onClose, onStartUpload }: IngestModalProps) {
           )}
 
           {/* Summarize checkbox */}
-          <label className="flex items-center gap-2.5 cursor-pointer" onClick={() => setSummarize((v) => !v)}>
+          <div className="flex items-center gap-2.5">
             <Checkbox
+              id="ingest-summarize"
               checked={summarize}
               onChange={setSummarize}
             />
-            <span className="text-sm text-muted-foreground">
+            <label htmlFor="ingest-summarize" className="text-sm text-muted-foreground cursor-pointer">
               Generate summary during ingest
-            </span>
-          </label>
+            </label>
+          </div>
+
+          {/* Geotag checkbox */}
+          <div className="flex items-start gap-2.5">
+            <Checkbox
+              id="ingest-geotag"
+              checked={geotag}
+              onChange={setGeotag}
+            />
+            <label htmlFor="ingest-geotag" className="text-sm text-muted-foreground cursor-pointer">
+              <p>Index locations</p>
+              <p className="text-[11px] text-(--muted-foreground)/70">
+                Runs place NER + geocoding
+              </p>
+            </label>
+          </div>
 
           {/* Validation error */}
           {validationError && (

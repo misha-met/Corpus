@@ -9,6 +9,7 @@ interface HighlightPayload {
   header_path?: string;
   chunk_text?: string;
   scroll_to_text?: string;
+  scope_text?: string;
 }
 
 interface MarkdownRendererProps {
@@ -51,7 +52,7 @@ export function MarkdownRenderer({ content, highlight }: MarkdownRendererProps) 
       // Try to find and highlight the chunk text in the rendered DOM.
       const searchText = highlight?.chunk_text;
       if (searchText) {
-        const mark = findAndHighlight(el, searchText, highlight?.scroll_to_text);
+        const mark = findAndHighlight(el, searchText, highlight?.scroll_to_text, highlight?.scope_text);
         if (mark) {
           scrollTarget = mark;
         }

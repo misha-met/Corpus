@@ -32,6 +32,73 @@ CITATIONS_ENABLED_DEFAULT: bool = False
 _detected_ram_gb: Optional[float] = None
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    val = raw.strip().lower()
+    if val in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if val in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    logger.warning("Invalid boolean for %s=%r; using default=%s", name, raw, default)
+    return default
+
+
+def _env_float(name: str, default: float, *, low: float | None = None, high: float | None = None) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        value = default
+    else:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            logger.warning("Invalid float for %s=%r; using default=%s", name, raw, default)
+            value = default
+
+    if low is not None and value < low:
+        logger.warning("%s=%s is below minimum %s; clamping", name, value, low)
+        value = low
+    if high is not None and value > high:
+        logger.warning("%s=%s is above maximum %s; clamping", name, value, high)
+        value = high
+    return value
+
+
+def _env_int(name: str, default: int, *, low: int | None = None, high: int | None = None) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            logger.warning("Invalid int for %s=%r; using default=%s", name, raw, default)
+            value = default
+
+    if low is not None and value < low:
+        logger.warning("%s=%s is below minimum %s; clamping", name, value, low)
+        value = low
+    if high is not None and value > high:
+        logger.warning("%s=%s is above maximum %s; clamping", name, value, high)
+        value = high
+    return value
+
+
+# Geotag and geocoder hardening knobs
+GEOTAG_MIN_CONFIDENCE: float = _env_float("GEOTAG_MIN_CONFIDENCE", 0.75, low=0.0, high=1.0)
+GEOTAG_FUZZY_THRESHOLD: int = _env_int("GEOTAG_FUZZY_THRESHOLD", 75, low=0, high=100)
+GEOTAG_FUZZY_SCORE_FLOOR: int = _env_int("GEOTAG_FUZZY_SCORE_FLOOR", 78, low=0, high=100)
+GEOTAG_FUZZY_MARGIN_THRESHOLD: float = _env_float("GEOTAG_FUZZY_MARGIN_THRESHOLD", 4.0, low=0.0)
+GEOTAG_ENTITY_TYPE_PENALTY: float = _env_float("GEOTAG_ENTITY_TYPE_PENALTY", 0.12, low=0.0, high=1.0)
+GEOTAG_GENERIC_TOKEN_PENALTY: float = _env_float("GEOTAG_GENERIC_TOKEN_PENALTY", 0.08, low=0.0, high=1.0)
+GEOTAG_NER_CONTEXT_WINDOW: int = _env_int("GEOTAG_NER_CONTEXT_WINDOW", 8, low=0, high=48)
+
+# Rollback toggles
+USE_HARDENED_GEOCODER: bool = _env_bool("USE_HARDENED_GEOCODER", False)
+USE_SOURCE_IDS_FILTER: bool = _env_bool("USE_SOURCE_IDS_FILTER", True)
+
+
 @dataclass(frozen=True)
 class ModelConfig:
     """Configuration for RAG pipeline models and retrieval parameters."""
@@ -39,6 +106,7 @@ class ModelConfig:
     llm_model: str
     embedding_model: str
     reranker_model: str
+    summary_model: str = "mlx-community/LFM2-8B-A1B-4bit"
     embedding_device: str = "cpu"
     quantization: str = "4-bit"
     context_window: int = 128_000
@@ -175,6 +243,7 @@ def _get_mode_config(mode: str, ram_gb: float) -> ModelConfig:
     # Shared model stack per mode (fields identical across RAM tiers)
     _REGULAR_MODELS = dict(
         llm_model="NexVeridian/Qwen3.5-35B-A3B-4bit",
+        summary_model="mlx-community/LFM2-8B-A1B-4bit",
         embedding_model="mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
         reranker_model="jinaai/jina-reranker-v3-mlx",
         embedding_device="cpu",

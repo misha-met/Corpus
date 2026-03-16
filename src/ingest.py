@@ -569,6 +569,114 @@ def _coerce_embeddings(raw_embeddings: object) -> list[list[float]]:
     raise TypeError("Unsupported embeddings type.")
 
 
+def _geotag_chunks(
+    source_id: str,
+    child_chunks: list[ChildChunk],
+    storage: StorageEngine,
+) -> None:
+    """Extract place mentions with NER, geocode, and store grouped mention rows."""
+    try:
+        import time
+        import uuid
+
+        from .config import (
+            GEOTAG_FUZZY_THRESHOLD,
+            GEOTAG_MIN_CONFIDENCE,
+            GEOTAG_NER_CONTEXT_WINDOW,
+        )
+        from .geocoder import get_geocoder
+        from .ner import extract_place_candidates_ner
+
+        geocoder = get_geocoder()
+        if not geocoder.is_available():
+            logger.info("Geocoder cold during ingest geotagging; warming now for %s", source_id)
+            geocoder.warm(background=False)
+        if not geocoder.is_available():
+            logger.warning("Geocoder unavailable after warm attempt — skipping geotagging for %s", source_id)
+            return
+
+        status = geocoder.status()
+        version_info = status.get("version_info") if isinstance(status, dict) else None
+        geocoder_version = "unknown"
+        if isinstance(version_info, dict):
+            geocoder_version = str(version_info.get("checksum") or version_info.get("build_timestamp") or "unknown")
+
+        texts = [chunk.text for chunk in child_chunks]
+        ner_lists = extract_place_candidates_ner(
+            texts,
+            context_window_words=GEOTAG_NER_CONTEXT_WINDOW,
+        )
+        geocoded_at = time.time()
+
+        mentions: list[dict] = []
+        seen: set[tuple[int, str]] = set()
+
+        for chunk, place_candidates in zip(child_chunks, ner_lists):
+            for candidate in place_candidates:
+                normalized = str(candidate.get("text", "")).strip()
+                if not normalized:
+                    continue
+
+                context_words = tuple(
+                    word.strip()
+                    for word in candidate.get("context_words", [])
+                    if isinstance(word, str) and word.strip()
+                )
+                entity_type_raw = candidate.get("entity_type")
+                entity_type = str(entity_type_raw).upper().strip() if entity_type_raw else None
+
+                match = geocoder.forward(
+                    normalized,
+                    threshold=GEOTAG_FUZZY_THRESHOLD,
+                    context_words=context_words,
+                    entity_type=entity_type,
+                )
+                if match is None:
+                    continue
+                if match.confidence < GEOTAG_MIN_CONFIDENCE:
+                    continue
+                key = (match.place.geonameid, chunk.id)
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                ner_score_raw = candidate.get("score", 0.0)
+                try:
+                    ner_score = float(ner_score_raw)
+                except (TypeError, ValueError):
+                    ner_score = 0.0
+
+                mentions.append(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "source_id": source_id,
+                        "chunk_id": chunk.id,
+                        "place_name": match.place.name,
+                        "matched_input": normalized,
+                        "geonameid": match.place.geonameid,
+                        "lat": match.place.lat,
+                        "lon": match.place.lon,
+                        "confidence": round(match.confidence, 4),
+                        "method": match.method.value,
+                        "matched_on": match.matched_on,
+                        "raw_score": round(float(match.score), 4),
+                        "is_ambiguous": bool(match.ambiguous),
+                        "candidate_count": int(match.candidate_count),
+                        "margin_score": None if match.margin_score is None else round(float(match.margin_score), 4),
+                        "entity_type": entity_type,
+                        "ner_score": round(ner_score, 4),
+                        "geocoder_version": geocoder_version,
+                        "geocoded_at": geocoded_at,
+                    }
+                )
+
+        if mentions:
+            storage.upsert_geo_mentions(mentions)
+            logger.info("Geotagged %d mentions for source %s.", len(mentions), source_id)
+    except Exception as exc:
+        logger.warning("Geotagging failed for %s (ingest unaffected): %s", source_id, exc)
+
+
 def ingest_file_to_storage(
     file_path: str | Path,
     *,
@@ -578,6 +686,7 @@ def ingest_file_to_storage(
     embedding_model: object,
     summarize: bool = False,
     summary_generator: Optional[MlxGenerator] = None,
+    geotag: bool = False,
     page_offset: int = 1,
     tracer: Optional[Any] = None,
 ) -> tuple[int, int]:
@@ -594,6 +703,7 @@ def ingest_file_to_storage(
             "rag.ingest.page_number": page_number,
             "rag.ingest.page_offset": page_offset,
             "rag.ingest.summarize": summarize,
+            "rag.ingest.geotag": geotag,
         },
     ) as ingest_span:
         try:
@@ -669,6 +779,9 @@ def ingest_file_to_storage(
                     except Exception:
                         logger.exception("Rollback delete_source('%s') also failed", source_id)
                     raise
+
+            if geotag:
+                _geotag_chunks(source_id, children, storage)
 
             if summarize:
                 generator = summary_generator
