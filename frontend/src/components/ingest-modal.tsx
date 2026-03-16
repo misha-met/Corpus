@@ -48,7 +48,6 @@ export function IngestModal({
   const [showCitationRefs, setShowCitationRefs] = useState(false);
   const [pageOffset, setPageOffset] = useState(1);
   const [showPageOffset, setShowPageOffset] = useState(false);
-  const [summarize, setSummarize] = useState(true);
   const [geotag, setGeotag] = useState(false);
   const [peopletag, setPeopletag] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
@@ -146,7 +145,7 @@ export function IngestModal({
     const reqs: UploadRequest[] = files.map((file, idx) => ({
       file,
       sourceId: normalizedSourceIds[idx],
-      summarize,
+      summarize: true,
       geotag,
       peopletag,
       citationRef: citationRefs[idx]?.trim() || undefined,
@@ -160,7 +159,6 @@ export function IngestModal({
     sourceIds,
     citationRefs,
     pageOffset,
-    summarize,
     geotag,
     peopletag,
     existingSourceIds,
@@ -432,18 +430,6 @@ export function IngestModal({
               )}
             </div>
           )}
-
-          {/* Summarize checkbox */}
-          <div className="flex items-center gap-2.5">
-            <Checkbox
-              id="ingest-summarize"
-              checked={summarize}
-              onChange={setSummarize}
-            />
-            <label htmlFor="ingest-summarize" className="text-sm text-muted-foreground cursor-pointer">
-              Generate summary during ingest
-            </label>
-          </div>
 
           {/* Geotag checkbox */}
           <div className="flex items-start gap-2.5">
