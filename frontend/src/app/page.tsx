@@ -18,11 +18,12 @@ import { Thread } from "@/components/assistant-ui/thread";
 import { SourcePanel } from "@/components/source-panel";
 import { FreeformChatPanel } from "@/components/freeform-chat-panel";
 import { HistoryPanel } from "@/components/history-panel";
+import { CorpusMap } from "@/components/map/CorpusMap";
 import { useAppDispatch, useAppState } from "@/context/app-context";
 import { parseCustomEvent } from "@/lib/event-parser";
 import type { ChatSession } from "@/lib/session-store";
 import type { FreeChatMessage } from "@/lib/session-store";
-import { Plus, PaletteIcon } from "lucide-react";
+import { Map as MapIcon, PaletteIcon, Plus, X } from "lucide-react";
 import {
   PickerRoot,
   PickerTrigger,
@@ -141,6 +142,18 @@ export default function Page() {
 
   // History panel
   const [showHistory, setShowHistory] = useState(false);
+  const [isMapOpen, setIsMapOpen] = useState(false);
+  const [mapRefreshNonce, setMapRefreshNonce] = useState(0);
+
+  const chromeBg = isMapOpen ? "rgba(0,0,0,0.58)" : panelBg;
+  const chromeBackdrop = isMapOpen ? "blur(16px) saturate(115%)" : panelBackdrop;
+  const chromeBorderColor = isMapOpen ? "rgba(255,255,255,0.14)" : panelBorderColor;
+  const chromeFadeOpacity = isMapOpen ? 0.9 : 0;
+  const mapOverlayTransform = isMapOpen ? "translateY(0px) scale(1)" : "translateY(10px) scale(0.992)";
+  const mapOverlayFilter = isMapOpen ? "blur(0px)" : "blur(1.75px)";
+  const mapScrimOpacity = isMapOpen ? 1 : 0;
+  const mapCardOpacity = isMapOpen ? 1 : 0;
+  const mapCardTransform = isMapOpen ? "translateY(0px) scale(1)" : "translateY(18px) scale(0.972)";
 
   // New chat reset keys
   const [ragKey, setRagKey] = useState(0);
@@ -263,8 +276,7 @@ export default function Page() {
    * Clears the statusMessage and resets the stream-started guard for the
    * next query.
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const handleFinish = useCallback((_message: any) => {
+  const handleFinish = useCallback(() => {
     streamStartedRef.current = false;
     dispatch({ type: "QUERY_FINISHED" });
   }, [dispatch]);
@@ -289,15 +301,25 @@ export default function Page() {
         <header
           className="relative z-30 flex items-center gap-2 px-4 py-2 justify-between w-full shrink-0"
           style={{
-            background: panelBg,
-            borderBottom: `1px solid ${panelBorderColor}`,
+            background: chromeBg,
+            borderBottom: `1px solid ${chromeBorderColor}`,
             boxShadow: "0 2px 8px rgba(0,0,0,0.45), 0 1px 2px rgba(0,0,0,0.35), inset 0 -1px 0 rgba(255,255,255,0.04)",
-            backdropFilter: panelBackdrop,
-            WebkitBackdropFilter: panelBackdrop,
+            backdropFilter: chromeBackdrop,
+            WebkitBackdropFilter: chromeBackdrop,
+            transition: "background 520ms cubic-bezier(0.22,1,0.36,1), border-color 520ms cubic-bezier(0.22,1,0.36,1), backdrop-filter 520ms cubic-bezier(0.22,1,0.36,1)",
             isolation: "isolate",
           }}
         >
-          <div className="flex items-center gap-2">
+          <div
+            className="pointer-events-none absolute inset-0"
+            style={{
+              background: "linear-gradient(180deg, rgba(0,0,0,0.58) 0%, rgba(0,0,0,0.72) 100%)",
+              opacity: chromeFadeOpacity,
+              transition: "opacity 560ms cubic-bezier(0.22,1,0.36,1)",
+            }}
+          />
+
+          <div className="relative z-10 flex items-center gap-2">
             {/* Mode tabs */}
             <button
               onClick={() => dispatch({ type: "SET_CHAT_MODE", mode: "rag" })}
@@ -328,9 +350,22 @@ export default function Page() {
               </svg>
               Non-RAG Mode
             </button>
+
+            <button
+              onClick={() => setIsMapOpen((v) => !v)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
+                isMapOpen
+                  ? "bg-white/15 text-white border border-white/25 shadow-sm"
+                  : "text-white/40 hover:text-white/70 hover:bg-white/8"
+              }`}
+              title="Open map"
+            >
+              <MapIcon className="w-3.5 h-3.5 shrink-0" />
+              Map
+            </button>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="relative z-10 flex items-center gap-2">
             {/* New Chat button */}
             <button
               onClick={handleNewChat}
@@ -387,7 +422,7 @@ export default function Page() {
 
           {/* Left: Source Panel — always mounted, slides in/out via width+opacity */}
           <aside
-            className="shrink-0 overflow-hidden flex flex-col"
+            className="relative shrink-0 overflow-hidden flex flex-col"
             style={{
               width:
                 chatMode !== "rag" ? "0"
@@ -398,35 +433,48 @@ export default function Page() {
                 : isPanelCollapsed ? "2.5rem"
                 : "14rem",
               opacity: chatMode !== "rag" ? 0 : 1,
-              transition: "width 280ms cubic-bezier(0.4,0,0.2,1), min-width 280ms cubic-bezier(0.4,0,0.2,1), opacity 220ms ease",
-              background: panelBg,
-              borderRight: `1px solid ${panelBorderColor}`,
+              transition: "width 280ms cubic-bezier(0.4,0,0.2,1), min-width 280ms cubic-bezier(0.4,0,0.2,1), opacity 240ms ease, background 520ms cubic-bezier(0.22,1,0.36,1), border-color 520ms cubic-bezier(0.22,1,0.36,1), backdrop-filter 520ms cubic-bezier(0.22,1,0.36,1)",
+              background: chromeBg,
+              borderRight: `1px solid ${chromeBorderColor}`,
               boxShadow: "2px 0 8px rgba(0,0,0,0.45), 1px 0 2px rgba(0,0,0,0.35), inset -1px 0 0 rgba(255,255,255,0.04)",
-              backdropFilter: panelBackdrop,
-              WebkitBackdropFilter: panelBackdrop,
+              backdropFilter: chromeBackdrop,
+              WebkitBackdropFilter: chromeBackdrop,
+              willChange: "opacity, background, backdrop-filter",
               isolation: "isolate",
               pointerEvents: chatMode !== "rag" ? "none" : "auto",
             }}
           >
-            {isPanelCollapsed ? (
-              <div className="flex flex-col items-center pt-3">
-                <button
-                  onClick={() => setIsPanelCollapsed(false)}
-                  className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-white/5 rounded transition-colors"
-                  title="Expand sources panel"
-                >
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-                  </svg>
-                </button>
-              </div>
-            ) : (
-              <SourcePanel
-                selectedSourceIds={selectedSourceIds}
-                onSelectedSourceIdsChange={setSelectedSourceIds}
-                onCollapse={() => setIsPanelCollapsed(true)}
-              />
-            )}
+            <div
+              className="pointer-events-none absolute inset-0"
+              style={{
+                background: "linear-gradient(180deg, rgba(0,0,0,0.62) 0%, rgba(0,0,0,0.68) 100%)",
+                opacity: chromeFadeOpacity,
+                transition: "opacity 620ms cubic-bezier(0.22,1,0.36,1)",
+              }}
+            />
+
+            <div className="relative z-10 flex h-full flex-col">
+              {isPanelCollapsed ? (
+                <div className="flex flex-col items-center pt-3">
+                  <button
+                    onClick={() => setIsPanelCollapsed(false)}
+                    className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-white/5 rounded transition-colors"
+                    title="Expand sources panel"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                    </svg>
+                  </button>
+                </div>
+              ) : (
+                <SourcePanel
+                  selectedSourceIds={selectedSourceIds}
+                  onSelectedSourceIdsChange={setSelectedSourceIds}
+                  onCollapse={() => setIsPanelCollapsed(true)}
+                  onSourcesChanged={() => setMapRefreshNonce((n) => n + 1)}
+                />
+              )}
+            </div>
           </aside>
 
           {/* Centre: chat panels — both always mounted, crossfade via opacity */}
@@ -460,6 +508,52 @@ export default function Page() {
                 restoredSessionId={restoredSessionId}
                 restoredMessages={restoredMessages}
               />
+            </div>
+
+            <div
+              className="absolute inset-0 z-20 p-2 sm:p-3 md:p-4"
+              style={{
+                opacity: isMapOpen ? 1 : 0,
+                transform: mapOverlayTransform,
+                filter: mapOverlayFilter,
+                pointerEvents: isMapOpen ? "auto" : "none",
+                transition: "opacity 420ms cubic-bezier(0.22,1,0.36,1), transform 520ms cubic-bezier(0.22,1,0.36,1), filter 420ms ease",
+                willChange: "opacity, transform, filter",
+                transformOrigin: "center center",
+              }}
+            >
+              <div
+                className="pointer-events-none absolute inset-0"
+                style={{
+                  background: "radial-gradient(120% 80% at 50% 50%, rgba(0,0,0,0.30) 0%, rgba(0,0,0,0.62) 70%, rgba(0,0,0,0.78) 100%)",
+                  opacity: mapScrimOpacity,
+                  transition: "opacity 520ms cubic-bezier(0.22,1,0.36,1)",
+                }}
+              />
+
+              <div
+                className="relative h-full w-full"
+                style={{
+                  opacity: mapCardOpacity,
+                  transform: mapCardTransform,
+                  transition: "opacity 460ms cubic-bezier(0.22,1,0.36,1), transform 560ms cubic-bezier(0.22,1,0.36,1)",
+                  willChange: "opacity, transform",
+                }}
+              >
+                <div className="relative h-full w-full overflow-hidden rounded-2xl border border-white/20 bg-black/92 shadow-[0_20px_60px_rgba(0,0,0,0.66),inset_0_1px_0_rgba(255,255,255,0.08)]">
+                  <div className="pointer-events-none absolute inset-x-0 top-0 z-20 h-16 bg-gradient-to-b from-black/65 via-black/30 to-transparent" />
+
+                  <button
+                    onClick={() => setIsMapOpen(false)}
+                    className="absolute top-3 right-3 z-30 p-2 rounded-full bg-black/75 text-white/80 hover:text-white hover:bg-black border border-white/20 shadow-md"
+                    title="Close map"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+
+                  <CorpusMap active={isMapOpen} refreshNonce={mapRefreshNonce} />
+                </div>
+              </div>
             </div>
           </main>
 

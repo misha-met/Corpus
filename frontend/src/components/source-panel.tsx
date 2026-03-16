@@ -14,6 +14,7 @@ interface SourcePanelProps {
   selectedSourceIds: string[];
   onSelectedSourceIdsChange: (ids: string[]) => void;
   onCollapse: () => void;
+  onSourcesChanged?: () => void;
 }
 
 /**
@@ -31,6 +32,7 @@ export function SourcePanel({
   selectedSourceIds,
   onSelectedSourceIdsChange,
   onCollapse,
+  onSourcesChanged,
 }: SourcePanelProps) {
   type IngestState = "ingesting" | "queued";
   type DisplaySource = SourceInfo & { ingestState?: IngestState };
@@ -48,7 +50,7 @@ export function SourcePanel({
   const [isUploading, setIsUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<
     | null
-    | { stage: "uploading"; fileName: string; sourceId: string; queued: number }
+    | { stage: "uploading"; fileName: string; sourceId: string; queued: number; geotag: boolean }
     | { stage: "error"; fileName: string; message: string }
   >(null);
   const uploadDismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -59,6 +61,7 @@ export function SourcePanel({
     try {
       const data = await sourceApi.listSources();
       setSources(data);
+      onSourcesChanged?.();
       // Auto-select all on first load
       if (data.length > 0) {
         onSelectedSourceIdsChange(data.map((s) => s.source_id));
@@ -68,10 +71,11 @@ export function SourcePanel({
     } finally {
       setIsLoading(false);
     }
-  }, [onSelectedSourceIdsChange]);
+  }, [onSelectedSourceIdsChange, onSourcesChanged]);
 
   useEffect(() => {
     fetchSources();
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -110,14 +114,22 @@ export function SourcePanel({
       fileName: current.file.name,
       sourceId: current.sourceId,
       queued: remaining,
+      geotag: current.geotag,
     });
 
     (async () => {
       try {
-        await sourceApi.uploadDocument(current.file, current.sourceId, current.summarize, current.pageOffset);
+        await sourceApi.uploadDocument(
+          current.file,
+          current.sourceId,
+          current.summarize,
+          current.pageOffset,
+          current.geotag,
+        );
         // Refresh the source list after each successful ingest
         const data = await sourceApi.listSources();
         setSources(data);
+        onSourcesChanged?.();
         onSelectedSourceIdsChange(data.map((s) => s.source_id));
         // Briefly highlight + open the new source
         setHighlightSourceId(current.sourceId);
@@ -134,7 +146,7 @@ export function SourcePanel({
         setIsUploading(false);
       }
     })();
-  }, [isUploading, onSelectedSourceIdsChange, uploadQueue]);
+  }, [isUploading, onSelectedSourceIdsChange, onSourcesChanged, uploadQueue]);
 
   useEffect(() => {
     if (!isUploading && uploadQueue.length === 0 && uploadStatus?.stage === "uploading") {
@@ -207,6 +219,7 @@ export function SourcePanel({
       await sourceApi.deleteSource(sourceId);
       deleteCitationMeta(sourceId);
       setSources((prev) => prev.filter((s) => s.source_id !== sourceId));
+      onSourcesChanged?.();
       if (activeSourceId === sourceId) {
         setActiveSourceId(null);
       }
@@ -284,53 +297,54 @@ export function SourcePanel({
         </div>
       </div>
 
-      {/* Add sources button */}
-      <div className="px-4 pt-3 pb-2">
-        <button
-          onClick={() => setShowIngestModal(true)}
-          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm text-white/80 hover:text-white font-medium transition-all"
-          style={{
-            background: "rgba(255,255,255,0.04)",
-            border: "1px solid rgba(255,255,255,0.10)",
-            boxShadow: "0 2px 8px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.04)",
-          }}
-          onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.07)"; }}
-          onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.04)"; }}
-        >
-          <svg
-            className="w-4 h-4"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={2}
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M12 4v16m8-8H4"
-            />
-          </svg>
-          Add sources
-        </button>
-      </div>
+      <div className="flex flex-col flex-1 min-h-0">
+          {/* Add sources button */}
+          <div className="px-4 pt-3 pb-2">
+            <button
+              onClick={() => setShowIngestModal(true)}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm text-white/80 hover:text-white font-medium transition-all"
+              style={{
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid rgba(255,255,255,0.10)",
+                boxShadow: "0 2px 8px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.04)",
+              }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.07)"; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.04)"; }}
+            >
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M12 4v16m8-8H4"
+                />
+              </svg>
+              Add sources
+            </button>
+          </div>
 
-      {/* Select all */}
-      {displaySources.length > 0 && (
-        <div className="px-4 py-2 border-b" style={{ borderColor: "#1e1e1e" }}>
-          <label className="flex items-center gap-2.5 cursor-pointer group" onClick={handleSelectAll}>
-            <Checkbox
-              checked={allSelected}
-              onChange={handleSelectAll}
-            />
-            <span className="text-xs text-muted-foreground group-hover:text-foreground transition-colors">
-              Select all sources
-            </span>
-          </label>
-        </div>
-      )}
+          {/* Select all */}
+          {displaySources.length > 0 && (
+            <div className="px-4 py-2 border-b" style={{ borderColor: "#1e1e1e" }}>
+              <label className="flex items-center gap-2.5 cursor-pointer group" onClick={handleSelectAll}>
+                <Checkbox
+                  checked={allSelected}
+                  onChange={handleSelectAll}
+                />
+                <span className="text-xs text-muted-foreground group-hover:text-foreground transition-colors">
+                  Select all sources
+                </span>
+              </label>
+            </div>
+          )}
 
-      {/* Source list */}
-      <div className="flex-1 overflow-y-auto">
+          {/* Source list */}
+          <div className="flex-1 overflow-y-auto">
         {error && (
           <div className="px-4 py-2 text-xs text-red-400 bg-red-900/20">
             {error}
@@ -365,7 +379,7 @@ export function SourcePanel({
                   Ingesting {uploadStatus.fileName}...
                 </p>
                 <p className="text-xs text-gray-400 mt-0.5">
-                  Chunking, embedding &amp; summarizing
+                  Chunking, embedding &amp; {uploadStatus.geotag ? "geotagging" : "summarizing"}
                   {uploadStatus.queued > 0 ? ` · ${uploadStatus.queued} queued` : ""}
                 </p>
               </div>
@@ -514,12 +528,13 @@ export function SourcePanel({
             );
           })}
         </div>
-      </div>
+          </div>
 
-      {/* Footer */}
-      <div className="px-4 py-2 border-t text-xs text-[#555555]" style={{ borderColor: "#1e1e1e" }}>
-        {displaySources.length} source{displaySources.length !== 1 ? "s" : ""} &middot;{" "}
-        {selectedSourceIds.length} selected
+          {/* Footer */}
+          <div className="px-4 py-2 border-t text-xs text-[#555555]" style={{ borderColor: "#1e1e1e" }}>
+            {displaySources.length} source{displaySources.length !== 1 ? "s" : ""} &middot;{" "}
+            {selectedSourceIds.length} selected
+          </div>
       </div>
 
       {/* Ingest modal */}
