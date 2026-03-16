@@ -385,6 +385,71 @@ def set_retrieval_documents(
             set_span_attribute(span, f"{prefix}.{key}", value, max_text_chars=max_text_chars)
 
 
+def set_llm_input_messages(
+    span: Any,
+    messages: list[dict[str, Any]],
+    *,
+    max_messages: int = 12,
+    max_text_chars: int = 4096,
+) -> None:
+    """Emit flattened OpenInference `llm.input_messages.*` attributes."""
+
+    if span is None:
+        return
+
+    for index, message in enumerate(messages[: max(1, max_messages)]):
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role", "user"))
+        content = str(message.get("content", ""))
+        set_span_attribute(span, f"llm.input_messages.{index}.message.role", role)
+        set_span_attribute(
+            span,
+            f"llm.input_messages.{index}.message.content",
+            content,
+            max_text_chars=max_text_chars,
+        )
+
+
+def set_llm_output_message(
+    span: Any,
+    content: str,
+    *,
+    role: str = "assistant",
+    max_text_chars: int = 4096,
+) -> None:
+    """Emit flattened OpenInference `llm.output_messages.0.*` attributes."""
+
+    if span is None:
+        return
+    set_span_attribute(span, "llm.output_messages.0.message.role", role)
+    set_span_attribute(
+        span,
+        "llm.output_messages.0.message.content",
+        content,
+        max_text_chars=max_text_chars,
+    )
+
+
+def set_llm_token_counts(
+    span: Any,
+    *,
+    prompt_tokens: Optional[int] = None,
+    completion_tokens: Optional[int] = None,
+    total_tokens: Optional[int] = None,
+) -> None:
+    """Emit OpenInference `llm.token_count.*` attributes."""
+
+    if span is None:
+        return
+    if prompt_tokens is not None:
+        set_span_attribute(span, "llm.token_count.prompt", int(prompt_tokens))
+    if completion_tokens is not None:
+        set_span_attribute(span, "llm.token_count.completion", int(completion_tokens))
+    if total_tokens is not None:
+        set_span_attribute(span, "llm.token_count.total", int(total_tokens))
+
+
 @contextmanager
 def start_span(
     tracer: Any,

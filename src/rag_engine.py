@@ -58,6 +58,9 @@ from .phoenix_tracing import (
     PhoenixTracingStatus,
     get_phoenix_tracer,
     mark_span_error,
+    set_llm_input_messages,
+    set_llm_output_message,
+    set_llm_token_counts,
     set_retrieval_documents,
     set_span_attribute,
     set_span_attributes,
@@ -314,6 +317,49 @@ def _build_openinference_retrieval_documents(
             }
         )
     return docs
+
+
+def _estimate_prompt_tokens(
+    *,
+    generator: Any,
+    messages: list[dict[str, str]],
+    enable_thinking: bool,
+) -> int:
+    """Estimate prompt token count using tokenizer chat template when available."""
+
+    tokenizer = getattr(generator, "tokenizer", None)
+    if tokenizer is None:
+        return 0
+
+    prompt_text: Optional[str] = None
+    if hasattr(tokenizer, "apply_chat_template"):
+        try:
+            prompt_text = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=enable_thinking,
+            )
+        except TypeError:
+            try:
+                prompt_text = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            except Exception:
+                prompt_text = None
+        except Exception:
+            prompt_text = None
+
+    if prompt_text is None:
+        prompt_text = "\n\n".join(
+            f"{msg.get('role', 'user')}: {msg.get('content', '')}"
+            for msg in messages
+            if isinstance(msg, dict)
+        )
+
+    return count_tokens(prompt_text, tokenizer)
 
 
 def _check_novel_proper_nouns(output: str, context: str) -> None:
@@ -1116,6 +1162,11 @@ class RagEngine:
                     presence_penalty=classified.generation_params.presence_penalty,
                     repetition_penalty=classified.generation_params.repetition_penalty if classified.generation_params.repetition_penalty != 1.0 else None,
                 )
+                prompt_token_count = _estimate_prompt_tokens(
+                    generator=generator,
+                    messages=messages,
+                    enable_thinking=False,
+                )
 
                 self._on_status("Generating answer...")
                 with start_span(
@@ -1123,6 +1174,8 @@ class RagEngine:
                     "rag.llm.generate",
                     span_kind=SPAN_KIND_LLM,
                     attributes={
+                        "input.mime_type": "text/plain",
+                        "input.value": query_text,
                         "rag.intent": intent_result.intent.value,
                         "llm.model_name": (self._cfg.model or config.llm_model),
                         "llm.invocation_parameters": to_json(
@@ -1134,6 +1187,7 @@ class RagEngine:
                                 "context_window": gen_config.context_window,
                             }
                         ),
+                        "llm.token_count.prompt": prompt_token_count,
                         "llm.temperature": gen_config.temperature,
                         "llm.top_p": gen_config.top_p,
                         "llm.top_k": gen_config.top_k,
@@ -1143,19 +1197,26 @@ class RagEngine:
                     },
                 ) as generation_span:
                     try:
+                        set_llm_input_messages(generation_span, messages)
                         with profiler.span("LLM generation"):
                             raw_answer = generator.generate_chat(
                                 messages,
                                 config=gen_config,
                             )
-                        _gen_tokens = count_tokens(raw_answer, generator.tokenizer)
+                        completion_token_count = count_tokens(raw_answer, generator.tokenizer)
+                        total_token_count = prompt_token_count + completion_token_count
+                        set_llm_output_message(generation_span, raw_answer)
+                        set_llm_token_counts(
+                            generation_span,
+                            prompt_tokens=prompt_token_count,
+                            completion_tokens=completion_token_count,
+                            total_tokens=total_token_count,
+                        )
                         set_span_attributes(
                             generation_span,
                             {
                                 "output.value": raw_answer,
                                 "output.mime_type": "text/plain",
-                                "llm.token_count.completion": _gen_tokens,
-                                "llm.token_count.total": _gen_tokens,
                                 "rag.output_chars": len(raw_answer),
                             },
                         )
@@ -1168,7 +1229,7 @@ class RagEngine:
                     intent_result.intent.value,
                     classified.generation_params.temperature,
                     classified.generation_params.top_p,
-                    _gen_tokens,
+                    completion_token_count,
                 )
 
                 with profiler.span("Output sanitisation"):
@@ -1185,7 +1246,9 @@ class RagEngine:
                         "rag.context_chars": len(packed.context),
                         "rag.answer_chars": len(answer),
                         "rag.output_chars": len(raw_answer),
-                        "llm.token_count.total": _gen_tokens,
+                        "llm.token_count.prompt": prompt_token_count,
+                        "llm.token_count.completion": completion_token_count,
+                        "llm.token_count.total": total_token_count,
                         "rag.latency_wall_ms": profiler.wall_ms,
                         "output.mime_type": "text/plain",
                         "output.value": answer,
@@ -1248,6 +1311,7 @@ class RagEngine:
         _stop = should_stop or (lambda: False)
         stream_request_id = f"str-{uuid.uuid4().hex[:12]}"
         finish_reason = "error"
+        prompt_tokens = 0
         completion_tokens = 0
 
         with start_span(
@@ -1277,6 +1341,7 @@ class RagEngine:
                 ):
                     if isinstance(event, FinishEvent):
                         finish_reason = event.finish_reason
+                        prompt_tokens = event.prompt_tokens
                         completion_tokens = event.completion_tokens
                     yield event
 
@@ -1286,7 +1351,9 @@ class RagEngine:
                         "rag.finish_reason": finish_reason,
                         "output.mime_type": "text/plain",
                         "output.value": f"stream finished: {finish_reason}",
+                        "llm.token_count.prompt": prompt_tokens,
                         "llm.token_count.completion": completion_tokens,
+                        "llm.token_count.total": (prompt_tokens + completion_tokens),
                     },
                 )
             except Exception as exc:
@@ -1307,7 +1374,9 @@ class RagEngine:
                         "rag.finish_reason": "error",
                         "output.mime_type": "text/plain",
                         "output.value": "stream finished: error",
+                        "llm.token_count.prompt": prompt_tokens,
                         "llm.token_count.completion": completion_tokens,
+                        "llm.token_count.total": (prompt_tokens + completion_tokens),
                     },
                 )
 
@@ -1580,15 +1649,23 @@ class RagEngine:
             presence_penalty=gen_params.presence_penalty,
             repetition_penalty=gen_params.repetition_penalty if gen_params.repetition_penalty != 1.0 else None,
         )
+        prompt_token_count = _estimate_prompt_tokens(
+            generator=generator,
+            messages=messages,
+            enable_thinking=gen_params.enable_thinking,
+        )
         yield StatusEvent(status="Generating answer...")
-        token_count = 0
+        chunk_event_count = 0
         answer_tokens: list[str] = []
+        thinking_tokens: list[str] = []
 
         with start_span(
             self._tracer,
             "rag.llm.generate.stream",
             span_kind=SPAN_KIND_LLM,
             attributes={
+                "input.mime_type": "text/plain",
+                "input.value": query_text,
                 "rag.intent": intent_result.intent.value,
                 "llm.model_name": (self._cfg.model or config.llm_model),
                 "llm.invocation_parameters": to_json(
@@ -1602,6 +1679,7 @@ class RagEngine:
                         "enable_thinking": gen_params.enable_thinking,
                     }
                 ),
+                "llm.token_count.prompt": prompt_token_count,
                 "rag.thinking_enabled": gen_params.enable_thinking,
                 "llm.temperature": gen_config.temperature,
                 "llm.top_p": gen_config.top_p,
@@ -1612,6 +1690,7 @@ class RagEngine:
                 "llm.input_chars": stream_prompt_chars,
             },
         ) as generation_span:
+            set_llm_input_messages(generation_span, messages)
             if gen_params.enable_thinking:
                 thinking_budget_exhausted = False
                 for event in generator.stream_chat_with_thinking(
@@ -1624,11 +1703,12 @@ class RagEngine:
                         yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled during generation")
                         yield FinishEvent(finish_reason="error")
                         return
-                    token_count += 1
+                    chunk_event_count += 1
                     if event["type"] == "answer":
                         answer_tokens.append(event["text"])
                         yield TextTokenEvent(token=event["text"])
                     elif event["type"] == "thinking":
+                        thinking_tokens.append(event["text"])
                         yield ThinkingTokenEvent(token=event["text"])
                     elif event["type"] == "error" and event.get("text") == "THINKING_BUDGET_EXHAUSTED":
                         thinking_budget_exhausted = True
@@ -1651,18 +1731,36 @@ class RagEngine:
                         yield ErrorEvent(code="STREAM_CANCELLED", message="Cancelled during generation")
                         yield FinishEvent(finish_reason="error")
                         return
-                    token_count += 1
+                    chunk_event_count += 1
                     answer_tokens.append(token)
                     yield TextTokenEvent(token=token)
+
+            answer_text = "".join(answer_tokens)
+            completion_token_count = count_tokens(answer_text, generator.tokenizer)
+            total_token_count = prompt_token_count + completion_token_count
+            set_llm_output_message(generation_span, answer_text)
+            set_llm_token_counts(
+                generation_span,
+                prompt_tokens=prompt_token_count,
+                completion_tokens=completion_token_count,
+                total_tokens=total_token_count,
+            )
+
+            thinking_token_count = (
+                count_tokens("".join(thinking_tokens), generator.tokenizer)
+                if thinking_tokens
+                else 0
+            )
 
             set_span_attributes(
                 generation_span,
                 {
-                    "output.value": "".join(answer_tokens),
+                    "output.value": answer_text,
                     "output.mime_type": "text/plain",
-                    "llm.token_count.completion": token_count,
-                    "llm.token_count.total": token_count,
-                    "rag.output_chars": len("".join(answer_tokens)),
+                    "rag.output_chars": len(answer_text),
+                    "rag.thinking_chars": len("".join(thinking_tokens)),
+                    "rag.thinking_token_count": thinking_token_count,
+                    "rag.stream.chunk_events": chunk_event_count,
                 },
             )
 
@@ -1674,12 +1772,13 @@ class RagEngine:
             gen_params.temperature,
             gen_params.top_p,
             gen_params.enable_thinking,
-            token_count,
+            completion_token_count,
         )
 
         yield FinishEvent(
             finish_reason="stop",
-            completion_tokens=token_count,
+            prompt_tokens=prompt_token_count,
+            completion_tokens=completion_token_count,
         )
 
     # -- shared pipeline step methods --------------------------------------
