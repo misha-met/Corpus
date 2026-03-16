@@ -449,9 +449,9 @@ export function IngestModal({
               onChange={setGeotag}
             />
             <label htmlFor="ingest-geotag" className="text-sm text-muted-foreground cursor-pointer">
-              <p>Index location mentions (map)</p>
+              <p>Index locations</p>
               <p className="text-[11px] text-(--muted-foreground)/70">
-                Runs place NER + geocoding during ingest to populate the Map tab.
+                Runs place NER + geocoding
               </p>
             </label>
           </div>

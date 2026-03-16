@@ -292,6 +292,7 @@ class SourceApiClient {
     limit: number = 1000,
     offset: number = 0,
     detailed: boolean = true,
+    sourceIds?: string[],
   ): Promise<GeoMentionsResponse> {
     const params = new URLSearchParams({
       min_confidence: String(minConfidence),
@@ -301,6 +302,20 @@ class SourceApiClient {
     });
     if (sourceId) {
       params.set("source_id", sourceId);
+    }
+    if (sourceIds !== undefined) {
+      if (sourceIds.length === 0) {
+        // Preserve explicit-empty contract for backend filtering.
+        params.append("source_ids", "");
+      } else {
+        const seen = new Set<string>();
+        for (const raw of sourceIds) {
+          const sid = String(raw).trim();
+          if (!sid || seen.has(sid)) continue;
+          seen.add(sid);
+          params.append("source_ids", sid);
+        }
+      }
     }
 
     const res = await fetch(`${this.baseUrl}/geo/mentions?${params.toString()}`);

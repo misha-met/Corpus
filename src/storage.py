@@ -52,11 +52,20 @@ class StorageEngine:
         pa.field("chunk_id", pa.string()),
         pa.field("place_name", pa.string()),
         pa.field("matched_input", pa.string()),
+        pa.field("matched_on", pa.string()),
         pa.field("geonameid", pa.int64()),
         pa.field("lat", pa.float64()),
         pa.field("lon", pa.float64()),
         pa.field("confidence", pa.float64()),
         pa.field("method", pa.string()),
+        pa.field("raw_score", pa.float64()),
+        pa.field("is_ambiguous", pa.bool_()),
+        pa.field("candidate_count", pa.int32()),
+        pa.field("margin_score", pa.float64()),
+        pa.field("entity_type", pa.string()),
+        pa.field("ner_score", pa.float64()),
+        pa.field("geocoder_version", pa.string()),
+        pa.field("geocoded_at", pa.float64()),
     ])
 
     def __init__(self, config: StorageConfig) -> None:
@@ -102,8 +111,11 @@ class StorageEngine:
 
         # --- geo mentions (no vectors) ---
         self._geo_mentions: Optional[lancedb.table.Table] = None
+        self._geo_mentions_indexes_ready = False
         try:
             self._geo_mentions = self._db.open_table(self._GEO_MENTIONS_TABLE)
+            self._migrate_geo_mentions_schema()
+            self._ensure_geo_mentions_indexes()
         except ValueError:
             pass  # Table does not exist yet
 
@@ -180,6 +192,40 @@ class StorageEngine:
             self._SUMMARIES_TABLE,
             [f.name for f in missing],
         )
+
+    def _migrate_geo_mentions_schema(self) -> None:
+        """Ensure geo_mentions includes all diagnostic columns."""
+        if self._geo_mentions is None:
+            return
+        existing = set(self._geo_mentions.schema.names)
+        missing = [field for field in self._GEO_MENTIONS_SCHEMA if field.name not in existing]
+        if not missing:
+            return
+        self._geo_mentions.add_columns(missing)
+        self._geo_mentions = self._db.open_table(self._GEO_MENTIONS_TABLE)
+        self._geo_mentions_indexes_ready = False
+        logger.info(
+            "Migrated '%s' table: added columns %s",
+            self._GEO_MENTIONS_TABLE,
+            [f.name for f in missing],
+        )
+
+    def _ensure_geo_mentions_indexes(self) -> None:
+        """Best-effort scalar indexes for common geo mention filters."""
+        if self._geo_mentions is None or self._geo_mentions_indexes_ready:
+            return
+        for column in ("source_id", "confidence", "geonameid"):
+            try:
+                self._geo_mentions.create_scalar_index(column)
+            except TypeError:
+                # Older LanceDB signatures use keyword arguments.
+                try:
+                    self._geo_mentions.create_scalar_index(column, replace=False)
+                except Exception as exc:
+                    logger.debug("Skipping geo_mentions index for %s: %s", column, exc)
+            except Exception as exc:
+                logger.debug("Skipping geo_mentions index for %s: %s", column, exc)
+            self._geo_mentions_indexes_ready = True
 
     @staticmethod
     def _escape_sql_literal(value: str) -> str:
@@ -760,6 +806,8 @@ class StorageEngine:
 
     def _ensure_geo_mentions_table(self) -> Optional[lancedb.table.Table]:
         if self._geo_mentions is not None:
+            self._migrate_geo_mentions_schema()
+            self._ensure_geo_mentions_indexes()
             return self._geo_mentions
         try:
             self._geo_mentions = self._db.create_table(
@@ -767,9 +815,12 @@ class StorageEngine:
                 schema=self._GEO_MENTIONS_SCHEMA,
                 exist_ok=True,
             )
+            self._geo_mentions_indexes_ready = False
         except Exception as exc:
             logger.error("Failed to create/open '%s': %s", self._GEO_MENTIONS_TABLE, exc)
             return None
+        self._migrate_geo_mentions_schema()
+        self._ensure_geo_mentions_indexes()
         return self._geo_mentions
 
     def upsert_geo_mentions(self, mentions: list[dict]) -> None:
@@ -787,6 +838,7 @@ class StorageEngine:
             chunk_id = str(row.get("chunk_id", "")).strip()
             place_name = str(row.get("place_name", "")).strip()
             matched_input = str(row.get("matched_input", "")).strip()
+            matched_on = str(row.get("matched_on", "")).strip()
             method = str(row.get("method", "")).strip()
             if not mention_id or not source_id or not chunk_id or not place_name:
                 continue
@@ -798,6 +850,57 @@ class StorageEngine:
             except (TypeError, ValueError):
                 continue
 
+            raw_score = row.get("raw_score")
+            raw_score_value: float | None
+            if raw_score is None:
+                raw_score_value = None
+            else:
+                try:
+                    raw_score_value = float(raw_score)
+                except (TypeError, ValueError):
+                    raw_score_value = None
+
+            margin_score = row.get("margin_score")
+            margin_score_value: float | None
+            if margin_score is None:
+                margin_score_value = None
+            else:
+                try:
+                    margin_score_value = float(margin_score)
+                except (TypeError, ValueError):
+                    margin_score_value = None
+
+            ner_score = row.get("ner_score")
+            ner_score_value: float | None
+            if ner_score is None:
+                ner_score_value = None
+            else:
+                try:
+                    ner_score_value = float(ner_score)
+                except (TypeError, ValueError):
+                    ner_score_value = None
+
+            geocoded_at = row.get("geocoded_at")
+            geocoded_at_value: float | None
+            if geocoded_at is None:
+                geocoded_at_value = None
+            else:
+                try:
+                    geocoded_at_value = float(geocoded_at)
+                except (TypeError, ValueError):
+                    geocoded_at_value = None
+
+            candidate_count = row.get("candidate_count")
+            try:
+                candidate_count_value = max(1, int(candidate_count if candidate_count is not None else 1))
+            except (TypeError, ValueError):
+                candidate_count_value = 1
+
+            entity_type = row.get("entity_type")
+            entity_type_value = str(entity_type).strip() if entity_type is not None else ""
+            geocoder_version = row.get("geocoder_version")
+            geocoder_version_value = str(geocoder_version).strip() if geocoder_version is not None else ""
+
             records.append(
                 {
                     "id": mention_id,
@@ -805,11 +908,20 @@ class StorageEngine:
                     "chunk_id": chunk_id,
                     "place_name": place_name,
                     "matched_input": matched_input,
+                    "matched_on": matched_on,
                     "geonameid": geonameid,
                     "lat": lat,
                     "lon": lon,
                     "confidence": confidence,
                     "method": method,
+                    "raw_score": raw_score_value,
+                    "is_ambiguous": bool(row.get("is_ambiguous", False)),
+                    "candidate_count": candidate_count_value,
+                    "margin_score": margin_score_value,
+                    "entity_type": entity_type_value or None,
+                    "ner_score": ner_score_value,
+                    "geocoder_version": geocoder_version_value or None,
+                    "geocoded_at": geocoded_at_value,
                 }
             )
 
@@ -828,11 +940,12 @@ class StorageEngine:
     def get_geo_mentions(
         self,
         source_id: str | None = None,
+        source_ids: Optional[list[str]] = None,
         min_confidence: float = 0.0,
         limit: int = 1000,
         offset: int = 0,
     ) -> list[dict]:
-        """Return mentions, optionally filtered by source and confidence floor."""
+        """Return mentions filtered by confidence and optional source_id/source_ids union."""
         try:
             normalized_min_confidence = float(min_confidence)
         except (TypeError, ValueError):
@@ -846,17 +959,38 @@ class StorageEngine:
         if offset < 0:
             raise ValueError("offset must be >= 0.")
 
+        normalized_single = source_id.strip() if isinstance(source_id, str) else ""
+        normalized_sources: list[str] = []
+        if source_ids is not None:
+            for raw in source_ids:
+                if raw is None:
+                    continue
+                sid = str(raw).strip()
+                if sid and sid not in normalized_sources:
+                    normalized_sources.append(sid)
+
+        if normalized_single and normalized_single not in normalized_sources:
+            normalized_sources.append(normalized_single)
+
+        if source_ids is not None and not normalized_sources and not normalized_single:
+            return []
+
         table = self._geo_mentions
         if table is None:
             try:
                 table = self._db.open_table(self._GEO_MENTIONS_TABLE)
                 self._geo_mentions = table
+                self._geo_mentions_indexes_ready = False
+                self._migrate_geo_mentions_schema()
+                self._ensure_geo_mentions_indexes()
             except ValueError:
                 return []
 
         where_parts = [f"confidence >= {normalized_min_confidence}"]
-        if source_id:
-            where_parts.append(self._where_eq("source_id", source_id))
+        if normalized_sources:
+            where_parts.append(self._where_in("source_id", normalized_sources))
+        elif normalized_single:
+            where_parts.append(self._where_eq("source_id", normalized_single))
         where = " AND ".join(f"({part})" for part in where_parts)
 
         rows = (
@@ -868,11 +1002,20 @@ class StorageEngine:
                 "chunk_id",
                 "place_name",
                 "matched_input",
+                "matched_on",
                 "geonameid",
                 "lat",
                 "lon",
                 "confidence",
                 "method",
+                "raw_score",
+                "is_ambiguous",
+                "candidate_count",
+                "margin_score",
+                "entity_type",
+                "ner_score",
+                "geocoder_version",
+                "geocoded_at",
             ])
             .offset(offset)
             .limit(limit)
@@ -885,11 +1028,20 @@ class StorageEngine:
                 "chunk_id": str(row.get("chunk_id", "")),
                 "place_name": str(row.get("place_name", "")),
                 "matched_input": str(row.get("matched_input", "")),
+                "matched_on": str(row.get("matched_on", "")),
                 "geonameid": int(row.get("geonameid")),
                 "lat": float(row.get("lat")),
                 "lon": float(row.get("lon")),
                 "confidence": float(row.get("confidence")),
                 "method": str(row.get("method", "")),
+                "raw_score": float(row.get("raw_score")) if row.get("raw_score") is not None else None,
+                "is_ambiguous": bool(row.get("is_ambiguous", False)),
+                "candidate_count": int(row.get("candidate_count")) if row.get("candidate_count") is not None else None,
+                "margin_score": float(row.get("margin_score")) if row.get("margin_score") is not None else None,
+                "entity_type": str(row.get("entity_type", "")) if row.get("entity_type") is not None else None,
+                "ner_score": float(row.get("ner_score")) if row.get("ner_score") is not None else None,
+                "geocoder_version": str(row.get("geocoder_version", "")) if row.get("geocoder_version") is not None else None,
+                "geocoded_at": float(row.get("geocoded_at")) if row.get("geocoded_at") is not None else None,
             }
             for row in rows
             if row.get("id") is not None

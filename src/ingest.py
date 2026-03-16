@@ -576,10 +576,16 @@ def _geotag_chunks(
 ) -> None:
     """Extract place mentions with NER, geocode, and store grouped mention rows."""
     try:
+        import time
         import uuid
 
+        from .config import (
+            GEOTAG_FUZZY_THRESHOLD,
+            GEOTAG_MIN_CONFIDENCE,
+            GEOTAG_NER_CONTEXT_WINDOW,
+        )
         from .geocoder import get_geocoder
-        from .ner import extract_places_ner
+        from .ner import extract_place_candidates_ner
 
         geocoder = get_geocoder()
         if not geocoder.is_available():
@@ -589,24 +595,57 @@ def _geotag_chunks(
             logger.warning("Geocoder unavailable after warm attempt — skipping geotagging for %s", source_id)
             return
 
+        status = geocoder.status()
+        version_info = status.get("version_info") if isinstance(status, dict) else None
+        geocoder_version = "unknown"
+        if isinstance(version_info, dict):
+            geocoder_version = str(version_info.get("checksum") or version_info.get("build_timestamp") or "unknown")
+
         texts = [chunk.text for chunk in child_chunks]
-        ner_lists = extract_places_ner(texts)
+        ner_lists = extract_place_candidates_ner(
+            texts,
+            context_window_words=GEOTAG_NER_CONTEXT_WINDOW,
+        )
+        geocoded_at = time.time()
 
         mentions: list[dict] = []
         seen: set[tuple[int, str]] = set()
 
         for chunk, place_candidates in zip(child_chunks, ner_lists):
             for candidate in place_candidates:
-                normalized = candidate.strip()
+                normalized = str(candidate.get("text", "")).strip()
                 if not normalized:
                     continue
-                match = geocoder.forward(normalized, threshold=75)
+
+                context_words = tuple(
+                    word.strip()
+                    for word in candidate.get("context_words", [])
+                    if isinstance(word, str) and word.strip()
+                )
+                entity_type_raw = candidate.get("entity_type")
+                entity_type = str(entity_type_raw).upper().strip() if entity_type_raw else None
+
+                match = geocoder.forward(
+                    normalized,
+                    threshold=GEOTAG_FUZZY_THRESHOLD,
+                    context_words=context_words,
+                    entity_type=entity_type,
+                )
                 if match is None:
+                    continue
+                if match.confidence < GEOTAG_MIN_CONFIDENCE:
                     continue
                 key = (match.place.geonameid, chunk.id)
                 if key in seen:
                     continue
                 seen.add(key)
+
+                ner_score_raw = candidate.get("score", 0.0)
+                try:
+                    ner_score = float(ner_score_raw)
+                except (TypeError, ValueError):
+                    ner_score = 0.0
+
                 mentions.append(
                     {
                         "id": str(uuid.uuid4()),
@@ -619,6 +658,15 @@ def _geotag_chunks(
                         "lon": match.place.lon,
                         "confidence": round(match.confidence, 4),
                         "method": match.method.value,
+                        "matched_on": match.matched_on,
+                        "raw_score": round(float(match.score), 4),
+                        "is_ambiguous": bool(match.ambiguous),
+                        "candidate_count": int(match.candidate_count),
+                        "margin_score": None if match.margin_score is None else round(float(match.margin_score), 4),
+                        "entity_type": entity_type,
+                        "ner_score": round(ner_score, 4),
+                        "geocoder_version": geocoder_version,
+                        "geocoded_at": geocoded_at,
                     }
                 )
 

@@ -40,6 +40,14 @@ import { DarkVeilBackground } from "@/components/ui/dark-veil";
 import { Leva } from "leva";
 import { useTheme, type BackgroundTheme } from "@/context/theme-context";
 
+const MAP_THRESHOLD_STORAGE_KEY = "dh-map-threshold-v1";
+const DEFAULT_MAP_THRESHOLD = 0.75;
+
+function clampMapThreshold(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_MAP_THRESHOLD;
+  return Math.max(0.5, Math.min(0.99, value));
+}
+
 function MessageIdTracker() {
   const dispatch = useAppDispatch();
   const lastAssistantMessageId = useAuiState((s) => {
@@ -139,11 +147,30 @@ export default function Page() {
 
   // Source IDs selected in the panel (passed down for UI checkbox state)
   const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([]);
+  const [mapThreshold, setMapThreshold] = useState<number>(DEFAULT_MAP_THRESHOLD);
+  const [isMapThresholdHydrated, setIsMapThresholdHydrated] = useState(false);
 
   // History panel
   const [showHistory, setShowHistory] = useState(false);
   const [isMapOpen, setIsMapOpen] = useState(false);
   const [mapRefreshNonce, setMapRefreshNonce] = useState(0);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem(MAP_THRESHOLD_STORAGE_KEY);
+      if (raw) {
+        setMapThreshold(clampMapThreshold(Number(raw)));
+      }
+    } finally {
+      setIsMapThresholdHydrated(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !isMapThresholdHydrated) return;
+    window.localStorage.setItem(MAP_THRESHOLD_STORAGE_KEY, String(mapThreshold));
+  }, [mapThreshold, isMapThresholdHydrated]);
 
   const chromeBg = isMapOpen ? "rgba(0,0,0,0.58)" : panelBg;
   const chromeBackdrop = isMapOpen ? "blur(16px) saturate(115%)" : panelBackdrop;
@@ -544,6 +571,24 @@ export default function Page() {
                 <div className="relative h-full w-full overflow-hidden rounded-2xl border border-white/20 bg-black/92 shadow-[0_20px_60px_rgba(0,0,0,0.66),inset_0_1px_0_rgba(255,255,255,0.08)]">
                   <div className="pointer-events-none absolute inset-x-0 top-0 z-20 h-16 bg-gradient-to-b from-black/65 via-black/30 to-transparent" />
 
+                  <div className="absolute top-3 left-3 z-30 w-[min(78vw,18rem)] rounded-xl border border-white/20 bg-black/72 px-3 py-2.5 text-white shadow-lg backdrop-blur-md">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-white/75">Map confidence</p>
+                    <input
+                      type="range"
+                      min={0.5}
+                      max={0.99}
+                      step={0.01}
+                      value={mapThreshold}
+                      onChange={(event) => setMapThreshold(clampMapThreshold(Number(event.target.value)))}
+                      className="mt-2 w-full accent-amber-400"
+                      aria-label="Map confidence threshold"
+                    />
+                    <div className="mt-1.5 flex items-center justify-between text-[11px] text-white/70">
+                      <span>{Math.round(mapThreshold * 100)}% minimum</span>
+                      <span>{selectedSourceIds.length} sources</span>
+                    </div>
+                  </div>
+
                   <button
                     onClick={() => setIsMapOpen(false)}
                     className="absolute top-3 right-3 z-30 p-2 rounded-full bg-black/75 text-white/80 hover:text-white hover:bg-black border border-white/20 shadow-md"
@@ -552,7 +597,12 @@ export default function Page() {
                     <X className="w-4 h-4" />
                   </button>
 
-                  <CorpusMap active={isMapOpen} refreshNonce={mapRefreshNonce} />
+                  <CorpusMap
+                    active={isMapOpen}
+                    refreshNonce={mapRefreshNonce}
+                    threshold={mapThreshold}
+                    sourceIds={selectedSourceIds}
+                  />
                 </div>
               </div>
             </div>

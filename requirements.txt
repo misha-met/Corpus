@@ -29,6 +29,7 @@ av==16.1.0          # robust WebM/OGG/Opus decode fallback (PyAV)
 
 # Offline geocoding (GeoNames alias matching)
 rapidfuzz==3.14.3
+pycountry==24.6.1
 
 # Offline ingest-time NER geotagging
 gliner>=0.2.5

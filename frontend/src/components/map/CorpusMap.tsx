@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Globe, Trash2 } from "lucide-react";
 import { Map, Layer, Popup, Source } from "@vis.gl/react-maplibre";
 import type { MapRef, MapLayerMouseEvent } from "@vis.gl/react-maplibre";
@@ -60,81 +61,151 @@ const CLUSTER_COUNT_LAYER: LayerSpecification = {
   paint: { "text-color": "#ffffff" },
 };
 
-const UNCLUSTERED_LAYER: LayerSpecification = {
-  id: "unclustered",
-  source: "geo-mentions",
-  type: "circle",
-  filter: ["!", ["has", "point_count"]],
-  paint: {
-    "circle-color": ["interpolate", ["linear"], ["get", "max_confidence"], 0.75, "#f59e0b", 0.92, "#3b82f6"],
-    "circle-opacity": ["interpolate", ["linear"], ["get", "max_confidence"], 0.75, 0.45, 0.92, 1.0],
-    "circle-radius": 7,
-    "circle-stroke-width": 1,
-    "circle-stroke-color": "#ffffff",
-  },
-};
-
 const DARK_MAP_STYLE = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
 
 interface CorpusMapProps {
   onCountChange?: (count: number) => void;
   active?: boolean;
   refreshNonce?: number;
+  threshold: number;
+  sourceIds: string[];
+}
+
+function filterMentionsBySources(
+  payload: GeoMentionsResponse,
+  sourceIds: string[],
+): GeoMentionsResponse {
+  if (sourceIds.length === 0) {
+    return { count: 0, mentions: [] };
+  }
+
+  const allowed = new Set(sourceIds);
+  const mentions: GeoMentionGroup[] = [];
+
+  for (const group of payload.mentions) {
+    const details = (group.mentions ?? []).filter((mention) => allowed.has(mention.source_id));
+    if (details.length === 0) {
+      continue;
+    }
+
+    const sourceSet = new Set<string>();
+    const chunkSet = new Set<string>();
+    const matchedSet = new Set<string>();
+    const mentionIds: string[] = [];
+    let maxConfidence = 0;
+
+    for (const detail of details) {
+      sourceSet.add(detail.source_id);
+      chunkSet.add(detail.chunk_id);
+      matchedSet.add(detail.matched_input);
+      mentionIds.push(detail.id);
+      maxConfidence = Math.max(maxConfidence, detail.confidence);
+    }
+
+    mentions.push({
+      ...group,
+      mention_count: details.length,
+      max_confidence: maxConfidence,
+      source_ids: Array.from(sourceSet),
+      chunk_ids: Array.from(chunkSet),
+      matched_inputs: Array.from(matchedSet),
+      mention_ids: mentionIds,
+      mentions: details,
+    });
+  }
+
+  return {
+    count: mentions.length,
+    mentions,
+  };
 }
 
 export function CorpusMap({
   onCountChange,
   active = true,
   refreshNonce = 0,
+  threshold,
+  sourceIds,
 }: CorpusMapProps) {
   const dispatch = useAppDispatch();
+  const queryClient = useQueryClient();
   const mapRef = useRef<MapRef | null>(null);
   const hasFitBounds = useRef(false);
 
-  const [data, setData] = useState<GeoMentionsResponse>({ count: 0, mentions: [] });
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [hoverPopup, setHoverPopup] = useState<HoverPopup | null>(null);
   const [selectedGroup, setSelectedGroup] = useState<GeoMentionGroup | null>(null);
   const [deletingMentionId, setDeletingMentionId] = useState<string | null>(null);
 
-  const loadMentions = useCallback(async (): Promise<GeoMentionsResponse> => {
-    const res = await sourceApi.getGeoMentions(undefined, 0.75);
-    setData(res);
-    onCountChange?.(res.count);
-    return res;
-  }, [onCountChange]);
+  const normalizedSourceIds = useMemo(() => {
+    const seen = new Set<string>();
+    const ids: string[] = [];
+    for (const raw of sourceIds) {
+      const sid = String(raw).trim();
+      if (!sid || seen.has(sid)) continue;
+      seen.add(sid);
+      ids.push(sid);
+    }
+    return ids;
+  }, [sourceIds]);
+
+  const queryKey = useMemo(
+    () => ["geo-mentions", Number(threshold.toFixed(2)), normalizedSourceIds, refreshNonce] as const,
+    [threshold, normalizedSourceIds, refreshNonce],
+  );
+
+  const fetchMentions = useCallback(async (): Promise<GeoMentionsResponse> => {
+    return sourceApi.getGeoMentions(undefined, threshold, 1000, 0, true, normalizedSourceIds);
+  }, [threshold, normalizedSourceIds]);
+
+  const mentionsQuery = useQuery<GeoMentionsResponse>({
+    queryKey,
+    queryFn: fetchMentions,
+    enabled: active && normalizedSourceIds.length > 0,
+  });
+
+  const data = useMemo(() => {
+    const payload = mentionsQuery.data ?? { count: 0, mentions: [] };
+    return filterMentionsBySources(payload, normalizedSourceIds);
+  }, [mentionsQuery.data, normalizedSourceIds]);
+  const isLoading = mentionsQuery.isLoading || mentionsQuery.isFetching;
+  const error = actionError ?? (mentionsQuery.error instanceof Error ? mentionsQuery.error.message : null);
+
+  const confidenceHighStop = useMemo(() => Math.min(1.0, threshold + 0.17), [threshold]);
+  const unclusteredLayer = useMemo<LayerSpecification>(
+    () => ({
+      id: "unclustered",
+      source: "geo-mentions",
+      type: "circle",
+      filter: ["!", ["has", "point_count"]],
+      paint: {
+        "circle-color": ["interpolate", ["linear"], ["get", "max_confidence"], threshold, "#f59e0b", confidenceHighStop, "#3b82f6"],
+        "circle-opacity": ["interpolate", ["linear"], ["get", "max_confidence"], threshold, 0.45, confidenceHighStop, 1.0],
+        "circle-radius": 7,
+        "circle-stroke-width": 1,
+        "circle-stroke-color": "#ffffff",
+      },
+    }),
+    [confidenceHighStop, threshold],
+  );
 
   useEffect(() => {
-    if (!active) {
-      return;
+    setActionError(null);
+  }, [queryKey]);
+
+  useEffect(() => {
+    if (!active || normalizedSourceIds.length === 0) {
+      setHoverPopup(null);
+      setSelectedGroup(null);
     }
+  }, [active, normalizedSourceIds.length]);
 
-    let cancelled = false;
-    setSelectedGroup(null);
-    setHoverPopup(null);
-    setIsLoading(true);
-    setError(null);
-
-    loadMentions()
-      .catch((err) => {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to load geocoded mentions");
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setIsLoading(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [active, loadMentions, refreshNonce]);
+  useEffect(() => {
+    onCountChange?.(data.count);
+  }, [data.count, onCountChange]);
 
   const geojson = useMemo<FeatureCollection<Point, GeoFeatureProperties>>(() => {
-    const features: Array<Feature<Point, GeoFeatureProperties>> = data.mentions.map((group) => ({
+    const features: Array<Feature<Point, GeoFeatureProperties>> = data.mentions.map((group: GeoMentionGroup) => ({
       type: "Feature",
       geometry: {
         type: "Point",
@@ -163,7 +234,7 @@ export function CorpusMap({
     if (!selectedGroup) {
       return;
     }
-    const next = data.mentions.find((item) => item.geonameid === selectedGroup.geonameid) ?? null;
+    const next = data.mentions.find((item: GeoMentionGroup) => item.geonameid === selectedGroup.geonameid) ?? null;
     if (next === selectedGroup) {
       return;
     }
@@ -258,7 +329,7 @@ export function CorpusMap({
       return;
     }
 
-    const group = data.mentions.find((item) => item.geonameid === geonameid) ?? null;
+    const group = data.mentions.find((item: GeoMentionGroup) => item.geonameid === geonameid) ?? null;
     setSelectedGroup(group);
   }, [data.mentions]);
 
@@ -311,17 +382,24 @@ export function CorpusMap({
     }
 
     setDeletingMentionId(mentionId);
+    setActionError(null);
     try {
       await sourceApi.deleteGeoMention(mentionId);
-      const refreshed = await loadMentions();
-      const updatedGroup = refreshed.mentions.find((m) => m.geonameid === selectedGroup.geonameid) ?? null;
+      await queryClient.invalidateQueries({ queryKey, exact: true });
+      const refreshedRaw = await queryClient.fetchQuery({
+        queryKey,
+        queryFn: fetchMentions,
+        staleTime: 0,
+      });
+      const refreshed = filterMentionsBySources(refreshedRaw, normalizedSourceIds);
+      const updatedGroup = refreshed.mentions.find((m: GeoMentionGroup) => m.geonameid === selectedGroup.geonameid) ?? null;
       setSelectedGroup(updatedGroup);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete geo mention");
+      setActionError(err instanceof Error ? err.message : "Failed to delete geo mention");
     } finally {
       setDeletingMentionId(null);
     }
-  }, [loadMentions, selectedGroup]);
+  }, [fetchMentions, normalizedSourceIds, queryClient, queryKey, selectedGroup]);
 
   if (isLoading) {
     return (
@@ -335,6 +413,15 @@ export function CorpusMap({
     return (
       <div className="flex h-full items-center justify-center px-6 text-center text-sm text-red-300">
         {error}
+      </div>
+    );
+  }
+
+  if (normalizedSourceIds.length === 0) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-sm text-gray-300">
+        <Globe className="h-9 w-9 text-gray-500" />
+        <p>No sources selected - choose at least one source to render map markers</p>
       </div>
     );
   }
@@ -368,7 +455,7 @@ export function CorpusMap({
         >
           <Layer {...CLUSTER_LAYER} />
           <Layer {...CLUSTER_COUNT_LAYER} />
-          <Layer {...UNCLUSTERED_LAYER} />
+          <Layer {...unclusteredLayer} />
         </Source>
 
         {hoverPopup && (

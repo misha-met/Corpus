@@ -32,6 +32,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from . import config as app_config
 from .api_schemas import (
     ChatRequest,
     ChunkBatchItem,
@@ -411,22 +412,50 @@ async def geocode_reverse(lat: float, lon: float, k: int = 3) -> dict:
 
 @app.get("/api/geo/mentions")
 async def get_geo_mentions(
+    request: Request,
     source_id: str | None = None,
+    source_ids: list[str] | None = Query(default=None),
     min_confidence: float = Query(0.75, ge=0.0, le=1.0),
     limit: int = Query(1000, ge=1, le=50_000),
     offset: int = Query(0, ge=0),
     detailed: bool = True,
 ) -> dict:
     """Return geocoded place mentions grouped by geonameid."""
+    normalized_source_id = source_id.strip() if isinstance(source_id, str) else ""
+
+    raw_source_ids = request.query_params.getlist("source_ids")
+    source_ids_provided = "source_ids" in request.query_params
+    normalized_source_ids: list[str] = []
+    if source_ids_provided:
+        for raw in raw_source_ids:
+            sid = raw.strip()
+            if sid and sid not in normalized_source_ids:
+                normalized_source_ids.append(sid)
+
+    effective_source_ids: list[str] | None = None
+    if app_config.USE_SOURCE_IDS_FILTER:
+        if source_ids_provided and not normalized_source_ids and not normalized_source_id:
+            return {"count": 0, "mentions": []}
+
+        union: list[str] = []
+        if normalized_source_id:
+            union.append(normalized_source_id)
+        for sid in normalized_source_ids:
+            if sid not in union:
+                union.append(sid)
+        if union:
+            effective_source_ids = union
+
     engine = await asyncio.to_thread(_get_engine)
     storage = engine.storage  # type: ignore[union-attr]
     try:
         rows = await asyncio.to_thread(
             storage.get_geo_mentions,
-            source_id,
-            min_confidence,
-            limit,
-            offset,
+            source_id=normalized_source_id or None,
+            source_ids=effective_source_ids,
+            min_confidence=min_confidence,
+            limit=limit,
+            offset=offset,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -717,11 +746,29 @@ async def _chat_stream_generator(
     request_mode = "regular"
     intent_override = None
     if chat_request.data:
-        source_ids = chat_request.data.get("source_ids")
-        if isinstance(source_ids, list) and len(source_ids) == 1:
-            source_id = source_ids[0]
-        elif not source_ids:
-            source_id = chat_request.data.get("source_id")
+        source_id_raw = chat_request.data.get("source_id")
+        if isinstance(source_id_raw, str) and source_id_raw.strip():
+            source_id = source_id_raw.strip()
+
+        source_ids_raw = chat_request.data.get("source_ids")
+        normalized_source_ids: list[str] = []
+        if isinstance(source_ids_raw, list):
+            for value in source_ids_raw:
+                if value is None:
+                    continue
+                sid = str(value).strip()
+                if sid and sid not in normalized_source_ids:
+                    normalized_source_ids.append(sid)
+
+        if source_id is None and normalized_source_ids:
+            if len(normalized_source_ids) == 1:
+                source_id = normalized_source_ids[0]
+            else:
+                logger.info(
+                    "Chat request received %d source_ids; backend retrieval supports single-source pinning only, using all sources.",
+                    len(normalized_source_ids),
+                )
+
         if "citations_enabled" in chat_request.data:
             citations_enabled = bool(chat_request.data["citations_enabled"])
         raw_intent = chat_request.data.get("intent_override")
@@ -1088,8 +1135,21 @@ async def _query_stream_generator(
 ) -> AsyncGenerator[str, None]:
     """Generate AI SDK UI message stream lines from ``RagEngine.query_events()``."""
     source_id = None
-    if query_request.source_ids and len(query_request.source_ids) == 1:
-        source_id = query_request.source_ids[0]
+    normalized_source_ids: list[str] = []
+    if query_request.source_ids:
+        for value in query_request.source_ids:
+            if value is None:
+                continue
+            sid = str(value).strip()
+            if sid and sid not in normalized_source_ids:
+                normalized_source_ids.append(sid)
+    if len(normalized_source_ids) == 1:
+        source_id = normalized_source_ids[0]
+    elif len(normalized_source_ids) > 1:
+        logger.info(
+            "Query stream received %d source_ids; backend retrieval supports single-source pinning only, using all sources.",
+            len(normalized_source_ids),
+        )
 
     request_mode = _FRONTEND_MODE_MAP.get(query_request.mode, query_request.mode) if query_request.mode else None
     pinned_engine = await asyncio.to_thread(_get_engine, request_mode)
@@ -1128,8 +1188,21 @@ async def _query_stream_generator(
 async def query_endpoint(request: Request, query_request: QueryRequest):
     """Query endpoint with optional AI SDK UI message stream output."""
     source_id = None
-    if query_request.source_ids and len(query_request.source_ids) == 1:
-        source_id = query_request.source_ids[0]
+    normalized_source_ids: list[str] = []
+    if query_request.source_ids:
+        for value in query_request.source_ids:
+            if value is None:
+                continue
+            sid = str(value).strip()
+            if sid and sid not in normalized_source_ids:
+                normalized_source_ids.append(sid)
+    if len(normalized_source_ids) == 1:
+        source_id = normalized_source_ids[0]
+    elif len(normalized_source_ids) > 1:
+        logger.info(
+            "Query endpoint received %d source_ids; backend retrieval supports single-source pinning only, using all sources.",
+            len(normalized_source_ids),
+        )
 
     # Resolve mode: map frontend names, default to None (keep current engine)
     request_mode = _FRONTEND_MODE_MAP.get(query_request.mode, query_request.mode) if query_request.mode else None

@@ -32,6 +32,13 @@ import pandas as pd
 from rapidfuzz import fuzz, process
 from scipy.spatial import cKDTree
 
+from .config import (
+    GEOTAG_ENTITY_TYPE_PENALTY,
+    GEOTAG_FUZZY_MARGIN_THRESHOLD,
+    GEOTAG_FUZZY_SCORE_FLOOR,
+    GEOTAG_GENERIC_TOKEN_PENALTY,
+    USE_HARDENED_GEOCODER,
+)
 from .geo_types import GeoMethod, GeocoderState
 
 log = logging.getLogger(__name__)
@@ -49,6 +56,34 @@ _EARTH_RADIUS_KM = 6_371.0
 _GEO_BOOST_MAX = 0.18
 _GEO_DECAY_HALF_KM = 25.0
 _MAX_EXPANSION_TERMS = 6
+
+_GENERIC_PLACE_TERMS = {
+    "city",
+    "region",
+    "area",
+    "province",
+    "state",
+    "district",
+    "county",
+    "territory",
+    "kingdom",
+    "republic",
+    "empire",
+    "capital",
+    "north",
+    "south",
+    "east",
+    "west",
+}
+
+_METHOD_CONFIDENCE_CAPS = {
+    GeoMethod.EXACT: 1.00,
+    GeoMethod.REGION_TABLE: 0.94,
+    GeoMethod.TRIGRAM_FUZZY: 0.88,
+    GeoMethod.QUERY: 0.86,
+    GeoMethod.REGEX: 0.72,
+    GeoMethod.MANUAL: 1.00,
+}
 
 _COLS = [
     "geonameid", "name", "asciiname", "altnames", "lat", "lon",
@@ -194,10 +229,16 @@ class GeoMatch:
     method: GeoMethod
     ambiguous: bool = False
     candidates: tuple[GeoPlace, ...] = field(default_factory=tuple)
+    confidence_value: Optional[float] = None
+    candidate_count: int = 1
+    margin_score: Optional[float] = None
+    entity_type: Optional[str] = None
 
     @property
     def confidence(self) -> float:
         """Composite confidence in [0, 1]."""
+        if self.confidence_value is not None:
+            return max(0.0, min(1.0, float(self.confidence_value)))
         method_prior = {
             GeoMethod.EXACT: 1.00,
             GeoMethod.REGION_TABLE: 0.95,
@@ -325,6 +366,7 @@ class OfflineGeocoder:
         self.alias_to_ids: dict[str, list[int]] = {}
         self._id_to_aliases: dict[int, list[str]] = {}
         self._ngram_to_ids: dict[str, set[int]] = {}
+        self._country_top_place: dict[str, int] = {}
         self.kdtree: Optional[cKDTree] = None
         self._idx_to_id: list[int] = []
         self._id_to_idx: dict[int, int] = {}
@@ -466,6 +508,12 @@ class OfflineGeocoder:
         self.kdtree = cKDTree(unit_vecs)
         self._idx_to_id = ordered_ids
         self._id_to_idx = {geonameid: idx for idx, geonameid in enumerate(ordered_ids)}
+        self._country_top_place = {}
+        for geonameid, place in places_by_id.items():
+            cc = place.country.upper()
+            current = self._country_top_place.get(cc)
+            if current is None or places_by_id[current].population < place.population:
+                self._country_top_place[cc] = geonameid
         self._place_count = len(places_by_id)
         self._alias_count = sum(len(v) for v in alias_to_ids.values())
 
@@ -559,18 +607,172 @@ class OfflineGeocoder:
 
         return max(gids, key=_feature_score)
 
+    @staticmethod
+    def _normalize_query(place_name: str) -> str:
+        query = place_name.strip().lower()
+        query = re.sub(r"\s+", " ", query)
+        if query.startswith("the "):
+            query = query[4:]
+        return query
+
+    @staticmethod
+    def _country_code_for_query(query: str) -> Optional[str]:
+        if not query:
+            return None
+        direct = _COUNTRY_HINT_TO_CODE.get(query)
+        if direct:
+            return direct
+
+        try:
+            import pycountry
+        except Exception:
+            return None
+
+        candidate = query.upper()
+        if len(candidate) == 2:
+            country = pycountry.countries.get(alpha_2=candidate)
+            if country is not None:
+                return candidate
+
+        try:
+            country = pycountry.countries.lookup(query)
+            code = getattr(country, "alpha_2", None)
+            if isinstance(code, str) and len(code) == 2:
+                return code.upper()
+        except Exception:
+            return None
+        return None
+
+    def _is_generic_place_like(self, query: str) -> bool:
+        tokens = [token.lower() for token in re.findall(r"[a-z]{2,}", query)]
+        if not tokens:
+            return False
+        if len(tokens) == 1 and tokens[0] in _GENERIC_PLACE_TERMS:
+            return True
+        if len(tokens) <= 3 and all(token in _GENERIC_PLACE_TERMS for token in tokens):
+            return True
+        return len(tokens) <= 2 and any(token in _GENERIC_PLACE_TERMS for token in tokens)
+
+    def _compute_hardened_confidence(
+        self,
+        *,
+        score: float,
+        method: GeoMethod,
+        ambiguous: bool,
+        query: str,
+        entity_type: Optional[str],
+        candidate_count: int,
+        margin_score: Optional[float],
+    ) -> float:
+        cap = _METHOD_CONFIDENCE_CAPS.get(method, 0.80)
+        confidence = min(max(0.0, min(100.0, score)) / 100.0, cap)
+
+        if ambiguous:
+            confidence *= 0.85
+
+        if (
+            method == GeoMethod.TRIGRAM_FUZZY
+            and margin_score is not None
+            and candidate_count >= 2
+            and GEOTAG_FUZZY_MARGIN_THRESHOLD > 0
+        ):
+            ratio = max(0.0, min(1.0, margin_score / GEOTAG_FUZZY_MARGIN_THRESHOLD))
+            confidence *= 0.65 + (0.35 * ratio)
+
+        penalty = 0.0
+        if method == GeoMethod.TRIGRAM_FUZZY and self._is_generic_place_like(query):
+            penalty += GEOTAG_GENERIC_TOKEN_PENALTY
+
+        if (entity_type or "").upper() in {"PERSON", "ORG"}:
+            penalty += GEOTAG_ENTITY_TYPE_PENALTY
+
+        return max(0.0, min(cap, confidence - penalty))
+
+    def _resolve_non_city_query(
+        self,
+        query: str,
+        *,
+        context_words: tuple[str, ...],
+        entity_type: Optional[str],
+    ) -> GeoMatch | None:
+        if query in NAMED_REGIONS:
+            lat, lon, _ = NAMED_REGIONS[query]
+            nearby = self.find_near(lat, lon, radius_km=50.0)
+            if nearby:
+                proxy = max(nearby, key=lambda place: place.population)
+                confidence = self._compute_hardened_confidence(
+                    score=95.0,
+                    method=GeoMethod.REGION_TABLE,
+                    ambiguous=False,
+                    query=query,
+                    entity_type=entity_type,
+                    candidate_count=1,
+                    margin_score=None,
+                )
+                return GeoMatch(
+                    place=proxy,
+                    score=95.0,
+                    matched_on=query,
+                    method=GeoMethod.REGION_TABLE,
+                    ambiguous=False,
+                    confidence_value=confidence,
+                    candidate_count=1,
+                    entity_type=entity_type,
+                )
+
+        country_code = self._country_code_for_query(query)
+        if country_code is None:
+            for token in context_words:
+                normalized = token.strip().lower()
+                if not normalized:
+                    continue
+                country_code = self._country_code_for_query(normalized)
+                if country_code is not None:
+                    break
+
+        if country_code is None:
+            return None
+
+        geonameid = self._country_top_place.get(country_code)
+        if geonameid is None:
+            return None
+
+        place = self.places_by_id[geonameid]
+        confidence = self._compute_hardened_confidence(
+            score=93.0,
+            method=GeoMethod.QUERY,
+            ambiguous=False,
+            query=query,
+            entity_type=entity_type,
+            candidate_count=1,
+            margin_score=None,
+        )
+        return GeoMatch(
+            place=place,
+            score=93.0,
+            matched_on=query,
+            method=GeoMethod.QUERY,
+            ambiguous=False,
+            confidence_value=confidence,
+            candidate_count=1,
+            entity_type=entity_type,
+        )
+
     @lru_cache(maxsize=_FORWARD_CACHE_SIZE)
     def forward(
         self,
         place_name: str,
         threshold: int = _DEFAULT_THRESHOLD,
         context_words: tuple[str, ...] = (),
+        entity_type: Optional[str] = None,
     ) -> GeoMatch | None:
         """Forward geocode one place name with exact/region/fuzzy fallback."""
         if not self._ensure_loaded():
             return None
 
-        query = place_name.lower().strip()
+        query = self._normalize_query(place_name)
+        if not query:
+            return None
 
         if query in self.alias_to_ids:
             gids = self.alias_to_ids[query]
@@ -584,6 +786,17 @@ class OfflineGeocoder:
                 if ambiguous and context_words
                 else gids[0]
             )
+            confidence_value = None
+            if USE_HARDENED_GEOCODER:
+                confidence_value = self._compute_hardened_confidence(
+                    score=100.0,
+                    method=GeoMethod.EXACT,
+                    ambiguous=ambiguous,
+                    query=query,
+                    entity_type=entity_type,
+                    candidate_count=len(gids),
+                    margin_score=None,
+                )
             return GeoMatch(
                 place=self.places_by_id[best_gid],
                 score=100.0,
@@ -591,7 +804,20 @@ class OfflineGeocoder:
                 method=GeoMethod.EXACT,
                 ambiguous=ambiguous,
                 candidates=tuple(self.places_by_id[gid] for gid in gids[:5]),
+                confidence_value=confidence_value,
+                candidate_count=len(gids),
+                margin_score=None,
+                entity_type=entity_type,
             )
+
+        if USE_HARDENED_GEOCODER:
+            non_city_match = self._resolve_non_city_query(
+                query,
+                context_words=context_words,
+                entity_type=entity_type,
+            )
+            if non_city_match is not None:
+                return non_city_match
 
         if query in NAMED_REGIONS:
             lat, lon, _ = NAMED_REGIONS[query]
@@ -626,18 +852,51 @@ class OfflineGeocoder:
         matched_alias, score, local_idx = result
         best_gid = gid_map[local_idx]
 
+        score_cutoff = max(0.0, min(100.0, float(threshold)))
+        alt_cutoff = max(score_cutoff, float(score) - _AMBIGUITY_WINDOW)
         alt_results = process.extract(
             query,
             aliases,
             scorer=fuzz.token_sort_ratio,
-            score_cutoff=score - _AMBIGUITY_WINDOW,
+            score_cutoff=alt_cutoff,
             limit=20,
         )
-        alt_gids = list({gid_map[idx] for _, _, idx in alt_results if gid_map[idx] != best_gid})
+        candidate_scores: dict[int, float] = {best_gid: float(score)}
+        for _, alt_score, idx in alt_results:
+            gid = gid_map[idx]
+            current = candidate_scores.get(gid)
+            if current is None or float(alt_score) > current:
+                candidate_scores[gid] = float(alt_score)
+
+        sorted_candidate_scores = sorted(candidate_scores.values(), reverse=True)
+        second_score = sorted_candidate_scores[1] if len(sorted_candidate_scores) > 1 else None
+        margin_score = float(score - second_score) if second_score is not None else None
+
+        alt_gids = [gid for gid in candidate_scores if gid != best_gid]
         ambiguous = bool(alt_gids)
+
+        if USE_HARDENED_GEOCODER:
+            if float(score) < max(score_cutoff, float(GEOTAG_FUZZY_SCORE_FLOOR)):
+                return None
+            if len(candidate_scores) >= 2 and margin_score is not None and margin_score < GEOTAG_FUZZY_MARGIN_THRESHOLD:
+                return None
+            if self._is_generic_place_like(query) and float(score) < 90.0:
+                return None
 
         if ambiguous and context_words:
             best_gid = self._disambiguate([best_gid] + alt_gids, context_words)
+
+        confidence_value = None
+        if USE_HARDENED_GEOCODER:
+            confidence_value = self._compute_hardened_confidence(
+                score=float(score),
+                method=GeoMethod.TRIGRAM_FUZZY,
+                ambiguous=ambiguous,
+                query=query,
+                entity_type=entity_type,
+                candidate_count=len(candidate_scores),
+                margin_score=margin_score,
+            )
 
         return GeoMatch(
             place=self.places_by_id[best_gid],
@@ -653,6 +912,10 @@ class OfflineGeocoder:
                     reverse=True,
                 )[:4]
             ),
+            confidence_value=confidence_value,
+            candidate_count=len(candidate_scores),
+            margin_score=margin_score,
+            entity_type=entity_type,
         )
 
     def resolve_all(

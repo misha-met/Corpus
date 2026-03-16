@@ -17,6 +17,8 @@ interface SourcePanelProps {
   onSourcesChanged?: () => void;
 }
 
+const SOURCE_SELECTION_STORAGE_KEY = "dh-selected-source-ids-v1";
+
 /**
  * Left sidebar showing ingested sources with checkboxes for query filtering.
  *
@@ -54,24 +56,85 @@ export function SourcePanel({
     | { stage: "error"; fileName: string; message: string }
   >(null);
   const uploadDismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const persistedSelectionRef = useRef<string[] | null>(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem(SOURCE_SELECTION_STORAGE_KEY);
+      if (raw === null) {
+        persistedSelectionRef.current = null;
+        return;
+      }
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) {
+        persistedSelectionRef.current = [];
+        onSelectedSourceIdsChange([]);
+        return;
+      }
+      const hydrated = parsed
+        .map((value) => String(value).trim())
+        .filter((value, index, arr) => value.length > 0 && arr.indexOf(value) === index);
+      persistedSelectionRef.current = hydrated;
+      onSelectedSourceIdsChange(hydrated);
+    } catch {
+      persistedSelectionRef.current = null;
+    }
+  }, [onSelectedSourceIdsChange]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(SOURCE_SELECTION_STORAGE_KEY, JSON.stringify(selectedSourceIds));
+  }, [selectedSourceIds]);
 
   const fetchSources = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
       const data = await sourceApi.listSources();
+      const nextIds = data.map((source) => source.source_id);
+      const nextIdSet = new Set(nextIds);
+
+      let nextSelection: string[]
+      const persistedSelection = persistedSelectionRef.current;
+      if (persistedSelection !== null) {
+        nextSelection = persistedSelection.filter((id) => nextIdSet.has(id));
+        // Apply persisted selection once, then continue using live state.
+        persistedSelectionRef.current = null;
+      } else {
+        const previousIds = sources.map((source) => source.source_id);
+        const hadAllSelectedBefore =
+          previousIds.length > 0 &&
+          previousIds.every((id) => selectedSourceIds.includes(id));
+
+        if (hadAllSelectedBefore) {
+          nextSelection = nextIds;
+        } else {
+          const filteredSelection = selectedSourceIds.filter((id) => nextIdSet.has(id));
+          if (filteredSelection.length > 0 || selectedSourceIds.length > 0) {
+            nextSelection = filteredSelection;
+          } else {
+            // First load fallback when no persisted choice exists.
+            nextSelection = nextIds;
+          }
+        }
+      }
+
       setSources(data);
       onSourcesChanged?.();
-      // Auto-select all on first load
-      if (data.length > 0) {
-        onSelectedSourceIdsChange(data.map((s) => s.source_id));
+
+      const sameSelection =
+        nextSelection.length === selectedSourceIds.length &&
+        nextSelection.every((id, idx) => selectedSourceIds[idx] === id);
+      if (!sameSelection) {
+        onSelectedSourceIdsChange(nextSelection);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load sources");
     } finally {
       setIsLoading(false);
     }
-  }, [onSelectedSourceIdsChange, onSourcesChanged]);
+  }, [onSelectedSourceIdsChange, onSourcesChanged, selectedSourceIds, sources]);
 
   useEffect(() => {
     fetchSources();
@@ -128,9 +191,26 @@ export function SourcePanel({
         );
         // Refresh the source list after each successful ingest
         const data = await sourceApi.listSources();
+        const nextIds = data.map((item) => item.source_id);
+        const nextIdSet = new Set(nextIds);
+        const previousIds = sources.map((item) => item.source_id);
+        const hadAllSelectedBefore =
+          previousIds.length > 0 &&
+          previousIds.every((id) => selectedSourceIds.includes(id));
+
+        let nextSelection: string[];
+        if (hadAllSelectedBefore) {
+          nextSelection = nextIds;
+        } else {
+          nextSelection = selectedSourceIds.filter((id) => nextIdSet.has(id));
+          if (!nextSelection.includes(current.sourceId) && nextIdSet.has(current.sourceId)) {
+            nextSelection = [...nextSelection, current.sourceId];
+          }
+        }
+
         setSources(data);
         onSourcesChanged?.();
-        onSelectedSourceIdsChange(data.map((s) => s.source_id));
+        onSelectedSourceIdsChange(nextSelection);
         // Briefly highlight + open the new source
         setHighlightSourceId(current.sourceId);
         setActiveSourceId(current.sourceId);
@@ -146,7 +226,7 @@ export function SourcePanel({
         setIsUploading(false);
       }
     })();
-  }, [isUploading, onSelectedSourceIdsChange, onSourcesChanged, uploadQueue]);
+  }, [isUploading, onSelectedSourceIdsChange, onSourcesChanged, selectedSourceIds, sources, uploadQueue]);
 
   useEffect(() => {
     if (!isUploading && uploadQueue.length === 0 && uploadStatus?.stage === "uploading") {

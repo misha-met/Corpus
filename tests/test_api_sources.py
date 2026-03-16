@@ -160,6 +160,109 @@ class TestListSources:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/geo/mentions — source_ids contract
+# ---------------------------------------------------------------------------
+
+
+class TestGeoMentionsContract:
+    @staticmethod
+    def _seed_mentions(storage: StorageEngine) -> None:
+        storage.upsert_geo_mentions(
+            [
+                {
+                    "id": "m-doc-a",
+                    "source_id": "doc_a",
+                    "chunk_id": "c-doc-a",
+                    "place_name": "Paris",
+                    "matched_input": "Paris",
+                    "matched_on": "paris",
+                    "geonameid": 2988507,
+                    "lat": 48.8566,
+                    "lon": 2.3522,
+                    "confidence": 0.95,
+                    "method": "exact",
+                },
+                {
+                    "id": "m-doc-b",
+                    "source_id": "doc_b",
+                    "chunk_id": "c-doc-b",
+                    "place_name": "London",
+                    "matched_input": "London",
+                    "matched_on": "london",
+                    "geonameid": 2643743,
+                    "lat": 51.5072,
+                    "lon": -0.1276,
+                    "confidence": 0.93,
+                    "method": "exact",
+                },
+            ]
+        )
+
+    @pytest.mark.anyio
+    async def test_source_id_and_source_ids_use_union(self, mock_engine) -> None:
+        self._seed_mentions(mock_engine.storage)
+        with patch("src.api.app_config.USE_SOURCE_IDS_FILTER", True):
+            with patch("src.api._get_engine", return_value=mock_engine):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url="http://test"
+                ) as client:
+                    resp = await client.get(
+                        "/api/geo/mentions",
+                        params={
+                            "source_id": "doc_a",
+                            "source_ids": ["doc_b"],
+                            "min_confidence": 0.0,
+                        },
+                    )
+
+        assert resp.status_code == 200
+        mentions = resp.json()["mentions"]
+        all_sources = {sid for group in mentions for sid in group.get("source_ids", [])}
+        assert "doc_a" in all_sources
+        assert "doc_b" in all_sources
+
+    @pytest.mark.anyio
+    async def test_empty_source_ids_returns_empty_when_source_id_absent(self, mock_engine) -> None:
+        self._seed_mentions(mock_engine.storage)
+        with patch("src.api.app_config.USE_SOURCE_IDS_FILTER", True):
+            with patch("src.api._get_engine", return_value=mock_engine):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url="http://test"
+                ) as client:
+                    resp = await client.get(
+                        "/api/geo/mentions",
+                        params={
+                            "source_ids": "",
+                            "min_confidence": 0.0,
+                        },
+                    )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["count"] == 0
+        assert body["mentions"] == []
+
+    @pytest.mark.anyio
+    async def test_no_source_filters_preserves_all_sources_behavior(self, mock_engine) -> None:
+        self._seed_mentions(mock_engine.storage)
+        with patch("src.api.app_config.USE_SOURCE_IDS_FILTER", True):
+            with patch("src.api._get_engine", return_value=mock_engine):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url="http://test"
+                ) as client:
+                    resp = await client.get(
+                        "/api/geo/mentions",
+                        params={"min_confidence": 0.0},
+                    )
+
+        assert resp.status_code == 200
+        mentions = resp.json()["mentions"]
+        all_sources = {sid for group in mentions for sid in group.get("source_ids", [])}
+        assert "doc_a" in all_sources
+        assert "doc_b" in all_sources
+
+
+# ---------------------------------------------------------------------------
 # POST /api/sources/ingest
 # ---------------------------------------------------------------------------
 

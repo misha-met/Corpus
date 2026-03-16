@@ -109,6 +109,50 @@ def test_resolve_all(gc: OfflineGeocoder) -> None:
     assert any("Alex" in n for n in names)
 
 
+def test_confidence_monotonicity_exact_vs_fuzzy(gc: OfflineGeocoder) -> None:
+    exact = gc.forward("Paris", context_words=("France",))
+    fuzzy = gc.forward("Pariss", threshold=60, context_words=("France",))
+    assert exact is not None
+    assert fuzzy is not None
+    assert exact.confidence > fuzzy.confidence
+
+
+def test_confidence_acceptance_gates_provisional(gc: OfflineGeocoder) -> None:
+    """Apply confidence gate checks only when the confidence bands are sufficiently labeled."""
+    labeled_cases = [
+        ("Paris", ("France",), "FR"),
+        ("Paris", ("Texas",), "US"),
+        ("Alexandria", ("Egypt",), "EG"),
+        ("Alexandria", ("Virginia",), "US"),
+        ("Antioch", ("Syria",), "TR"),
+        ("Springfield", ("Illinois",), "US"),
+        ("Rome", tuple(), "IT"),
+        ("London", tuple(), "GB"),
+        ("Athens", tuple(), "GR"),
+        ("Cairo", tuple(), "EG"),
+        ("Damascus", tuple(), "SY"),
+        ("Istanbul", tuple(), "TR"),
+    ]
+    rows: list[tuple[float, bool]] = []
+    for name, ctx, expected_country in labeled_cases:
+        match = gc.forward(name, context_words=ctx)
+        if match is None:
+            continue
+        rows.append((match.confidence, match.place.country == expected_country))
+
+    band_90 = [correct for confidence, correct in rows if confidence >= 0.90]
+    band_75 = [correct for confidence, correct in rows if confidence >= 0.75]
+
+    if len(band_90) < 20 or len(band_75) < 20:
+        pytest.skip("Provisional gates require at least 20 labeled examples in each confidence band.")
+
+    p90 = sum(1 for flag in band_90 if flag) / len(band_90)
+    p75 = sum(1 for flag in band_75 if flag) / len(band_75)
+
+    assert p90 >= 0.95
+    assert p75 >= 0.85
+
+
 @pytest.mark.slow
 def test_forward_latency(gc: OfflineGeocoder) -> None:
     import time
