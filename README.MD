@@ -41,6 +41,8 @@ Corpus runs entirely on your machine. Documents are ingested into a local vector
 | **Offline transcription** | Voice input transcribed locally via Whisper large-v3, with voice activity detection |
 | **Freeform chat** | Direct LLM access without retrieval, with persistent session history |
 | **Citation export** | Responses exportable as formatted footnotes or Harvard bibliography entries |
+| **Geospatial mapping** | Optional ingest-time place NER + offline geocoding, with clustered map markers filtered by source selection |
+| **Phoenix tracing** | Optional OpenTelemetry tracing with trace/span ID propagation and in-UI feedback annotations |
 
 ---
 
@@ -249,6 +251,26 @@ Clicking a citation badge opens the citation viewer: the full document and the c
 
 ---
 
+## Geospatial Mapping (Offline)
+
+Corpus includes an optional geospatial workflow for place-centric research:
+
+- **Ingest-time geotagging** via the Ingest modal (`Index locations`) or CLI `--geotag`
+- **Offline place resolution** using local GeoNames data (no external geocoding API)
+- **Interactive map overlay** with clustering, confidence threshold filtering, and source-selection filtering
+- **Citation bridge** from map mention to source chunk viewer, plus inline mention deletion for cleanup
+
+Geospatial API endpoints:
+
+- `GET /api/geo/status`
+- `GET /api/geocode`
+- `GET /api/geocode/near`
+- `GET /api/geocode/reverse`
+- `GET /api/geo/mentions`
+- `DELETE /api/geo/mentions/{mention_id}`
+
+---
+
 ## Privacy and Local Data
 
 All inference and storage is local. No data is transmitted to external services after the initial model download. The application sets `HF_HUB_OFFLINE=1` automatically once all required models are detected in the local cache.
@@ -259,6 +281,9 @@ data/
         child_chunks/           Vector + BM25 index (retrieval units)
         parent_chunks/          Full context blocks for answer generation
         source_summaries/       Per-document metadata and optional summaries
+        geo_mentions/           Geocoded place mentions for map visualisation
+    cities500.txt              GeoNames place index used by offline geocoder
+    geo_version.json           GeoNames checksum/build metadata
     source_cache/               Full-text snapshots for the citation viewer
     uploads/                    Uploaded files retained after ingestion
 ```
@@ -280,6 +305,8 @@ data/
 | Vector database | lancedb + pyarrow | Vector ANN + BM25 FTS with RRF fusion |
 | API framework | fastapi + uvicorn | REST endpoints and SSE streaming |
 | PDF parsing | pypdf, pdfminer.six, PyMuPDF, pytesseract | Four-strategy fallback chain including OCR |
+| Geospatial stack | GeoNames + rapidfuzz + GLiNER | Offline place NER + geocoding for map mentions |
+| Observability | arize-phoenix-otel | OpenTelemetry tracing across ingest, retrieval, and generation |
 
 </details>
 
@@ -296,6 +323,7 @@ data/
 | Animations | framer-motion | UI transitions |
 | Session storage | IndexedDB | Persistent chat history with reasoning content |
 | Citation storage | localStorage | User-provided citation reference strings per source |
+| Geospatial UI | maplibre-gl, @vis.gl/react-maplibre, @tanstack/react-query | Clustered map overlay with confidence and source filters |
 
 </details>
 
@@ -390,6 +418,9 @@ Open http://localhost:3000 in your browser.
 # Ingest a document
 python -m src.cli ingest docs/paper.pdf --source-id my_paper --summarize
 
+# Ingest + geotag places for map exploration
+python -m src.cli ingest docs/paper.pdf --source-id my_paper --summarize --geotag
+
 # Query with automatic intent detection
 python -m src.cli query "What is the central argument?" --cite
 
@@ -418,6 +449,13 @@ curl -N -H "Content-Type: application/json" \
 # Upload a document
 curl -F "file=@paper.pdf" -F "source_id=my_paper" -F "summarize=true" \
   http://127.0.0.1:8000/api/sources/upload
+
+# Upload + geotag locations during ingest
+curl -F "file=@paper.pdf" -F "source_id=my_paper" -F "summarize=true" -F "geotag=true" \
+    http://127.0.0.1:8000/api/sources/upload
+
+# List grouped geo mentions for selected source(s)
+curl "http://127.0.0.1:8000/api/geo/mentions?min_confidence=0.75&source_ids=my_paper"
 ```
 
 ### Phoenix Observability (Arize)
@@ -429,6 +467,8 @@ Corpus now includes native Phoenix tracing for:
 - Token budget packing
 - Prompt construction
 - LLM generation (synchronous and streaming)
+- Freeform chat spans with emitted `trace_id` / `span_id`
+- User feedback annotations via `POST /api/feedback`
 - Benchmark retrieval-mode traces (`hybrid_rrf`, `vector_only`, `bm25_only`)
 
 Enable tracing via environment variables:
@@ -438,6 +478,8 @@ export RAG_PHOENIX_ENABLED=1
 export PHOENIX_PROJECT_NAME=corpus-local
 export PHOENIX_COLLECTOR_ENDPOINT=http://127.0.0.1:6006/v1/traces
 ```
+
+When `RAG_PHOENIX_ENABLED` is truthy, backend lifespan startup attempts to auto-start a local Phoenix server (`python -m phoenix.server.main serve`) and shuts it down on API process exit.
 
 Optional cloud auth:
 
@@ -460,7 +502,9 @@ Check runtime tracing status from health:
 curl http://127.0.0.1:8000/api/health
 ```
 
-Health responses now include `phoenix_configured`, `phoenix_active`, `phoenix_project_name`, and `phoenix_endpoint`.
+Health responses now include `phoenix_configured`, `phoenix_active`, `phoenix_project_name`, `phoenix_endpoint`, and `phoenix_error`.
+
+RAG streams emit `data-trace-id` annotations; freeform streams emit `trace_id` SSE events so the frontend can attach thumbs-up / thumbs-down feedback to exact spans.
 
 ---
 
@@ -479,12 +523,16 @@ Health responses now include `phoenix_configured`, `phoenix_active`, `phoenix_pr
 | generation.py | 573 | Intent-aware prompt construction: 12 instruction profiles across 2 mode variants |
 | storage.py | 737 | LanceDB vector and FTS storage, schema migration, cascading delete |
 | ingest.py | 557 | PDF and Markdown parsing, hierarchical parent/child chunking |
+| geocoder.py | 1,077 | Offline GeoNames geocoder (forward, reverse, near) with exact/fuzzy matching |
+| ner.py | 164 | GLiNER-based place NER with regex fallback for ingest geotagging |
+| geo_types.py | 18 | Shared geocoder enums and readiness states |
 | reranker.py | 423 | Jina v3 MLX listwise reranker with MLP projector |
 | config.py | 364 | Mode configurations, RAM detection, per-intent retrieval and generation overrides |
+| phoenix_tracing.py | 646 | Phoenix/OpenTelemetry setup, span helpers, and feedback annotation logging |
 | transcription.py | 590 | MLX Whisper with pure-NumPy voice activity detection |
 | embeddings.py | 173 | MLX embedding model wrapper: mean pooling, L2 normalisation |
 | stream_protocol.py | 251 | AI SDK v6 UI Message Stream encoder (SSE frames) |
-| query_events.py | 96 | Pipeline event dataclasses: 8 event types |
+| query_events.py | 96 | Pipeline event dataclasses: 9 event types (including TraceEvent) |
 | source_cache.py | 176 | Full-text snapshot caching for the citation viewer |
 | metrics.py | 170 | Retrieval and budget metrics: 6 dataclasses |
 | latency.py | 107 | Zero-cost latency profiler with ASCII chart output |
@@ -499,9 +547,10 @@ Health responses now include `phoenix_configured`, `phoenix_active`, `phoenix_pr
 |---|---|
 | app/page.tsx | Entry point, dual-mode always-mounted layout, theme picker |
 | app/api/chat/route.ts | Next.js streaming proxy to backend (unbuffered SSE) |
-| context/app-context.tsx | Global state: useReducer, 13 action types, dual-context pattern |
+| context/app-context.tsx | Global state: useReducer, 14 action types, dual-context pattern |
 | context/theme-context.tsx | Background theme state: 7 themes, localStorage persistence |
 | components/source-panel.tsx | Document library: sequential upload queue, drag-and-drop |
+| components/map/CorpusMap.tsx | Interactive MapLibre map: clustering, source filters, confidence threshold, mention actions |
 | components/freeform-chat-panel.tsx | Freeform streaming chat: model and thinking selection, AI-generated titles |
 | components/citation-viewer-modal.tsx | Inline citation reader: parallel content and chunk fetch |
 | components/history-panel.tsx | Session history drawer: debounced search, glassmorphism styling |

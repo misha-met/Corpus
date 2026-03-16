@@ -12,6 +12,8 @@ The application is a **full-stack offline RAG system** designed for local-first 
 - **Hybrid retrieval pipeline** (`src/retrieval.py`) -- LanceDB ANN + BM25 FTS with RRF fusion, Jina v3 reranking, intent-scaled parameters
 - **MLX inference stack** -- generator (`src/generator.py`), embeddings (`src/embeddings.py`), reranker (`src/reranker.py`)
 - **Mode-aware configuration** (`src/config.py`) -- RAM-based auto-scaling across operating modes with per-intent retrieval and generation overrides
+- **Geospatial mapping pipeline** (`src/geocoder.py`, `src/ner.py`, `frontend/src/components/map/CorpusMap.tsx`) -- ingest-time place NER + offline geocoding + interactive map filtering
+- **Phoenix/Arize observability** (`src/phoenix_tracing.py`) -- OpenTelemetry tracing across ingest/query/freeform with trace ID propagation and feedback annotations
 - **Inline academic citations** -- source-grounded responses with chunk-level references and post-hoc citation verification
 
 ---
@@ -26,7 +28,9 @@ The application is a **full-stack offline RAG system** designed for local-first 
 | Intent Classification | Heuristic-first + `mlx-lm` LLM fallback | 12 intents, regex + structural signals, LFM2 fallback |
 | Storage | `lancedb` + `pyarrow` | Vector ANN + FTS hybrid search with native RRF |
 | Backend API | `fastapi`, `uvicorn`, `python-multipart` | SSE streaming (AI SDK v6 UI Message Stream) + multipart upload |
-| Frontend | `next.js 16` (App Router), React 19, TypeScript 5 | Tailwind CSS 4, `@assistant-ui/react`, `@ai-sdk/react` |
+| Frontend | `next.js 16` (App Router), React 19, TypeScript 5 | Tailwind CSS 4, `@assistant-ui/react`, `@ai-sdk/react`, MapLibre map overlay |
+| Geospatial | `GeoNames` + `rapidfuzz` + `gliner` | Offline place NER + geocoding at ingest and map render time |
+| Observability | `arize-phoenix-otel` | OpenTelemetry tracing + Phoenix export/runtime status |
 | Speech-to-Text | `mlx-whisper` | Offline transcription with VAD |
 | PDF Extraction | `pypdf`, `pdfminer.six`, `PyMuPDF`, `pytesseract` | Four-strategy fallback chain |
 
@@ -60,13 +64,14 @@ All dataclasses are frozen (immutable) with UUID generation at creation.
 
 ### 4.2 Storage Engine (`src/storage.py`)
 
-Unified LanceDB-backed storage managing three table types:
+Unified LanceDB-backed storage managing four table types:
 
 | Table | Purpose | Key Columns |
 |-------|---------|-------------|
 | `child_chunks` | Vectors + FTS, hybrid-searched | `id`, `text`, `vector`, `source_id`, `parent_id`, `page_number`, `header_path` |
 | `parent_chunks` | Parent text for context expansion | `parent_id`, `source_id`, `text`, page metadata |
 | `source_summaries` | Per-source metadata (schema v2) | `source_id`, `summary`, `source_path`, `snapshot_path` |
+| `geo_mentions` | Ingest-time geocoded mentions for map UX | `id`, `source_id`, `chunk_id`, `place_name`, `geonameid`, `lat`, `lon`, `confidence`, `method` |
 
 **`StorageConfig`:** `lance_dir` (default `data/lance`), `lance_table` (default `child_chunks`), `fts_rebuild_policy` (default `deferred`), `fts_rebuild_batch_size` (default 0)
 
@@ -74,11 +79,12 @@ Unified LanceDB-backed storage managing three table types:
 - Native hybrid search (vector ANN + BM25 + RRF) via single LanceDB call with auto-retry on FTS rebuild
 - FTS index management with configurable rebuild policies (`immediate`, `deferred`, `batch`)
 - Automatic schema migration for v2 summary columns (`source_path`, `snapshot_path`)
+- Geo-mentions schema migration and best-effort scalar indexes (`source_id`, `confidence`, `geonameid`)
 - SQL-safe literal escaping via `_escape_sql_literal()` and chunked IN clauses (max 256 values per clause)
 - `_row_to_metadata()` helper for consistent metadata extraction across all query paths
 - Safe upsert for parents with backup/rollback on failure
 - Embedding dimension validation via PyArrow schema introspection
-- Cascading delete across all 3 tables
+- Cascading delete across all 4 tables
 
 ### 4.3 Document Ingestion (`src/ingest.py`)
 
@@ -110,6 +116,13 @@ Unified LanceDB-backed storage managing three table types:
 Text cleaning: `clean_ocr_artifacts()` merges hyphenated line breaks.
 
 **Summarization:** Optional LLM-generated summary using head/middle/tail sampling of document text (max 12,000 chars context), stored in `source_summaries` table. Uses dedicated `build_ingest_summary_messages()` prompt (no citations, prose-only, 3-4 paragraphs).
+
+**Optional ingest-time geotagging** (`geotag=True`):
+- Uses GLiNER place NER (`urchade/gliner_medium-v2.1`, label `city`, threshold 0.4) with regex fallback
+- Extracts candidate context windows (`GEOTAG_NER_CONTEXT_WINDOW=8`) and resolves candidates through the offline geocoder
+- Applies geocode confidence filtering (`GEOTAG_MIN_CONFIDENCE=0.75`, fuzzy threshold default 75)
+- Persists mention rows into `geo_mentions` with confidence, method, ambiguity, candidate-count, and source/chunk linkage
+- If geocoder warmup fails, geotagging is skipped without failing ingest
 
 **Supported formats:** `.pdf`, `.md`, `.markdown`
 
@@ -316,6 +329,8 @@ Central orchestrator consumed by both CLI and API:
 | `llm_fallback_threshold` | 0.70 |
 | `intent_model` | `"mlx-community/LFM2-8B-A1B-4bit"` |
 
+Additional optional runtime overrides include `mode`, `model`, `summary_model`, `citations_enabled`, `verbose`, `latency`, and Phoenix tracing fields (`phoenix_enabled`, `phoenix_project_name`, `phoenix_endpoint`, `phoenix_api_key`, `phoenix_auto_instrument`, `phoenix_batch`).
+
 **Result types:**
 - `IngestResult` (frozen): `parents_count`, `children_count`, `source_id`, `summarized`
 - `QueryResult` (frozen): `answer`, `intent`, `citations_enabled`, `source_ids`, `retrieval_metrics`, `budget_metrics`, `latency_report`, `context`, `config`, `raw_answer`, `prompt_messages`
@@ -361,6 +376,7 @@ Central orchestrator consumed by both CLI and API:
 - `TextTokenEvent(token)` -- LLM text token
 - `ThinkingTokenEvent(token)` -- reasoning chain token
 - `CitationListEvent(citations)` -- ordered citation entries
+- `TraceEvent(trace_id, span_id)` -- OpenTelemetry IDs for frontend feedback binding
 - `ErrorEvent(code, message, metadata?)` -- pipeline error
 - `FinishEvent(finish_reason, prompt_tokens, completion_tokens)` -- completion
 
@@ -368,7 +384,7 @@ Central orchestrator consumed by both CLI and API:
 - Header: `X-Vercel-AI-UI-Message-Stream: v1`, `Content-Type: text/event-stream; charset=utf-8`
 - Line format: `data: {json_payload}\n\n`
 - Frame types: `start`, `text-start`, `text-delta`, `text-end`, `reasoning-start`, `reasoning-delta`, `reasoning-end`, `error`, `finish`
-- Custom annotation types: `data-status`, `data-sources`, `data-intent`, `data-error`, `data-citations`, `data-finish-step`
+- Custom annotation types: `data-status`, `data-sources`, `data-intent`, `data-error`, `data-citations`, `data-finish-step`, `data-trace-id`
 - Terminal frame: `data: [DONE]\n\n`
 
 ### 4.12 API Layer (`src/api.py`)
@@ -377,10 +393,16 @@ FastAPI application with SSE streaming support:
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/api/health` | GET | Engine status + `system_ram_gb` |
+| `/api/health` | GET | Engine status + RAM + Phoenix runtime status |
 | `/api/chat` | POST | Streaming chat (AI SDK v6 UI Message Stream) |
 | `/api/freeform/chat` | POST | Non-RAG freeform chat (SSE, direct LLM + conversation history) |
 | `/api/query` | POST | Query with optional SSE stream (`stream=true`) |
+| `/api/geo/status` | GET | Geocoder readiness/state, counts, version, attribution |
+| `/api/geocode` | GET | Forward geocode a place query against offline GeoNames index |
+| `/api/geocode/near` | GET | Nearby canonical places for `lat/lon` within `radius_km` |
+| `/api/geocode/reverse` | GET | Reverse geocode `lat/lon` to nearest canonical places |
+| `/api/geo/mentions` | GET | Grouped geocoded mentions with confidence/source filters |
+| `/api/geo/mentions/{mention_id}` | DELETE | Delete one persisted geo mention |
 | `/api/sources` | GET | List ingested sources with metadata |
 | `/api/sources/ingest` | POST | Ingest document by file path |
 | `/api/sources/upload` | POST | Multipart file upload + ingest (50MB max, `.pdf`/`.md`/`.markdown`) |
@@ -389,15 +411,17 @@ FastAPI application with SSE streaming support:
 | `/api/sources/{id}/chunk/{cid}` | GET | Single chunk detail for citation viewer |
 | `/api/sources/{id}/chunks` | GET | Batch chunk fetch by comma-separated IDs (`?ids=a,b,c`) |
 | `/api/transcribe` | POST | Audio transcription via MLX Whisper (returns `{"text": "..."}`) |
+| `/api/feedback` | POST | Log user feedback annotation against Phoenix span (`trace_id` + `span_id`) |
 
 **Request/response schemas** (`src/api_schemas.py`):
 - `ChatRequest` -- supports AI SDK v3 (`content` string) and v6 (`parts` array) message formats
 - `QueryRequest` -- `query`, `mode`, `source_ids`, `citations_enabled`, `stream`, `intent_override`
-- `IngestRequest` -- `file_path`, `source_id`, `summarize`
+- `IngestRequest` -- `file_path`, `source_id`, `summarize`, `geotag`, `page_offset`
 - `SourceInfo` -- `source_id`, `summary`, `source_path`, `snapshot_path`, `source_size_bytes`, `content_size_bytes`
 - `SourceContentResponse` -- `source_id`, `content`, `content_source` ("original"/"snapshot"/"summary"), `format` ("pdf"/"markdown"/"text")
 - `ChunkDetailResponse` & `ChunkBatchResponse` -- chunk text, parent text, page metadata, header path, format, source path
-- `HealthResponse` -- `status`, `engine_loaded`, `system_ram_gb`
+- `HealthResponse` -- `status`, `engine_loaded`, `system_ram_gb`, `phoenix_configured`, `phoenix_active`, `phoenix_project_name`, `phoenix_endpoint`, `phoenix_error`
+- `FeedbackRequest` -- `trace_id`, `span_id`, `label`, `score?`, `comment?`
 - `ErrorResponse` -- `{error: {code, message}}`
 
 **Concurrency model:** Single `asyncio.Lock` (`_chat_lock`) for exclusive chat/freeform access. Returns 429 `LOCK_BUSY` if busy. Background thread executor runs `query_events()`, pushes events to `asyncio.Queue` via `loop.call_soon_threadsafe()`. Client disconnect detection via `should_stop` callback.
@@ -414,6 +438,8 @@ FastAPI application with SSE streaming support:
 **CORS:** `localhost:3000` and `127.0.0.1:3000`
 
 **File handling:** Uploads saved to `data/uploads/`, text snapshots cached in `data/source_cache/` for content fallback.
+
+**Upload guardrails:** Duplicate source IDs are rejected with `409 SOURCE_ALREADY_EXISTS` in `/api/sources/upload` (frontend modal also validates before submit).
 
 ### 4.13 Source Cache (`src/source_cache.py`)
 
@@ -451,15 +477,35 @@ Caches full-text snapshots so `/content` endpoint works even if original files a
 
 **Thread-safe:** Module-level singleton with threading locks. Model path resolution handles `model.safetensors` → `weights.safetensors` symlink/copy fix.
 
+### 4.15 Geospatial Mapping & Geocoder (`src/geocoder.py`, `src/ner.py`, `src/geo_types.py`)
+
+Offline geospatial subsystem for ingest-time place indexing and map exploration:
+
+- **Offline geocoder:** `OfflineGeocoder` loads GeoNames `data/cities500.txt`, builds alias indexes + trigram candidate index + KDTree for spatial lookups
+- **Readiness states:** `GeocoderState` = `COLD`, `WARMING`, `READY`, `FAILED` (reported via `/api/geo/status`)
+- **Lookup modes:** exact alias match, trigram fuzzy fallback, region table proxy, reverse geocode, and near-radius lookups
+- **Validation constraints (API):**
+  - `/api/geocode/near`: `lat ∈ [-90,90]`, `lon ∈ [-180,180]`, `radius_km ∈ [0,1000]`, `limit <= 200`
+  - `/api/geocode/reverse`: `k ∈ [1,10]`
+- **NER bridge:** `extract_place_candidates_ner()` uses GLiNER (`city`) with regex fallback and context windows for disambiguation
+- **Persistence:** ingest geotag pipeline writes canonicalized mentions into `geo_mentions` (with confidence/method/ambiguity diagnostics)
+
+Frontend map (`frontend/src/components/map/CorpusMap.tsx`):
+- Uses MapLibre + React Query with cluster rendering
+- Applies source filtering and confidence threshold (persisted via `dh-map-threshold-v1`)
+- Supports mention-to-citation jump and mention deletion (`DELETE /api/geo/mentions/{mention_id}`)
+
 ### 4.16 CLI (`src/cli.py`)
 
 Thin wrapper around `RagEngine` for terminal workflows:
 
 **Commands:**
-- `ingest FILE --source-id ID [--summarize] [--mode MODE] [--page-number N]`
+- `ingest FILE --source-id ID [--summarize] [--mode MODE] [--page-number N] [--page-offset N] [--geotag]`
 - `query TEXT [--source-id ID] [--cite|--no-cite] [--mode MODE] [--latency] [--intent INTENT] [--dump-prompt] [--no-generate] [--list-sources]`
 
-**Environment variables:** `RAG_MODE`, `RAG_FTS_REBUILD_POLICY`, `RAG_FTS_REBUILD_BATCH_SIZE`, `RAG_EAGER_LOAD`
+**Phoenix flags (shared):** `--phoenix`, `--no-phoenix`, `--phoenix-project`, `--phoenix-endpoint`, `--phoenix-api-key`, `--phoenix-auto-instrument`, `--phoenix-no-batch`
+
+**Environment variables:** `RAG_MODE`, `RAG_FTS_REBUILD_POLICY`, `RAG_FTS_REBUILD_BATCH_SIZE`, `RAG_EAGER_LOAD`, `RAG_PHOENIX_ENABLED`, `PHOENIX_PROJECT_NAME`, `PHOENIX_COLLECTOR_ENDPOINT`
 
 **Output modes:** Full answer (default), `--no-generate` (context only), `--dump-prompt` (exact prompt messages), `--list-sources`
 
@@ -475,6 +521,18 @@ Thin wrapper around `RagEngine` for terminal workflows:
 
 **Latency profiler:** Zero-cost when disabled. Context-manager `span()` for named timing spans. `format_report()` outputs ASCII bar chart with accounted vs wall-clock breakdown. Tracks unaccounted time (overhead/overlap).
 
+### 4.18 Phoenix/Arize Tracing (`src/phoenix_tracing.py`)
+
+OpenTelemetry tracing integration with Phoenix export + feedback loop:
+
+- **Config env vars:** `RAG_PHOENIX_ENABLED`, `PHOENIX_PROJECT_NAME`, `PHOENIX_COLLECTOR_ENDPOINT`, `PHOENIX_API_KEY`, `RAG_PHOENIX_AUTO_INSTRUMENT`, `RAG_PHOENIX_BATCH`
+- **Span kinds:** `CHAIN`, `RETRIEVER`, `RERANKER`, `LLM`, `EMBEDDING`, `TOOL`
+- **Pipeline coverage:** query stream, freeform chat, intent classify, retrieval stages, budget packing, prompt build, ingest stages, and generation token metrics
+- **OpenInference helpers:** retrieval document flattening, reranker input/output documents, LLM input/output messages, token counts
+- **Trace propagation:** `TraceEvent(trace_id, span_id)` emitted to frontend (`data-trace-id`) and freeform `trace_id` SSE event
+- **Feedback annotations:** `/api/feedback` logs thumbs-up/down-style evaluations against specific span IDs
+- **Lifespan integration:** when tracing is enabled, API startup attempts local `phoenix.server.main serve` launch and tears it down on shutdown
+
 ---
 
 ## 5. Frontend Architecture
@@ -485,7 +543,8 @@ Thin wrapper around `RagEngine` for terminal workflows:
 - **Styling:** Tailwind CSS 4 with dark monochrome theme (`bg-gray-950`, blue accents, no light mode)
 - **State management:** React Context + `useReducer` (dual-context pattern: state + dispatch)
 - **Chat UI:** `@assistant-ui/react` + `@ai-sdk/react` for RAG mode; custom SSE streaming for freeform mode
-- **Streaming:** AI SDK v6 UI Message Stream with `onData` handler for custom annotations (status, intent, citations)
+- **Streaming:** AI SDK v6 UI Message Stream with `onData` handler for custom annotations (status, intent, citations, trace IDs)
+- **Geospatial map:** `maplibre-gl` + `@vis.gl/react-maplibre` + `@tanstack/react-query` for clustered map overlay and mention actions
 - **Markdown:** `react-markdown` + `remark-gfm` for freeform; `@assistant-ui/react-streamdown` with smooth streaming for RAG
 - **3D:** `@react-three/fiber` + `@react-three/drei` + Three.js for WebGL background themes
 - **Animations:** `framer-motion` / `motion` for UI transitions
@@ -498,7 +557,7 @@ Page (app/page.tsx)
     ThemeProvider (context/theme-context.tsx)
       AppProvider (context/app-context.tsx)
         TooltipProvider
-          Header Bar: Mode Tabs (RAG | Non-RAG) + New Chat + Theme Picker + History Toggle
+          Header Bar: Mode Tabs (RAG | Non-RAG) + Map Toggle + New Chat + Theme Picker + History Toggle
           Body (flex):
             SourcePanel (aside, 30% max 24rem, collapsible)
               ─ or ─ CitationPanelReader (replaces source panel when citation active)
@@ -524,6 +583,9 @@ Page (app/page.tsx)
                   Model selector (Regular / Deep Research)
                   Thinking toggle + display (ReasoningRoot)
                   Custom SSE streaming → /api/freeform/chat
+              MapOverlay (modal card over main area)
+                CorpusMap (MapLibre clusters + mention drill-down)
+                confidence slider + source-count indicator
             HistoryPanel (right-side drawer, w-72)
           Background Theme Layer (absolute-positioned WebGL/CSS effects)
 ```
@@ -544,6 +606,7 @@ Page (app/page.tsx)
   citationsByMessage: Record<string, Citation[]>; // Per-message citation data (NOT cleared on new query)
   activeCitation: Citation | null;     // Currently viewing citation (drives citation viewer)
   thinkingSteps: ThinkingStep[];       // Pipeline step log
+  traceInfoByMessage: Record<string, { traceId: string; spanId: string }>; // Per-message tracing IDs
   _stepCounter: number;                // Internal monotonic ID generator
   currentAssistantMessageId: string | null; // Active streaming message
   intentOverride: string;              // User-forced intent ("auto" = automatic)
@@ -551,7 +614,7 @@ Page (app/page.tsx)
 }
 ```
 
-**13 action types:** `QUERY_STARTED`, `QUERY_FINISHED`, `SET_STATUS`, `SET_ERROR`, `CLEAR_ERROR`, `SET_INTENT`, `SET_SOURCES`, `SET_CITATIONS`, `SET_CURRENT_MESSAGE_ID`, `SET_ACTIVE_CITATION`, `ADD_THINKING_STEP`, `SET_INTENT_OVERRIDE`, `SET_CHAT_MODE`
+**14 action types:** `QUERY_STARTED`, `QUERY_FINISHED`, `SET_STATUS`, `SET_ERROR`, `CLEAR_ERROR`, `SET_INTENT`, `SET_SOURCES`, `SET_CITATIONS`, `SET_CURRENT_MESSAGE_ID`, `SET_ACTIVE_CITATION`, `ADD_THINKING_STEP`, `SET_TRACE_INFO`, `SET_INTENT_OVERRIDE`, `SET_CHAT_MODE`
 
 ### 5.4 API Client (`lib/api-client.ts`)
 
@@ -562,16 +625,18 @@ Page (app/page.tsx)
 | `listSources()` | `GET /api/sources` | |
 | `getContent(sourceId)` | `GET /api/sources/:id/content` | Returns content + format |
 | `deleteSource(sourceId)` | `DELETE /api/sources/:id` | |
-| `uploadDocument(file, sourceId, summarize)` | `POST /api/sources/upload` | **Bypasses Next.js proxy** (calls backend directly) to avoid ~30s timeout |
+| `uploadDocument(file, sourceId, summarize, pageOffset?, geotag?)` | `POST /api/sources/upload` | **Bypasses Next.js proxy** (calls backend directly) to avoid ~30s timeout |
 | `getChunk(sourceId, chunkId)` | `GET /api/sources/:id/chunk/:cid` | |
 | `getChunks(sourceId, chunkIds)` | `GET /api/sources/:id/chunks?ids=...` | Batch fetch |
-| `ingest(filePath, sourceId, summarize)` | `POST /api/sources/ingest` | JSON body |
+| `ingest(filePath, sourceId, summarize, geotag)` | `POST /api/sources/ingest` | JSON body |
+| `getGeoMentions(sourceId?, minConfidence, limit, offset, detailed, sourceIds?)` | `GET /api/geo/mentions` | Source-aware grouped map payload |
+| `deleteGeoMention(mentionId)` | `DELETE /api/geo/mentions/:mentionId` | Manual map mention cleanup |
 
 **Backend URL resolution** (`lib/backend-url.ts`): `NEXT_PUBLIC_BACKEND_URL` env var or `http://127.0.0.1:8000`
 
 **Chat API route** (`app/api/chat/route.ts`): Streaming proxy to avoid Next.js dev-server SSE buffering. Forwards POST body to backend `/api/chat`, returns upstream `ReadableStream` directly. Sets `duplex: "half"` for Node.js unbuffered streaming, `X-Accel-Buffering: no` for nginx compatibility.
 
-**SSE event parser** (`lib/event-parser.ts`): `parseCustomEvent()` maps AI SDK v6 `onData` parts to typed `CustomEvent` discriminated union: `StatusEvent`, `IntentEvent`, `SourcesEvent`, `CitationsEvent`, `ErrorEvent`, `FinishStepEvent`
+**SSE event parser** (`lib/event-parser.ts`): `parseCustomEvent()` maps AI SDK v6 `onData` parts to typed `CustomEvent` discriminated union: `StatusEvent`, `IntentEvent`, `SourcesEvent`, `CitationsEvent`, `ErrorEvent`, `FinishStepEvent`, `TraceEvent`
 
 ### 5.5 Citation System (Frontend)
 
@@ -671,6 +736,16 @@ WebGL backgrounds rendered via `@react-three/fiber` (`components/gl/`). CSS-only
 - **`BranchPicker`:** Message versioning/alternatives with previous/next navigation
 - **`EditComposer`:** Inline message editing with cancel/update
 - **`Composer` input:** 3-state animated button: mic (empty+idle) / send (has text) / cancel (streaming)
+
+### 5.12 Geospatial Map UX
+
+- Header-level **Map** toggle opens a full main-panel overlay without unmounting chat panels
+- Confidence slider range: **0.50–0.99**, persisted in `localStorage` key `dh-map-threshold-v1`
+- Map payload is source-aware: only currently selected source IDs are rendered
+- Clustered points (MapLibre) expand on click; single-place click opens right-side mention detail drawer
+- Mention actions:
+  - **View source** → opens citation viewer at chunk with exact matched-input highlight
+  - **Delete mention** → calls `DELETE /api/geo/mentions/{mention_id}` then invalidates/refetches query cache to avoid stale map state
 
 ---
 
@@ -821,6 +896,9 @@ Frontend: useChatRuntime → POST /api/chat (via Next.js proxy route)
   │
   └── api.py: _chat_lock → background thread → rag_engine.query_events()
         │
+      ├── Trace bootstrap:
+      │     yields: TraceEvent(trace_id, span_id)
+      │
         ├── _step_classify():
         │     IntentClassifier.classify(query) → IntentResult
         │     Collection guard + low-info bypass
@@ -845,6 +923,7 @@ Frontend: useChatRuntime → POST /api/chat (via Next.js proxy route)
         └── stream_protocol.py: encode events → SSE frames → StreamingResponse
               │
               └── Frontend onData handler: parseCustomEvent() → AppContext dispatches
+              (including SET_TRACE_INFO for feedback wiring)
                     Renders via ChatMarkdownRenderer (streamdown, smooth streaming)
 ```
 
@@ -856,11 +935,12 @@ Frontend: FreeformChatPanel → POST /api/freeform/chat (direct SSE)
   └── api.py: _chat_lock → MlxGenerator.stream_chat_with_thinking()
                              (with conversation history, no retrieval)
         │
-        └── SSE events: thinking_token, token, error, complete
+          └── SSE events: trace_id, thinking_token, token, error, complete
               │
               └── Frontend: custom parseSSEStream() → batched state updates (50ms)
                     Session auto-saved to IndexedDB after exchange
                     AI-generated title via separate /api/freeform/chat call
+              Optional thumbs feedback posted to /api/feedback with trace/span IDs
 ```
 
 ### 8.3 Ingestion Flow
@@ -877,6 +957,10 @@ Frontend: IngestModal → sequential upload queue → POST /api/sources/upload (
         │
         ├── storage.add_parents(parents) + storage.add_children(children, embeddings)
         │
+        ├── Optional: _geotag_chunks(source_id, children, storage)
+        │     → GLiNER candidate extraction + offline geocoder.forward()
+        │     → storage.upsert_geo_mentions()
+        │
         ├── Optional: generator.generate_chat(summary prompt)
         │     → storage.upsert_source_summary()
         │
@@ -884,6 +968,24 @@ Frontend: IngestModal → sequential upload queue → POST /api/sources/upload (
               │
               └── Frontend: refresh source list, highlight new source (3s flash)
                     Save citation reference to localStorage if provided
+```
+
+### 8.4 Geospatial Map Flow
+
+```
+Frontend: Map toggle → CorpusMap
+  │
+  ├── sourceApi.getGeoMentions(...sourceIds, min_confidence)
+  │     GET /api/geo/mentions
+  │
+  ├── MapLibre renders clustered points + confidence-based styling
+  │
+  ├── Mention click → View source
+  │     GET /api/sources/{id}/chunk/{cid} → SET_ACTIVE_CITATION
+  │
+  └── Mention delete
+    DELETE /api/geo/mentions/{mention_id}
+    → React Query invalidate/refetch
 ```
 
 ---
@@ -906,13 +1008,17 @@ Frontend: IngestModal → sequential upload queue → POST /api/sources/upload (
 | `embeddings.py` | 155 | MLX embedding model wrapper (Qwen3-Embedding-0.6B), mean pooling |
 | `config.py` | 365 | Mode configs, RAM detection, intent retrieval/generation overrides |
 | `ingest.py` | 530 | PDF/Markdown parsing, chunking, summarization |
+| `geocoder.py` | 1077 | Offline GeoNames geocoder (forward/reverse/near + fuzzy disambiguation) |
+| `ner.py` | 164 | GLiNER place extraction with regex fallback for ingest geotagging |
+| `geo_types.py` | 18 | Shared geocoder enums/states |
 | `models.py` | 35 | ParentChunk, ChildChunk, Metadata (frozen Pydantic) |
 | `stream_protocol.py` | 252 | AI SDK v6 UI Message Stream encoder (SSE frames) |
-| `query_events.py` | 96 | Streaming event dataclasses (8 types) |
+| `query_events.py` | 96 | Streaming event dataclasses (9 types, including TraceEvent) |
 | `metrics.py` | 170 | Retrieval/budget metrics collection (6 dataclasses) |
 | `latency.py` | 107 | Zero-cost wall-clock latency profiler with ASCII chart |
 | `source_cache.py` | 175 | Text snapshot caching with filesystem-safe naming |
 | `transcription.py` | 387 | MLX Whisper speech-to-text with VAD |
+| `phoenix_tracing.py` | 646 | Phoenix/OpenTelemetry setup and span attribute helpers |
 | `cli.py` | 383 | CLI entry point (ingest + query commands) |
 
 ### Frontend (`frontend/src/`)
@@ -924,11 +1030,11 @@ Frontend: IngestModal → sequential upload queue → POST /api/sources/upload (
 | `app/providers.tsx` | ThemeProvider → AppProvider → TooltipProvider hierarchy |
 | `app/api/chat/route.ts` | Next.js streaming proxy to backend `/api/chat` (unbuffered, half-duplex) |
 | `app/globals.css` | Dark theme, citation highlight `<mark>`, scrollbar, shimmer animations |
-| `context/app-context.tsx` | Global state (useReducer, 13 actions, dual-context pattern) |
+| `context/app-context.tsx` | Global state (useReducer, 14 actions, dual-context pattern) |
 | `context/theme-context.tsx` | Background theme state (8 themes, localStorage persistence) |
 | `lib/api-client.ts` | Typed API client singleton for source CRUD (direct backend URL for uploads) |
 | `lib/backend-url.ts` | Backend URL resolution (`NEXT_PUBLIC_BACKEND_URL` or `127.0.0.1:8000`) |
-| `lib/event-parser.ts` | AI SDK v6 `onData` → typed `CustomEvent` discriminated union parser |
+| `lib/event-parser.ts` | AI SDK v6 `onData` → typed `CustomEvent` parser (includes trace-id events) |
 | `lib/session-store.ts` | IndexedDB session persistence (chat history with reasoning content) |
 | `lib/text-highlighter.ts` | Exact substring match + DOM `<mark>` injection |
 | `lib/citation-meta-store.ts` | localStorage persistence for user-provided citation reference strings |
@@ -940,6 +1046,7 @@ Frontend: IngestModal → sequential upload queue → POST /api/sources/upload (
 | `components/history-panel.tsx` | Chat history drawer with debounced search, session restore, glassmorphism |
 | `components/citation-viewer-modal.tsx` | Inline citation reader (replaces source panel), parallel content + chunk fetch |
 | `components/ingest-modal.tsx` | Drag-drop upload with optional citation reference text field |
+| `components/map/CorpusMap.tsx` | MapLibre geospatial layer with clustering, filtering, and mention actions |
 | `components/chat-markdown.tsx` | Citation-aware react-markdown for freeform mode |
 | `components/markdown-renderer.tsx` | Document markdown rendering with heading anchors + highlight pipeline |
 | `components/document-renderer.tsx` | Format router → MarkdownRenderer (`.md`) or PlainTextRenderer (`.pdf`/`.txt`) |
@@ -965,6 +1072,9 @@ Frontend: IngestModal → sequential upload queue → POST /api/sources/upload (
 # CLI: Ingest a document
 python -m src.cli ingest docs/paper.pdf --source-id my_paper --summarize
 
+# CLI: Ingest + geotag locations
+python -m src.cli ingest docs/paper.pdf --source-id my_paper --summarize --geotag
+
 # CLI: Query (auto mode, with citations)
 python -m src.cli query "What is the main argument?" --cite
 
@@ -989,6 +1099,21 @@ curl -N -H "Content-Type: application/json" \
 curl -F "file=@paper.pdf" -F "source_id=my_paper" -F "summarize=true" \
   http://127.0.0.1:8000/api/sources/upload
 
+# API: Upload + geotag
+curl -F "file=@paper.pdf" -F "source_id=my_paper" -F "summarize=true" -F "geotag=true" \
+  http://127.0.0.1:8000/api/sources/upload
+
+# API: List geo mentions (source-filtered)
+curl "http://127.0.0.1:8000/api/geo/mentions?min_confidence=0.75&source_ids=my_paper"
+
+# API: Reverse geocode
+curl "http://127.0.0.1:8000/api/geocode/reverse?lat=51.9&lon=-8.47&k=3"
+
+# API: Submit feedback annotation for a traced response
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"trace_id":"<trace_id>","span_id":"<span_id>","label":"👍","score":1.0}' \
+  http://127.0.0.1:8000/api/feedback
+
 # Start backend
 source .venv/bin/activate && uvicorn src.api:app --host 127.0.0.1 --port 8000
 
@@ -1009,7 +1134,10 @@ cd frontend && npm run dev
 | **Storage** | `lancedb`, `pyarrow`, `pydantic` |
 | **PDF** | `pypdf`, `pdfminer.six`, `PyMuPDF` (fitz), `pytesseract`, `pdf2image` |
 | **API** | `fastapi`, `uvicorn`, `python-multipart`, `httpx` (test only) |
+| **Observability** | `arize-phoenix-otel` |
 | **Speech** | `mlx-whisper`, `soundfile`, `scipy`, `av` (PyAV) |
+| **Geospatial** | `rapidfuzz`, `pycountry` |
+| **NER (Geo ingest)** | `gliner`, `gliner-spacy` |
 | **System** | `psutil` (optional, RAM detection) |
 
 ### Frontend (Node.js)
@@ -1020,6 +1148,7 @@ cd frontend && npm run dev
 | **AI/Chat** | `ai` (AI SDK) ^6.0, `@ai-sdk/react`, `@assistant-ui/react` ^0.12, `@assistant-ui/react-ai-sdk`, `@assistant-ui/react-markdown`, `@assistant-ui/react-streamdown`, `streamdown` |
 | **Markdown** | `react-markdown`, `remark-gfm` |
 | **UI** | `@radix-ui/*` (avatar, collapsible, dialog, popover, select, slot, tooltip), `lucide-react`, `framer-motion`/`motion`, `class-variance-authority`, `clsx`, `tailwind-merge` |
+| **Geospatial** | `maplibre-gl`, `@vis.gl/react-maplibre`, `@tanstack/react-query` |
 | **3D/Visual** | `@react-three/fiber`, `@react-three/drei`, `three`, `maath`, `r3f-perf`, `leva` |
 | **Styling** | `tailwindcss` 4, `@tailwindcss/postcss` |
 
@@ -1033,6 +1162,9 @@ data/
     child_chunks.lance/     # Vector + FTS index (hybrid-searched)
     parent_chunks.lance/    # Parent text for context expansion
     source_summaries.lance/ # Per-source metadata + summaries
+    geo_mentions.lance/     # Geocoded place mentions for map rendering
+  cities500.txt             # GeoNames canonical place dataset
+  geo_version.json          # GeoNames checksum/build metadata
   source_cache/             # Full-text snapshots (.txt)
   uploads/                  # Uploaded files (saved before ingestion)
 ```
