@@ -328,7 +328,15 @@ def _normalize_attr_value(value: Any, *, max_text_chars: int) -> Any:
                     normalized.append(item)
             return normalized
 
-    serialized = json.dumps(value, ensure_ascii=True)
+    try:
+        serialized = json.dumps(value, ensure_ascii=True)
+    except (TypeError, ValueError):
+        try:
+            serialized = str(value)
+        except Exception:
+            logger.debug("Failed to stringify attribute value of type %s", type(value).__name__, exc_info=True)
+            return None
+
     if len(serialized) > max_text_chars:
         return serialized[:max_text_chars] + "..."
     return serialized

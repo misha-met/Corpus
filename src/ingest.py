@@ -640,7 +640,7 @@ def ingest_file_to_storage(
                 set_span_attributes(
                     embed_span,
                     {
-                        "rag.ingest.embedding_batches": len(texts),
+                        "rag.ingest.children_encoded_count": len(texts),
                     },
                 )
 
