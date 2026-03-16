@@ -327,9 +327,11 @@ def _normalize_attr_value(value: Any, *, max_text_chars: int) -> Any:
                 else:
                     normalized.append(item)
             return normalized
-        return json.dumps(value, ensure_ascii=True)
 
-    return json.dumps(value, ensure_ascii=True)
+    serialized = json.dumps(value, ensure_ascii=True)
+    if len(serialized) > max_text_chars:
+        return serialized[:max_text_chars] + "..."
+    return serialized
 
 
 def set_span_attribute(span: Any, key: str, value: Any, *, max_text_chars: int = 4096) -> None:
@@ -353,6 +355,38 @@ def set_span_attributes(span: Any, attributes: dict[str, Any], *, max_text_chars
         return
     for key, value in attributes.items():
         set_span_attribute(span, key, value, max_text_chars=max_text_chars)
+
+
+def format_openinference_document(
+    document_id: str,
+    content: str,
+    score: float,
+    metadata: Optional[dict[str, Any]] = None,
+    max_content_chars: int = 400,
+) -> dict[str, Any]:
+    """Build a single OpenInference-style document dictionary.
+
+    Consolidates the logic for mapping retrieval results to the schema
+    expected by Phoenix and other OpenInference-compatible UIs.
+    """
+
+    clean_content = content.strip()
+    if len(clean_content) > max_content_chars:
+        clean_content = clean_content[:max_content_chars] + "..."
+
+    meta = metadata if isinstance(metadata, dict) else {}
+
+    return {
+        "document.id": document_id,
+        "document.score": round(float(score), 6),
+        "document.content": clean_content,
+        "document.metadata": {
+            "source_id": meta.get("source_id"),
+            "page_number": meta.get("page_number"),
+            "display_page": meta.get("display_page"),
+            "header_path": meta.get("header_path"),
+        },
+    }
 
 
 def set_retrieval_documents(
@@ -555,6 +589,10 @@ def annotate_span_feedback(
     Requires ``arize-phoenix`` (not just ``arize-phoenix-otel``).
     Returns True on success, False if the package is unavailable or the call fails.
     """
+    if not trace_id or not span_id:
+        logger.warning("annotate_span_feedback requires both trace_id and span_id")
+        return False
+
     try:
         import phoenix as px  # type: ignore[import-untyped]
         from phoenix.trace.span_evaluations import SpanEvaluations  # type: ignore[import-untyped]
@@ -583,6 +621,7 @@ def annotate_span_feedback(
             [
                 {
                     "span_id": span_id,
+                    "trace_id": trace_id,
                     "label": label,
                     "score": score,
                     "explanation": comment or "",
@@ -592,7 +631,7 @@ def annotate_span_feedback(
         
         evals = SpanEvaluations(eval_name="user-feedback", dataframe=df)
         client.log_evaluations(evals)
-        logger.info("Phoenix annotation logged: span_id=%s label=%s", span_id, label)
+        logger.info("Phoenix annotation logged: trace_id=%s span_id=%s label=%s", trace_id, span_id, label)
         return True
     except Exception as exc:
         logger.warning("Failed to annotate span in Phoenix: %s", exc)

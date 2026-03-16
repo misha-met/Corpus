@@ -37,6 +37,7 @@ from .metrics import (
 from .phoenix_tracing import (
     SPAN_KIND_RERANKER,
     SPAN_KIND_RETRIEVER,
+    format_openinference_document,
     set_reranker_documents,
     set_retrieval_documents,
     set_span_attributes,
@@ -645,28 +646,20 @@ class RetrievalEngine:
         items: list[dict[str, Any]],
         *,
         limit: int = 8,
-        max_content_chars: int = 220,
+        max_content_chars: int = 400,
     ) -> list[dict[str, Any]]:
         documents: list[dict[str, Any]] = []
         for item in items:
             if len(documents) >= max(1, limit):
                 break
-            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-            content = (item.get("text") or "").strip()
-            if len(content) > max_content_chars:
-                content = content[:max_content_chars] + "..."
             documents.append(
-                {
-                    "document.id": item.get("id"),
-                    "document.score": round(float(item.get("rerank_score", item.get("score", 0.0))), 6),
-                    "document.content": content,
-                    "document.metadata": {
-                        "source_id": metadata.get("source_id"),
-                        "page_number": metadata.get("page_number"),
-                        "display_page": metadata.get("display_page"),
-                        "header_path": metadata.get("header_path"),
-                    },
-                }
+                format_openinference_document(
+                    document_id=item.get("id", "unknown"),
+                    content=item.get("text") or "",
+                    score=item.get("rerank_score", item.get("score", 0.0)),
+                    metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else {},
+                    max_content_chars=max_content_chars,
+                )
             )
         return documents
 
@@ -675,28 +668,20 @@ class RetrievalEngine:
         results: list[RetrievalResult],
         *,
         limit: int = 8,
-        max_content_chars: int = 220,
+        max_content_chars: int = 400,
     ) -> list[dict[str, Any]]:
         documents: list[dict[str, Any]] = []
         for result in results:
             if len(documents) >= max(1, limit):
                 break
-            metadata = result.metadata if isinstance(result.metadata, dict) else {}
-            content = (result.text or "").strip()
-            if len(content) > max_content_chars:
-                content = content[:max_content_chars] + "..."
             documents.append(
-                {
-                    "document.id": result.child_id,
-                    "document.score": round(float(result.score), 6),
-                    "document.content": content,
-                    "document.metadata": {
-                        "source_id": metadata.get("source_id"),
-                        "page_number": metadata.get("page_number"),
-                        "display_page": metadata.get("display_page"),
-                        "header_path": metadata.get("header_path"),
-                    },
-                }
+                format_openinference_document(
+                    document_id=result.child_id,
+                    content=result.text or "",
+                    score=result.score,
+                    metadata=result.metadata,
+                    max_content_chars=max_content_chars,
+                )
             )
         return documents
 

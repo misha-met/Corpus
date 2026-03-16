@@ -499,6 +499,9 @@ const AssistantActionBar: FC = () => {
       return acc + (part as { text: string }).text;
     }, ""),
   );
+  const messageId = useAuiState((s) => s.message.id);
+  const { traceInfoByMessage } = useAppState();
+  const traceInfo = traceInfoByMessage[messageId];
   const [isCleanlyCopied, setIsCleanlyCopied] = useState(false);
   const [feedbackState, setFeedbackState] = useState<"up" | "down" | null>(null);
 
@@ -513,6 +516,24 @@ const AssistantActionBar: FC = () => {
       setTimeout(() => setIsCleanlyCopied(false), 2000);
     });
   }, [messageText]);
+
+  const handleFeedback = useCallback((label: "👍" | "👎", score: number) => {
+    const newState = (label === "👍" ? "up" : "down");
+    setFeedbackState((prev) => (prev === newState ? null : newState));
+    
+    if (traceInfo) {
+      fetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          trace_id: traceInfo.traceId,
+          span_id: traceInfo.spanId,
+          label,
+          score,
+        }),
+      }).catch(console.error);
+    }
+  }, [traceInfo]);
 
   return (
     <ActionBarPrimitive.Root
@@ -536,7 +557,8 @@ const AssistantActionBar: FC = () => {
         <TooltipIconButton
           tooltip="Good response"
           side="top"
-          onClick={() => setFeedbackState((prev) => (prev === "up" ? null : "up"))}
+          disabled={!traceInfo}
+          onClick={() => handleFeedback("👍", 1.0)}
           className={feedbackState === "up" ? "text-green-400" : undefined}
         >
           <ThumbsUpIcon />
@@ -546,7 +568,8 @@ const AssistantActionBar: FC = () => {
         <TooltipIconButton
           tooltip="Poor response"
           side="top"
-          onClick={() => setFeedbackState((prev) => (prev === "down" ? null : "down"))}
+          disabled={!traceInfo}
+          onClick={() => handleFeedback("👎", 0.0)}
           className={feedbackState === "down" ? "text-red-400" : undefined}
         >
           <ThumbsDownIcon />

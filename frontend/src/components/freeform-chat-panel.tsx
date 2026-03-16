@@ -212,7 +212,6 @@ export function FreeformChatPanel({
   const [errorText, setErrorText] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [feedbackState, setFeedbackState] = useState<Record<string, "up" | "down" | null>>({});
-  const [traceInfo, setTraceInfo] = useState<{ trace_id: string; span_id: string } | null>(null);
   const [selectedModel, setSelectedModel] = useState("regular");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
@@ -431,7 +430,13 @@ export function FreeformChatPanel({
             try {
               const parsed = JSON.parse(data);
               if (parsed.trace_id) {
-                setTraceInfo({ trace_id: parsed.trace_id, span_id: parsed.span_id || "" });
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === assistantId
+                      ? { ...m, traceId: parsed.trace_id, spanId: parsed.span_id || "" }
+                      : m
+                  ),
+                );
               }
             } catch { /* skip */ }
           } else if (event === "thinking_token") {
@@ -461,18 +466,20 @@ export function FreeformChatPanel({
               updateTimerRef.current = null;
             }
             const finalText = streamingTextRef.current;
-            const finalMessages = nextMessages.map((m) =>
-              m.id === assistantId
-                ? {
-                    ...m,
-                    content: finalText,
-                    thinkingContent: thinkingTextRef.current || undefined,
-                    timestamp: Date.now(),
-                  }
-                : m,
-            );
-            setMessages(finalMessages);
-            saveCurrentSession(finalMessages);
+            setMessages((prev) => {
+              const final = prev.map((m) =>
+                m.id === assistantId
+                  ? {
+                      ...m,
+                      content: finalText,
+                      thinkingContent: thinkingTextRef.current || undefined,
+                      timestamp: Date.now(),
+                    }
+                  : m,
+              );
+              saveCurrentSession(final);
+              return final;
+            });
           }
         }
       } catch (err) {
@@ -630,13 +637,13 @@ export function FreeformChatPanel({
                     onClick={() => {
                       const newState = feedbackState[message.id] === "up" ? null : "up";
                       setFeedbackState((prev) => ({ ...prev, [message.id]: newState }));
-                      if (newState && traceInfo) {
+                      if (newState && message.traceId) {
                         fetch(`${BACKEND_BASE}/api/feedback`, {
                           method: "POST",
                           headers: { "Content-Type": "application/json" },
                           body: JSON.stringify({
-                            span_id: traceInfo.span_id,
-                            trace_id: traceInfo.trace_id,
+                            span_id: message.spanId,
+                            trace_id: message.traceId,
                             label: "👍",
                             score: 1.0,
                           }),
@@ -658,13 +665,13 @@ export function FreeformChatPanel({
                     onClick={() => {
                       const newState = feedbackState[message.id] === "down" ? null : "down";
                       setFeedbackState((prev) => ({ ...prev, [message.id]: newState }));
-                      if (newState && traceInfo) {
+                      if (newState && message.traceId) {
                         fetch(`${BACKEND_BASE}/api/feedback`, {
                           method: "POST",
                           headers: { "Content-Type": "application/json" },
                           body: JSON.stringify({
-                            span_id: traceInfo.span_id,
-                            trace_id: traceInfo.trace_id,
+                            span_id: message.spanId,
+                            trace_id: message.traceId,
                             label: "👎",
                             score: 0.0,
                           }),

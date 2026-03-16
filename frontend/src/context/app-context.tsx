@@ -59,6 +59,8 @@ export interface AppState {
   activeCitation: Citation | null;
   /** Ordered log of pipeline steps emitted during the current query (cleared on QUERY_STARTED) */
   thinkingSteps: ThinkingStep[];
+  /** Trace ID and Span ID grouped by assistant message ID */
+  traceInfoByMessage: Record<string, { traceId: string; spanId: string }>;
   /** Internal counter for generating unique ThinkingStep IDs */
   _stepCounter: number;
   /** The message ID of the assistant response currently generating */
@@ -78,6 +80,7 @@ const initialState: AppState = {
   citationsByMessage: {},
   activeCitation: null,
   thinkingSteps: [],
+  traceInfoByMessage: {},
   _stepCounter: 0,
   currentAssistantMessageId: null,
   intentOverride: "auto",
@@ -112,6 +115,7 @@ export type AppAction =
   | { type: "SET_CURRENT_MESSAGE_ID"; messageId: string }
   | { type: "SET_ACTIVE_CITATION"; citation: Citation | null }
   | { type: "ADD_THINKING_STEP"; message: string }
+  | { type: "SET_TRACE_INFO"; traceId: string; spanId: string }
   | { type: "SET_INTENT_OVERRIDE"; intentOverride: string }
   | { type: "SET_CHAT_MODE"; mode: "rag" | "freeform" };
 
@@ -185,6 +189,17 @@ function appReducer(state: AppState, action: AppAction): AppState {
         thinkingSteps: [...state.thinkingSteps, { id, message: action.message }],
       };
     }
+    case "SET_TRACE_INFO":
+      if (!state.currentAssistantMessageId) {
+        return state;
+      }
+      return {
+        ...state,
+        traceInfoByMessage: {
+          ...state.traceInfoByMessage,
+          [state.currentAssistantMessageId]: { traceId: action.traceId, spanId: action.spanId }
+        }
+      };
     case "SET_INTENT_OVERRIDE":
       return { ...state, intentOverride: action.intentOverride };
     case "SET_CHAT_MODE":

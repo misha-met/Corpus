@@ -247,6 +247,13 @@ export default function Page() {
       case "error":
         dispatch({ type: "SET_ERROR", message: event.error.message });
         break;
+      case "trace-id":
+        dispatch({
+          type: "SET_TRACE_INFO",
+          traceId: event.traceId,
+          spanId: event.spanId,
+        });
+        break;
       // "finish-step" and other internal protocol events are ignored here
     }
   }, [dispatch]);

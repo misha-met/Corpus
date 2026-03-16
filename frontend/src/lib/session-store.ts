@@ -17,6 +17,8 @@ export interface FreeChatMessage {
   /** Captured <think>…</think> reasoning chain, set when thinking mode is on */
   thinkingContent?: string;
   timestamp: number;
+  traceId?: string;
+  spanId?: string;
 }
 
 export interface ChatSession {

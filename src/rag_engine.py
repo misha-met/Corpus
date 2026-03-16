@@ -56,6 +56,7 @@ from .phoenix_tracing import (
     SPAN_KIND_LLM,
     SPAN_KIND_RETRIEVER,
     PhoenixTracingStatus,
+    format_openinference_document,
     get_phoenix_tracer,
     mark_span_error,
     set_llm_input_messages,
@@ -83,6 +84,7 @@ from .query_events import (
     StatusEvent,
     TextTokenEvent,
     ThinkingTokenEvent,
+    TraceEvent,
 )
 from .storage import StorageConfig, StorageEngine
 
@@ -291,30 +293,21 @@ def _build_openinference_retrieval_documents(
     results: Iterable[RetrievalResult],
     *,
     limit: int = 8,
-    max_content_chars: int = 320,
+    max_content_chars: int = 400,
 ) -> list[dict[str, Any]]:
     docs: list[dict[str, Any]] = []
     for result in results:
         if len(docs) >= max(1, limit):
             break
 
-        metadata = result.metadata if isinstance(result.metadata, dict) else {}
-        content = (result.text or "").strip()
-        if len(content) > max_content_chars:
-            content = content[:max_content_chars] + "..."
-
         docs.append(
-            {
-                "document.id": result.child_id,
-                "document.score": round(float(result.score), 6),
-                "document.content": content,
-                "document.metadata": {
-                    "source_id": metadata.get("source_id"),
-                    "page_number": metadata.get("page_number"),
-                    "display_page": metadata.get("display_page"),
-                    "header_path": metadata.get("header_path"),
-                },
-            }
+            format_openinference_document(
+                document_id=result.child_id,
+                content=result.text or "",
+                score=result.score,
+                metadata=result.metadata,
+                max_content_chars=max_content_chars,
+            )
         )
     return docs
 
@@ -1405,6 +1398,20 @@ class RagEngine:
 
         if self._memory_constrained and self._generator is not None:
             self._release_generator_model()
+
+        if self._tracer is not None:
+            try:
+                from opentelemetry import trace
+                span = trace.get_current_span()
+                if span:
+                    ctx = span.get_span_context()
+                    if ctx.is_valid:
+                        yield TraceEvent(
+                            trace_id=format(ctx.trace_id, '032x'),
+                            span_id=format(ctx.span_id, '016x'),
+                        )
+            except Exception as e:
+                logger.debug("Failed to extract trace_id for TraceEvent: %s", e)
 
         # -- load retrieval models -----------------------------------------
         yield StatusEvent(status="Preparing retrieval models...")

@@ -58,6 +58,7 @@ from .query_events import (
     StatusEvent,
     TextTokenEvent,
     ThinkingTokenEvent,
+    TraceEvent,
 )
 from .phoenix_tracing import (
     SPAN_KIND_CHAIN,
@@ -79,6 +80,7 @@ from .stream_protocol import (
     annotation_intent,
     annotation_sources,
     annotation_status,
+    encode_annotation,
     encode_done,
     encode_error,
     encode_finish_message,
@@ -399,6 +401,12 @@ def _encode_event(event: QueryEvent) -> Optional[str]:
             encode_finish_step(event.finish_reason)
             + encode_finish_message(event.finish_reason)
         )
+    elif isinstance(event, TraceEvent):
+        return encode_annotation([{
+            "type": "trace-id",
+            "trace_id": event.trace_id,
+            "span_id": event.span_id,
+        }])
     logger.warning("Unknown event type: %s", type(event).__name__)
     return None
 

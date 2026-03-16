@@ -73,6 +73,12 @@ export interface FinishStepEvent {
   isContinued: boolean;
 }
 
+export interface TraceEvent {
+  type: "trace-id";
+  traceId: string;
+  spanId: string;
+}
+
 /** All custom event variants that the backend can produce */
 export type CustomEvent =
   | StatusEvent
@@ -80,7 +86,8 @@ export type CustomEvent =
   | SourcesEvent
   | CitationsEvent
   | ErrorEvent
-  | FinishStepEvent;
+  | FinishStepEvent
+  | TraceEvent;
 
 // ---------------------------------------------------------------------------
 // Parser
@@ -189,6 +196,18 @@ export function parseCustomEvent(dataPart: unknown): CustomEvent | null {
         finishReason: typeof d?.["finishReason"] === "string" ? d["finishReason"] : "stop",
         isContinued: Boolean(d?.["isContinued"]),
       };
+    }
+
+    case "data-trace-id": {
+      const d = part["data"] as Record<string, unknown> | null | undefined;
+      if (typeof d?.["trace_id"] === "string") {
+        return {
+          type: "trace-id",
+          traceId: d["trace_id"],
+          spanId: (d["span_id"] as string) ?? "",
+        };
+      }
+      return null;
     }
 
     default:

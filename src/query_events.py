@@ -75,6 +75,14 @@ class CitationListEvent:
 
 
 @dataclass(frozen=True)
+class TraceEvent:
+    """OpenTelemetry trace and span IDs for the current request."""
+
+    trace_id: str
+    span_id: str
+
+
+@dataclass(frozen=True)
 class FinishEvent:
     """Pipeline execution complete."""
 
@@ -91,6 +99,7 @@ QueryEvent = Union[
     TextTokenEvent,
     ThinkingTokenEvent,
     CitationListEvent,
+    TraceEvent,
     ErrorEvent,
     FinishEvent,
 ]
