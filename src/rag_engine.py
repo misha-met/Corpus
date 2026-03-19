@@ -368,7 +368,7 @@ def _dedupe_citations_by_source_page(
     citation_list: list[dict[str, Any]],
     context: str,
 ) -> tuple[list[dict[str, Any]], str, list[int]]:
-    """Collapse duplicate citations using key ``(source_id, page_number)``.
+    """Collapse duplicate citations using source/page, with safe fallback.
 
     Returns a tuple of ``(deduped_citations, deduped_context, kept_positions)``.
     If context blocks cannot be safely remapped, this function is a no-op.
@@ -376,14 +376,20 @@ def _dedupe_citations_by_source_page(
     if not citation_list:
         return citation_list, context, []
 
-    seen: set[tuple[str, Optional[int]]] = set()
+    seen: set[tuple[str, str]] = set()
     kept_entries: list[dict[str, Any]] = []
     kept_positions: list[int] = []
 
     for pos, entry in enumerate(citation_list):
         source_id = str(entry.get("source_id", "")).strip()
         page_number = _normalize_page_number(entry.get("page_number"))
-        key = (source_id, page_number)
+        if page_number is not None:
+            dedupe_token = f"page:{page_number}"
+        else:
+            # Unknown page numbers should not collapse distinct passages.
+            chunk_id = str(entry.get("chunk_id", "")).strip()
+            dedupe_token = f"chunk:{chunk_id}" if chunk_id else f"row:{pos}"
+        key = (source_id, dedupe_token)
         if key in seen:
             continue
         seen.add(key)

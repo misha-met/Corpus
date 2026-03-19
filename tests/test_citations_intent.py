@@ -167,6 +167,66 @@ class TestCitationDedupeStage:
         assert "[PASSAGE 4]" not in deduped.context
         assert deduped.context.count("[PASSAGE END]") == 3
 
+    def test_keeps_distinct_passages_when_page_unknown(self):
+        import src.rag_engine as _mod
+
+        texts = [
+            "Doc A unknown-page first passage.",
+            "Doc A unknown-page second passage.",
+            "Doc B unknown-page passage.",
+        ]
+        metadatas = [
+            {"source_id": "doc_a", "page_number": None, "display_page": None},
+            {"source_id": "doc_a", "page_number": None, "display_page": None},
+            {"source_id": "doc_b", "page_number": None, "display_page": None},
+        ]
+        chunk_ids = ["c1", "c2", "c3"]
+
+        context, _ = format_context_with_citations(
+            texts=texts,
+            metadatas=metadatas,
+            chunk_ids=chunk_ids,
+        )
+        citation_list = [
+            {
+                "index": i + 1,
+                "source_id": meta["source_id"],
+                "chunk_id": chunk_ids[i],
+                "page_number": meta["page_number"],
+                "display_page": meta["display_page"],
+                "start_page": meta["page_number"],
+                "end_page": meta["page_number"],
+                "header_path": "Document",
+                "chunk_text": texts[i],
+            }
+            for i, meta in enumerate(metadatas)
+        ]
+
+        packed = _mod._PackResult(
+            context=context,
+            cite=True,
+            source_legend=None,
+            result_metadatas=metadatas,
+            budget_metrics=None,
+            citation_list=citation_list,
+            packed_retrieval_results=[],
+            pack_result=None,
+            packed_metadatas=metadatas,
+        )
+
+        engine = _mod.RagEngine.__new__(_mod.RagEngine)
+        engine._tracer = None
+
+        deduped = _mod.RagEngine._step_dedupe_citations(
+            engine,
+            packed,
+            span_name="test.citations.dedupe",
+        )
+
+        assert [entry["index"] for entry in deduped.citation_list] == [1, 2, 3]
+        assert [entry["chunk_id"] for entry in deduped.citation_list] == ["c1", "c2", "c3"]
+        assert deduped.context.count("[PASSAGE END]") == 3
+
     def test_noop_when_citations_disabled(self):
         import src.rag_engine as _mod
 

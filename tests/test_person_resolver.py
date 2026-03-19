@@ -54,6 +54,22 @@ def test_matching_order_exact_then_fuzzy() -> None:
     assert third["method"] == "exact"
 
 
+def test_new_path_confidence_comes_from_ner_score() -> None:
+    resolver = _resolver()
+
+    resolved = resolver.resolve(
+        raw_name="Unseen Person",
+        source_id="doc_z",
+        ner_score=0.37,
+        context_words=["mentioned"],
+        context_snippet="mentioned Unseen Person",
+    )
+
+    assert resolved is not None
+    assert resolved["method"] == "new"
+    assert resolved["confidence"] == 0.37
+
+
 def test_canonical_promotion_prefers_more_informative_variant() -> None:
     resolver = _resolver()
 

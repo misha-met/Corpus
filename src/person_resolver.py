@@ -316,7 +316,7 @@ class PersonResolver:
         )
 
         method = "new"
-        match_confidence = 1.0
+        match_confidence = 0.0
 
         with self._lock:
             canonical_name = self._normalized_to_canonical.get(normalized)

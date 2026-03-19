@@ -777,7 +777,7 @@ def _peopletag_chunks(
             diagnostics = NERDiagnostics(ner_available=True, method="gliner")
 
         mentions: list[dict[str, Any]] = []
-        seen: set[tuple[str, str, int, int]] = set()
+        seen: set[tuple[str, str, str]] = set()
 
         for chunk, candidates in zip(child_chunks, ner_lists):
             for candidate in candidates:
