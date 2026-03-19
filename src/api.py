@@ -1895,7 +1895,12 @@ async def get_source_content(source_id: str):
         snapshot_path = detail.get("snapshot_path", "") or None
         fmt = _detect_format(source_path)
 
-        result = await asyncio.to_thread(resolve_content, source_path, snapshot_path)
+        result = await asyncio.to_thread(
+            resolve_content,
+            source_path,
+            snapshot_path,
+            prefer_snapshot=True,
+        )
         if result is None:
             # Fallback: try to assemble content from parent texts
             parent_texts = storage.get_parent_texts_by_source(source_id=source_id)

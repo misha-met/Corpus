@@ -69,6 +69,26 @@ _ADAPTIVE_THRESHOLD_FACTOR: float = 0.15
 _PAGE_MARKER_RE = re.compile(r"\[Page\s+\d+\]", re.IGNORECASE)
 
 
+class _NoOpSpan:
+    """No-op span used when tracing is disabled.
+
+    ``start_span`` yields ``None`` when no tracer is configured; this shim
+    lets retrieval code keep direct span method calls without guard branches.
+    """
+
+    def set_attribute(self, *_args: Any, **_kwargs: Any) -> None:
+        return
+
+    def set_status(self, *_args: Any, **_kwargs: Any) -> None:
+        return
+
+    def record_exception(self, *_args: Any, **_kwargs: Any) -> None:
+        return
+
+
+_NOOP_SPAN = _NoOpSpan()
+
+
 @dataclass(frozen=True)
 class _SubThresholdPolicy:
     starvation_floor_ratio: float
@@ -434,6 +454,7 @@ class RetrievalEngine:
         t0 = time.perf_counter()
         import collections
         with start_span(self._tracer, "retrieval.embedding") as embed_span:
+            embed_span = embed_span or _NOOP_SPAN
             try:
                 embed_span.set_attribute(
                     SpanAttributes.OPENINFERENCE_SPAN_KIND,
@@ -909,12 +930,14 @@ class RetrievalEngine:
                 "rag.reranker_enabled": reranker_enabled,
                 "rag.context_expansion_enabled": context_expansion_enabled,
             }) as search_span:
+            search_span = search_span or _NOOP_SPAN
             try:
                 search_span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, OpenInferenceSpanKindValues.CHAIN.value)
                 search_span.set_attribute(SpanAttributes.INPUT_VALUE, query)
                 search_span.set_attribute(SpanAttributes.INPUT_MIME_TYPE, "text/plain")
                 # Stage 1: Hybrid search
                 with start_span(self._tracer, "retrieval.stage.hybrid_search") as stage_span:
+                    stage_span = stage_span or _NOOP_SPAN
                     try:
                         stage_span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, OpenInferenceSpanKindValues.RETRIEVER.value)
                         set_graph_node(
@@ -962,6 +985,7 @@ class RetrievalEngine:
 
                 # Stage 2: Rerank
                 with start_span(self._tracer, "retrieval.stage.rerank") as stage_span:
+                    stage_span = stage_span or _NOOP_SPAN
                     try:
                         stage_span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, OpenInferenceSpanKindValues.RERANKER.value)
                         set_graph_node(
@@ -1032,6 +1056,7 @@ class RetrievalEngine:
                     "retrieval.stage.dedup_initial",
                     span_kind=SPAN_KIND_RETRIEVER,
                 ) as stage_span:
+                    stage_span = stage_span or _NOOP_SPAN
                     try:
                         set_graph_node(
                             stage_span,
@@ -1081,6 +1106,7 @@ class RetrievalEngine:
                     self._tracer,
                     "retrieval.stage.threshold_filter",
                 ) as stage_span:
+                    stage_span = stage_span or _NOOP_SPAN
                     try:
                         # Task 5 — semantically a guardrail: rejects low-relevance candidates.
                         stage_span.set_attribute(
@@ -1152,6 +1178,7 @@ class RetrievalEngine:
                     "retrieval.stage.budget_expand",
                     span_kind=SPAN_KIND_RETRIEVER,
                 ) as stage_span:
+                    stage_span = stage_span or _NOOP_SPAN
                     try:
                         set_graph_node(
                             stage_span,
@@ -1205,6 +1232,7 @@ class RetrievalEngine:
                     "retrieval.stage.final_dedup",
                     span_kind=SPAN_KIND_RETRIEVER,
                 ) as stage_span:
+                    stage_span = stage_span or _NOOP_SPAN
                     try:
                         set_graph_node(
                             stage_span,
@@ -1244,6 +1272,7 @@ class RetrievalEngine:
                     "retrieval.stage.context_expand",
                     span_kind=SPAN_KIND_RETRIEVER,
                 ) as stage_span:
+                    stage_span = stage_span or _NOOP_SPAN
                     try:
                         set_graph_node(
                             stage_span,

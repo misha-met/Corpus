@@ -145,15 +145,14 @@ def _extract_pdf_text(path: Path) -> Optional[str]:
 def resolve_content(
     source_path: Optional[str],
     snapshot_path: Optional[str],
+    *,
+    prefer_snapshot: bool = False,
 ) -> Optional[tuple[str, str]]:
     """Resolve document content using the fallback chain.
 
     Resolution order:
-    1. Cached snapshot_path (if exists) — preferred because it is built from
-       the same parent-chunk texts stored in the vector DB, guaranteeing that
-       citation highlight needles can be found verbatim.
-    2. Original source_path (if readable) — fallback for sources that were
-       never snapshotted.
+    - ``prefer_snapshot=False`` (default): original source_path → cached snapshot_path
+    - ``prefer_snapshot=True``: cached snapshot_path → original source_path
 
     Returns
     -------
@@ -161,16 +160,23 @@ def resolve_content(
         (content, source_type) where source_type is 'snapshot' or 'original'.
         Returns None if neither is available.
     """
-    # Prefer cached snapshot: text matches the parent_text values in lance
-    if snapshot_path:
-        content = read_snapshot(snapshot_path)
-        if content:
-            return (content, "snapshot")
-
-    # Fall back to original file (plain-text sources without a snapshot)
-    if source_path:
-        content = read_original_file(source_path)
-        if content:
-            return (content, "original")
+    if prefer_snapshot:
+        if snapshot_path:
+            content = read_snapshot(snapshot_path)
+            if content:
+                return (content, "snapshot")
+        if source_path:
+            content = read_original_file(source_path)
+            if content:
+                return (content, "original")
+    else:
+        if source_path:
+            content = read_original_file(source_path)
+            if content:
+                return (content, "original")
+        if snapshot_path:
+            content = read_snapshot(snapshot_path)
+            if content:
+                return (content, "snapshot")
 
     return None

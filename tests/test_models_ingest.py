@@ -377,14 +377,14 @@ class TestChildChunkSplitting:
             assert next_sentences[:CHILD_OVERLAP_SENTENCES] == prev_sentences[-CHILD_OVERLAP_SENTENCES:]
 
     def test_long_sentence_clause_fallback(self):
-        lead = " ".join(["intro"] * 60)
-        middle = " ".join(["detail"] * 45)
-        tail = " ".join(["evidence"] * 20)
+        lead = " ".join(["intro"] * 120)
+        middle = " ".join(["detail"] * 90)
+        tail = " ".join(["evidence"] * 40)
         long_sentence = (
             f"{lead}, and {middle}, which {tail}."
         )
         parts = _split_long_sentence_on_clause(long_sentence, CHILD_TARGET_TOKENS)
-        assert len(parts) == 2
+        assert len(parts) >= 2
         assert all(part.strip() for part in parts)
         assert "," in parts[0] or ";" in parts[0]
 

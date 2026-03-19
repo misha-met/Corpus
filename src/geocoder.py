@@ -1050,15 +1050,13 @@ class OfflineGeocoder:
         if ambiguous and context_words and method == GeoMethod.EXACT:
             gids = self.alias_to_ids.get(query, [])
             if len(gids) > 1:
-                chosen = self._disambiguate_batch({query: gids[:10]})
-                best_gid = chosen.get(query, gids[0])
+                best_gid = self._disambiguate(gids[:10], context_words)
                 place = self.places_by_id[best_gid]
 
         if ambiguous and context_words and method == GeoMethod.TRIGRAM_FUZZY:
             all_gids = [raw.place.geonameid] + [c.geonameid for c in raw.candidates]
             if len(all_gids) > 1:
-                chosen = self._disambiguate_batch({query: all_gids})
-                best_gid = chosen.get(query, all_gids[0])
+                best_gid = self._disambiguate(all_gids, context_words)
                 place = self.places_by_id[best_gid]
 
         # ── Hardened filters (fuzzy path only) ────────────────────────

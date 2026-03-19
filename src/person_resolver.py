@@ -202,6 +202,7 @@ class PersonResolver:
         """
         best = self._best_canonical_name_locked(entry)
         if best == entry.canonical_name:
+            self._rebuild_alias_index_locked()
             return entry.canonical_name
 
         old_name = entry.canonical_name
@@ -237,15 +238,41 @@ class PersonResolver:
         if not last:
             return None, 0.0
 
-        # Build a map of alias -> last_token so we can check both orderings.
+        # Build a map of alias -> canonical where surname matches.
         candidates: dict[str, str] = {}
-        for alias in self._normalized_to_canonical.keys():
+        for alias, canonical in self._normalized_to_canonical.items():
             alias_last = self._last_token(alias)
             if alias_last == last:
-                candidates[alias] = alias_last
+                candidates[alias] = canonical
 
         if not candidates:
             return None, 0.0
+
+        canonical_candidates = set(candidates.values())
+
+        # If we only know a surname alias (e.g. existing "chomsky") and now
+        # see a fuller form ("noam chomsky"), link to that canonical first.
+        if " " in normalized and last in candidates and len(canonical_candidates) == 1:
+            only_canonical = next(iter(canonical_candidates))
+            return only_canonical, 100.0
+
+        # Surname-only mentions (e.g. "Chomsky") should resolve to the most
+        # established canonical with that surname when possible.
+        if " " not in normalized:
+            canonical_scores: dict[str, tuple[int, tuple[int, int]]] = {}
+            for canonical in canonical_candidates:
+                entry = self._entries.get(canonical)
+                mention_count = int(entry.mention_count) if entry is not None else 0
+                canonical_scores[canonical] = (mention_count, self._display_rank(canonical))
+
+            if canonical_scores:
+                ranked = sorted(
+                    canonical_scores.items(),
+                    key=lambda item: (item[1][0], item[1][1][0], item[1][1][1]),
+                    reverse=True,
+                )
+                if len(ranked) == 1 or ranked[0][1] > ranked[1][1]:
+                    return ranked[0][0], 100.0
 
         match = process.extractOne(
             normalized,
@@ -257,7 +284,7 @@ class PersonResolver:
             return None, 0.0
 
         choice, score, _idx = match
-        canonical = self._normalized_to_canonical.get(choice)
+        canonical = candidates.get(choice)
         return canonical, float(score)
 
     def _fuzzy_match_fullname_locked(self, normalized: str) -> tuple[Optional[str], float]:

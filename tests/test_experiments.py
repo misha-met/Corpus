@@ -244,7 +244,11 @@ class TestExp2DedupOrder:
 
             # --- Alternative: hybrid → rerank → dedup ---
             t0 = time.perf_counter()
-            fused = engine_current._hybrid_search(q, config.top_k_fused)
+            fused = engine_current._hybrid_search_decoupled(
+                embedding_query=q,
+                bm25_query=q,
+                top_k=config.top_k_fused,
+            )
 
             # Hydrate missing text/metadata
             missing_ids = [item["id"] for item in fused if "text" not in item or "metadata" not in item]
@@ -331,7 +335,11 @@ class TestExp2DedupOrder:
 
         for q in EXPERIMENT_QUERIES:
             # Current pipeline: hybrid → dedup → rerank
-            fused = engine._hybrid_search(q, config.top_k_fused)
+            fused = engine._hybrid_search_decoupled(
+                embedding_query=q,
+                bm25_query=q,
+                top_k=config.top_k_fused,
+            )
 
             before_dedup = len(fused)
             deduped, _ = engine._deduplicate_by_parent(fused, config.top_k_fused)

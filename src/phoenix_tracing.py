@@ -443,14 +443,14 @@ def set_reranker_documents(
 ) -> None:
     """Emit OpenInference RERANKER attributes: input/output documents, query, top_k.
 
-    Uses *only* the flattened indexed format required by Phoenix:
+    Emits both root arrays and flattened indexed keys:
         reranker.input_documents.{i}.document.id
         reranker.input_documents.{i}.document.content
         reranker.input_documents.{i}.document.score
         reranker.input_documents.{i}.document.metadata  (JSON string)
-    The root `reranker.input_documents` list-of-dicts attribute is intentionally
-    omitted: OpenTelemetry cannot serialise a list-of-dicts and silently drops
-    the value, which is exactly what caused the "0 documents" display bug.
+    Root arrays are serialized as JSON strings (one element per document) so
+    callers can inspect the list-level attribute while flattened keys remain
+    available for UIs that rely on indexed OpenInference fields.
     """
 
     if span is None:
@@ -460,6 +460,18 @@ def set_reranker_documents(
         set_span_attribute(span, "reranker.query", query, max_text_chars=max_text_chars)
     if top_k is not None:
         set_span_attribute(span, "reranker.top_k", int(top_k))
+
+    # Root arrays encoded as JSON strings for compatibility with tests and tools.
+    input_docs_json = [
+        to_json(doc) if isinstance(doc, dict) else str(doc)
+        for doc in input_documents
+    ]
+    output_docs_json = [
+        to_json(doc) if isinstance(doc, dict) else str(doc)
+        for doc in output_documents
+    ]
+    set_span_attribute(span, "reranker.input_documents", input_docs_json, max_text_chars=max_text_chars)
+    set_span_attribute(span, "reranker.output_documents", output_docs_json, max_text_chars=max_text_chars)
 
     # Flattened reranker.input_documents.{i}.document.* keys only.
     # Each `doc` dict already has keys like "document.id", "document.content",

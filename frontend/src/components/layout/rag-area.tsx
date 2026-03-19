@@ -25,7 +25,6 @@ function MessageIdTracker() {
 export interface RagAreaProps {
     selectedSourceIds: string[];
     intentOverride?: string;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     onData: (dataPart: unknown) => void;
     onFinish: () => void;
 }
@@ -42,8 +41,8 @@ export function RagArea({ selectedSourceIds, intentOverride, onData, onFinish }:
                 },
             },
         }),
-        onData: onData as any,
-        onFinish: onFinish as any,
+        onData,
+        onFinish,
     });
 
     return (
