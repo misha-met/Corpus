@@ -95,6 +95,178 @@ class TestCitationFormatting:
         assert "doc1" not in mapping
 
 
+class TestCitationDedupeStage:
+    def test_dedupes_by_source_and_page_and_renumbers(self):
+        import src.rag_engine as _mod
+
+        texts = [
+            "Doc A page 1 primary evidence.",
+            "Doc A page 1 duplicate evidence.",
+            "Doc A page 2 evidence.",
+            "Doc B page 1 evidence.",
+        ]
+        metadatas = [
+            {"source_id": "doc_a", "page_number": 1, "display_page": "1"},
+            {"source_id": "doc_a", "page_number": 1, "display_page": "1"},
+            {"source_id": "doc_a", "page_number": 2, "display_page": "2"},
+            {"source_id": "doc_b", "page_number": 1, "display_page": "1"},
+        ]
+        chunk_ids = ["c1", "c2", "c3", "c4"]
+
+        context, _ = format_context_with_citations(
+            texts=texts,
+            metadatas=metadatas,
+            chunk_ids=chunk_ids,
+        )
+        citation_list = [
+            {
+                "index": i + 1,
+                "source_id": meta["source_id"],
+                "chunk_id": chunk_ids[i],
+                "page_number": meta["page_number"],
+                "display_page": meta["display_page"],
+                "start_page": meta["page_number"],
+                "end_page": meta["page_number"],
+                "header_path": "Document",
+                "chunk_text": texts[i],
+            }
+            for i, meta in enumerate(metadatas)
+        ]
+
+        packed = _mod._PackResult(
+            context=context,
+            cite=True,
+            source_legend=None,
+            result_metadatas=metadatas,
+            budget_metrics=None,
+            citation_list=citation_list,
+            packed_retrieval_results=[],
+            pack_result=None,
+            packed_metadatas=metadatas,
+        )
+
+        engine = _mod.RagEngine.__new__(_mod.RagEngine)
+        engine._tracer = None
+
+        deduped = _mod.RagEngine._step_dedupe_citations(
+            engine,
+            packed,
+            span_name="test.citations.dedupe",
+        )
+
+        assert [entry["index"] for entry in deduped.citation_list] == [1, 2, 3]
+        assert [
+            (entry["source_id"], entry["page_number"])
+            for entry in deduped.citation_list
+        ] == [
+            ("doc_a", 1),
+            ("doc_a", 2),
+            ("doc_b", 1),
+        ]
+        assert "Doc A page 1 duplicate evidence." not in deduped.context
+        assert "[PASSAGE 4]" not in deduped.context
+        assert deduped.context.count("[PASSAGE END]") == 3
+
+    def test_keeps_distinct_passages_when_page_unknown(self):
+        import src.rag_engine as _mod
+
+        texts = [
+            "Doc A unknown-page first passage.",
+            "Doc A unknown-page second passage.",
+            "Doc B unknown-page passage.",
+        ]
+        metadatas = [
+            {"source_id": "doc_a", "page_number": None, "display_page": None},
+            {"source_id": "doc_a", "page_number": None, "display_page": None},
+            {"source_id": "doc_b", "page_number": None, "display_page": None},
+        ]
+        chunk_ids = ["c1", "c2", "c3"]
+
+        context, _ = format_context_with_citations(
+            texts=texts,
+            metadatas=metadatas,
+            chunk_ids=chunk_ids,
+        )
+        citation_list = [
+            {
+                "index": i + 1,
+                "source_id": meta["source_id"],
+                "chunk_id": chunk_ids[i],
+                "page_number": meta["page_number"],
+                "display_page": meta["display_page"],
+                "start_page": meta["page_number"],
+                "end_page": meta["page_number"],
+                "header_path": "Document",
+                "chunk_text": texts[i],
+            }
+            for i, meta in enumerate(metadatas)
+        ]
+
+        packed = _mod._PackResult(
+            context=context,
+            cite=True,
+            source_legend=None,
+            result_metadatas=metadatas,
+            budget_metrics=None,
+            citation_list=citation_list,
+            packed_retrieval_results=[],
+            pack_result=None,
+            packed_metadatas=metadatas,
+        )
+
+        engine = _mod.RagEngine.__new__(_mod.RagEngine)
+        engine._tracer = None
+
+        deduped = _mod.RagEngine._step_dedupe_citations(
+            engine,
+            packed,
+            span_name="test.citations.dedupe",
+        )
+
+        assert [entry["index"] for entry in deduped.citation_list] == [1, 2, 3]
+        assert [entry["chunk_id"] for entry in deduped.citation_list] == ["c1", "c2", "c3"]
+        assert deduped.context.count("[PASSAGE END]") == 3
+
+    def test_noop_when_citations_disabled(self):
+        import src.rag_engine as _mod
+
+        packed = _mod._PackResult(
+            context="[PASSAGE 1]\n[Source: doc_a | Page 1]\nText\n[/Source]\n[PASSAGE END]",
+            cite=False,
+            source_legend=None,
+            result_metadatas=[],
+            budget_metrics=None,
+            citation_list=[
+                {
+                    "index": 1,
+                    "source_id": "doc_a",
+                    "chunk_id": "c1",
+                    "page_number": 1,
+                    "display_page": "1",
+                    "start_page": 1,
+                    "end_page": 1,
+                    "header_path": "Document",
+                    "chunk_text": "Text",
+                }
+            ],
+            packed_retrieval_results=[],
+            pack_result=None,
+            packed_metadatas=[],
+        )
+
+        engine = _mod.RagEngine.__new__(_mod.RagEngine)
+        engine._tracer = None
+
+        result = _mod.RagEngine._step_dedupe_citations(
+            engine,
+            packed,
+            span_name="test.citations.dedupe",
+        )
+
+        assert result.context == packed.context
+        assert result.citation_list == packed.citation_list
+
+
 # ===========================================================================
 # Source legend
 # ===========================================================================
@@ -379,6 +551,13 @@ class TestLLMResponseParsing:
         parsed = _parse_llm_response(response)
         assert parsed is not None
         assert parsed[0] == Intent.CRITIQUE
+
+    def test_parse_intent_only_defaults_confidence(self):
+        response = '{"intent": "analyze"}'
+        parsed = _parse_llm_response(response)
+        assert parsed is not None
+        assert parsed[0] == Intent.ANALYZE
+        assert parsed[1] == pytest.approx(0.75)
 
 
 # ===========================================================================

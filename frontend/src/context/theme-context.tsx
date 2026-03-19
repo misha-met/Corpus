@@ -55,7 +55,11 @@ const ThemeContext = createContext<ThemeContextValue>({
 });
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const theme = useSyncExternalStore(subscribeTheme, getThemeSnapshot, () => "stars");
+  const theme = useSyncExternalStore<BackgroundTheme>(
+    subscribeTheme,
+    getThemeSnapshot,
+    () => "stars",
+  );
 
   const setTheme = useCallback((t: BackgroundTheme) => {
     try {

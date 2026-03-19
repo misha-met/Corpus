@@ -42,6 +42,8 @@ Corpus runs entirely on your machine. Documents are ingested into a local vector
 | **Freeform chat** | Direct LLM access without retrieval, with persistent session history |
 | **Citation export** | Responses exportable as formatted footnotes or Harvard bibliography entries |
 | **Geospatial mapping** | Optional ingest-time place NER + offline geocoding, with clustered map markers filtered by source selection |
+| **People dictionary** | Optional ingest-time person NER + canonical name matching, with searchable mentions, merge tools, and document jump-to-context |
+| **Ingest NER diagnostics** | Ingest responses report whether GLiNER ran or a fallback path was used (`gliner`, `regex_fallback`, `empty`) so degraded indexing is visible |
 | **Phoenix tracing** | Optional OpenTelemetry tracing with trace/span ID propagation and in-UI feedback annotations |
 
 ---
@@ -75,14 +77,18 @@ graph TB
         UI["Chat Interface<br/>RAG + Freeform modes"]
         SP["Source Panel<br/>Document library"]
         CV["Citation Viewer<br/>Passage drill-down"]
+        PD["People Dictionary<br/>Canonical entity browser"]
         HI["Session History<br/>IndexedDB"]
     end
 
     subgraph Backend["Backend — FastAPI / Python"]
-        API["REST + SSE API<br/>/api/chat · /api/query<br/>/api/sources · /api/transcribe"]
+        API["REST + SSE API<br/>/api/chat · /api/query<br/>/api/sources · /api/geo · /api/people"]
         RAG["RAG Engine<br/>Central orchestrator"]
         IC["Intent Classifier<br/>12 research intents"]
-        RT["Retrieval Engine<br/>5-stage pipeline"]
+        RT["Retrieval Engine<br/>7-stage pipeline"]
+        NER["NER Layer<br/>Shared city + person extraction"]
+        GCD["Offline Geocoder<br/>GeoNames + RapidFuzz"]
+        PR["Person Resolver<br/>Canonical name matching"]
         GEN["Generator<br/>Streaming LLM"]
     end
 
@@ -98,14 +104,19 @@ graph TB
         VEC["Child Chunks<br/>Vector + BM25 index"]
         PAR["Parent Chunks<br/>Full context blocks"]
         SUM["Source Summaries<br/>Document metadata"]
+        GEO["Geo Mentions<br/>Map entities"]
+        PPL["Person Mentions<br/>People dictionary entities"]
     end
 
     UI <-->|"AI SDK v6 / SSE"| API
-    SP & CV & HI --> API
+    SP & CV & PD & HI --> API
     API --> RAG
-    RAG --> IC & RT & GEN
+    RAG --> IC & RT & GEN & NER
+    NER --> GCD & PR
     RT <--> EMB & RNK
     RT <--> VEC & PAR & SUM
+    GCD --> GEO
+    PR --> PPL
     GEN <--> LLM
     IC -.->|"low-confidence fallback"| INT
 ```
@@ -146,9 +157,9 @@ flowchart LR
 
     subgraph Parse["Parse"]
         direction TB
-        P1["pypdf<br/>Text layer extraction"]
-        P2["pdfminer.six<br/>Fallback"]
-        P3["PyMuPDF<br/>Fallback"]
+        P1["PyMuPDF<br/>Primary extraction"]
+        P2["pypdf<br/>Fallback"]
+        P3["pdfminer.six<br/>Per-page fallback"]
         P4["OCR<br/>Rasterise + pytesseract<br/>for scanned pages"]
         P1 --> P2
         P2 --> P3
@@ -167,11 +178,17 @@ flowchart LR
         EMB2 --> STORE
     end
 
-    subgraph Opt["Optional"]
+    subgraph Opt["Optional Enrichment"]
+        NERX["Shared GLiNER pass<br/>city + person candidates"]
+        GEOX["Place resolution<br/>GeoNames geocoder<br/>persist geo_mentions"]
+        PPLX["Person canonicalization<br/>resolver + fuzzy matching<br/>persist person_mentions"]
         SUMM["LLM summary<br/>3-4 paragraph overview<br/>stored per source"]
+        NERX --> GEOX
+        NERX --> PPLX
     end
 
     DOC --> Parse --> Chunk --> Index
+    Chunk -.->|"if geotag / peopletag enabled"| NERX
     Chunk -.->|"if summarise enabled"| Opt
 
     style DOC fill:#7c3aed,color:#fff,stroke:none
@@ -210,7 +227,7 @@ Mode is detected automatically from system RAM. In Deep Research mode the four a
 
 ## Interface
 
-The application presents two independently persistent modes, switchable via a tab in the header bar. Both panels remain mounted simultaneously; visibility is toggled via CSS so neither loses state on mode switch.
+The application presents two independently persistent chat modes plus two optional research overlays (Map and People Dictionary). Both chat panels remain mounted simultaneously; visibility is toggled via CSS so neither loses state on mode switch.
 
 ### RAG Mode
 
@@ -220,6 +237,15 @@ The primary research interface. Queries are processed through the full retrieval
 - **Citation viewer** — opens in place of the source panel when a citation is clicked, fetching the full document and highlighting the cited passage
 - **Thinking panel** — displays pipeline events in real time (intent classified, sources retrieved, generation progress) and, in Deep Research mode, the model's reasoning chain
 - **Composer** — supports intent override, Deep Research toggle, thinking mode toggle (48 GB+ systems), and offline voice input
+
+### People Dictionary Overlay
+
+An optional panel for person-centric exploration across selected sources.
+
+- **Canonical entries** — variants like titles, surnames, and full-name mentions are grouped under a single canonical person entry
+- **Source-aware filtering** — results follow the same source selection as RAG and Map workflows
+- **Mention operations** — inspect mentions by source/location, jump to cited document context, delete noisy mentions, and merge canonical names
+- **Fast browsing** — frequency/alphabetical sort modes, debounced search, and cached mention expansion
 
 ### Freeform Mode
 
@@ -245,13 +271,15 @@ When citations are enabled, each retrieved passage is wrapped at prompt-construc
 
 The model is instructed to cite passages inline as `[N]`. After generation, a `CitationListEvent` is emitted over SSE carrying the full citation metadata; the frontend binds each marker to a Citation object with source ID, chunk ID, and page number.
 
-Clicking a citation badge opens the citation viewer: the full document and the cited chunk are fetched in parallel, and the passage is highlighted in context. An optional citation reference string can be entered per source at ingest time and used when exporting responses as formatted footnotes or Harvard bibliography entries.
+Duplicate source-page citations are collapsed and renumbered after generation so citation markers remain sequential and export-safe.
+
+Clicking a citation badge opens the citation viewer: the full document and the cited chunk are fetched in parallel, and the passage is highlighted in context. An optional citation reference string can be entered per source at ingest time, persisted in backend source metadata, and used when exporting responses as formatted footnotes or Harvard bibliography entries.
 
 ![Citation viewer demo](docs/images/citation-demo.png)
 
 ---
 
-## Geospatial Mapping (Offline)
+## Geospatial Mapping
 
 Corpus includes an optional geospatial workflow for place-centric research:
 
@@ -260,14 +288,22 @@ Corpus includes an optional geospatial workflow for place-centric research:
 - **Interactive map overlay** with clustering, confidence threshold filtering, and source-selection filtering
 - **Citation bridge** from map mention to source chunk viewer, plus inline mention deletion for cleanup
 
-Geospatial API endpoints:
 
-- `GET /api/geo/status`
-- `GET /api/geocode`
-- `GET /api/geocode/near`
-- `GET /api/geocode/reverse`
-- `GET /api/geo/mentions`
-- `DELETE /api/geo/mentions/{mention_id}`
+![Mapping demo screenshot](docs/images/map-demo.png)
+
+---
+
+## People Dictionary
+
+Corpus includes an optional person-centric workflow for prosopographical and network-oriented research:
+
+- **Ingest-time people indexing** via the Ingest modal (`Index people names`) or CLI `--peopletag`
+- **Canonical name resolution** using title stripping + conservative fuzzy matching to group mention variants
+- **Interactive People overlay** with search, sort, mention grouping, and source-aware filtering
+- **Merge and cleanup tools** for canonical entries and mention-level corrections
+- **Citation bridge** from person mention to highlighted source chunk in the document viewer
+
+![People Dictionary demo screenshot](docs/images/people-demo.png)
 
 ---
 
@@ -282,6 +318,7 @@ data/
         parent_chunks/          Full context blocks for answer generation
         source_summaries/       Per-document metadata and optional summaries
         geo_mentions/           Geocoded place mentions for map visualisation
+        person_mentions/        Canonicalized person mentions for People Dictionary
     cities500.txt              GeoNames place index used by offline geocoder
     geo_version.json           GeoNames checksum/build metadata
     source_cache/               Full-text snapshots for the citation viewer
@@ -304,8 +341,8 @@ data/
 | Speech-to-text | mlx-whisper / Whisper large-v3 (4-bit) | Offline audio transcription with VAD |
 | Vector database | lancedb + pyarrow | Vector ANN + BM25 FTS with RRF fusion |
 | API framework | fastapi + uvicorn | REST endpoints and SSE streaming |
-| PDF parsing | pypdf, pdfminer.six, PyMuPDF, pytesseract | Four-strategy fallback chain including OCR |
-| Geospatial stack | GeoNames + rapidfuzz + GLiNER | Offline place NER + geocoding for map mentions |
+| PDF parsing | PyMuPDF, pypdf, pdfminer.six, pytesseract | Quality-first per-page fallback chain including OCR |
+| Geospatial + people stack | GeoNames + rapidfuzz + GLiNER + PersonResolver | Offline place geocoding and person canonicalization for map + people dictionary |
 | Observability | arize-phoenix-otel | OpenTelemetry tracing across ingest, retrieval, and generation |
 
 </details>
@@ -322,7 +359,7 @@ data/
 | 3D / visual | @react-three/fiber, Three.js | WebGL background themes and particle systems |
 | Animations | framer-motion | UI transitions |
 | Session storage | IndexedDB | Persistent chat history with reasoning content |
-| Citation storage | localStorage | User-provided citation reference strings per source |
+| Citation storage | LanceDB source metadata | User-provided citation reference strings per source |
 | Geospatial UI | maplibre-gl, @vis.gl/react-maplibre, @tanstack/react-query | Clustered map overlay with confidence and source filters |
 
 </details>
@@ -421,6 +458,12 @@ python -m src.cli ingest docs/paper.pdf --source-id my_paper --summarize
 # Ingest + geotag places for map exploration
 python -m src.cli ingest docs/paper.pdf --source-id my_paper --summarize --geotag
 
+# Ingest + index people names for People Dictionary
+python -m src.cli ingest docs/paper.pdf --source-id my_paper --summarize --peopletag
+
+# Ingest + geotag + people indexing in one pass
+python -m src.cli ingest docs/paper.pdf --source-id my_paper --summarize --geotag --peopletag
+
 # Query with automatic intent detection
 python -m src.cli query "What is the central argument?" --cite
 
@@ -454,9 +497,35 @@ curl -F "file=@paper.pdf" -F "source_id=my_paper" -F "summarize=true" \
 curl -F "file=@paper.pdf" -F "source_id=my_paper" -F "summarize=true" -F "geotag=true" \
     http://127.0.0.1:8000/api/sources/upload
 
+# Upload + people indexing during ingest
+curl -F "file=@paper.pdf" -F "source_id=my_paper" -F "summarize=true" -F "peopletag=true" \
+    http://127.0.0.1:8000/api/sources/upload
+
 # List grouped geo mentions for selected source(s)
 curl "http://127.0.0.1:8000/api/geo/mentions?min_confidence=0.75&source_ids=my_paper"
+
+# Filter geo mentions by search text (server-side, with safe fallback)
+curl "http://127.0.0.1:8000/api/geo/mentions?min_confidence=0.75&source_ids=my_paper&q=pari"
+
+# List canonical people for selected source(s)
+curl "http://127.0.0.1:8000/api/people?source_ids=my_paper"
+
+# Filter people list by canonical/raw name text
+curl "http://127.0.0.1:8000/api/people?source_ids=my_paper&q=foucault"
+
+# List mention rows for a canonical person
+curl "http://127.0.0.1:8000/api/people/mentions?canonical_name=Noam%20Chomsky&source_ids=my_paper"
 ```
+
+### Retrieval and ingest diagnostics notes
+
+- Retrieval now exposes two core knobs in runtime config (`src/config.py`):
+    - `bm25_weight` (default `0.5`): balances lexical BM25 vs vector scoring in LanceDB hybrid search.
+    - `use_hybrid` (default `true`): toggles hybrid retrieval on/off (`false` runs dense vector-only retrieval).
+- Ingest endpoints now return optional NER diagnostics fields:
+    - `geotag_ner`: diagnostics for place extraction.
+    - `peopletag_ner`: diagnostics for person extraction.
+- Diagnostics include `ner_available`, `method`, and optional `warning`, allowing the UI to flag degraded indexing without failing ingest.
 
 ### Phoenix Observability (Arize)
 
@@ -506,6 +575,8 @@ Health responses now include `phoenix_configured`, `phoenix_active`, `phoenix_pr
 
 RAG streams emit `data-trace-id` annotations; freeform streams emit `trace_id` SSE events so the frontend can attach thumbs-up / thumbs-down feedback to exact spans.
 
+![Phoenix demo screenshot](docs/images/phoenix-demo.png)
+
 ---
 
 ## Project Structure
@@ -515,28 +586,29 @@ RAG streams emit `data-trace-id` annotations; freeform streams emit `trace_id` S
 
 | File | Lines | Purpose |
 |---|---|---|
-| api.py | 1,317 | FastAPI endpoints, SSE streaming, engine hot-swap, freeform chat |
-| rag_engine.py | 1,671 | Central orchestrator: query pipeline, ingest pipeline, output sanitisation |
-| retrieval.py | 697 | 5-stage hybrid retrieval pipeline with intent-scaled parameters |
+| api.py | 2,098 | FastAPI endpoints, SSE streaming, source/geo/people APIs, engine hot-swap, freeform chat |
+| rag_engine.py | 2,596 | Central orchestrator: query pipeline, ingest pipeline, citation dedup/sanitisation |
+| retrieval.py | 1,390 | 7-stage hybrid retrieval pipeline with intent-scaled parameters |
 | generator.py | 945 | MLX text generation, streaming, token budget packing, presence penalty |
-| intent.py | 963 | Heuristic and LLM intent classifier: 12 intents, typo tolerance |
-| generation.py | 573 | Intent-aware prompt construction: 12 instruction profiles across 2 mode variants |
-| storage.py | 737 | LanceDB vector and FTS storage, schema migration, cascading delete |
-| ingest.py | 557 | PDF and Markdown parsing, hierarchical parent/child chunking |
-| geocoder.py | 1,077 | Offline GeoNames geocoder (forward, reverse, near) with exact/fuzzy matching |
-| ner.py | 164 | GLiNER-based place NER with regex fallback for ingest geotagging |
+| intent.py | 973 | Heuristic and LLM intent classifier: 12 intents, typo tolerance |
+| generation.py | 635 | Intent-aware prompt construction: 12 instruction profiles across 2 mode variants |
+| storage.py | 1,606 | LanceDB vector/FTS storage with geo + person mention tables and cascades |
+| ingest.py | 1,003 | PDF/Markdown parsing, hierarchical chunking, shared geo/person NER enrichment |
+| geocoder.py | 1,381 | Offline GeoNames geocoder (forward, reverse, near) with hardening and coherence scoring |
+| ner.py | 678 | GLiNER-based place/person NER with windowed inference and typed candidates |
+| person_resolver.py | 438 | Canonical person-name resolver with exact/fuzzy matching and promotion rules |
 | geo_types.py | 18 | Shared geocoder enums and readiness states |
 | reranker.py | 423 | Jina v3 MLX listwise reranker with MLP projector |
-| config.py | 364 | Mode configurations, RAM detection, per-intent retrieval and generation overrides |
-| phoenix_tracing.py | 646 | Phoenix/OpenTelemetry setup, span helpers, and feedback annotation logging |
+| config.py | 441 | Mode configs plus geotag/peopletag thresholds and RAM-aware overrides |
+| phoenix_tracing.py | 752 | Phoenix/OpenTelemetry setup, span helpers, and feedback annotation logging |
 | transcription.py | 590 | MLX Whisper with pure-NumPy voice activity detection |
-| embeddings.py | 173 | MLX embedding model wrapper: mean pooling, L2 normalisation |
+| embeddings.py | 475 | MLX embedding wrapper: last-token pooling, left-padding, instruction prefixes |
 | stream_protocol.py | 251 | AI SDK v6 UI Message Stream encoder (SSE frames) |
-| query_events.py | 96 | Pipeline event dataclasses: 9 event types (including TraceEvent) |
-| source_cache.py | 176 | Full-text snapshot caching for the citation viewer |
+| query_events.py | 105 | Pipeline event dataclasses: 9 event types (including TraceEvent) |
+| source_cache.py | 182 | Full-text snapshot caching for the citation viewer |
 | metrics.py | 170 | Retrieval and budget metrics: 6 dataclasses |
 | latency.py | 107 | Zero-cost latency profiler with ASCII chart output |
-| cli.py | 390 | CLI entry point: ingest and query commands |
+| cli.py | 583 | CLI entry point with ingest/query and geotag/peopletag controls |
 
 </details>
 
@@ -545,21 +617,29 @@ RAG streams emit `data-trace-id` annotations; freeform streams emit `trace_id` S
 
 | File | Purpose |
 |---|---|
-| app/page.tsx | Entry point, dual-mode always-mounted layout, theme picker |
+| app/page.tsx | Entry point, modular layout composition, dual-mode mount, map/people overlays |
 | app/api/chat/route.ts | Next.js streaming proxy to backend (unbuffered SSE) |
-| context/app-context.tsx | Global state: useReducer, 14 action types, dual-context pattern |
+| context/app-context.tsx | Global state: useReducer, 15 action types, source selection + streaming context |
 | context/theme-context.tsx | Background theme state: 7 themes, localStorage persistence |
-| components/source-panel.tsx | Document library: sequential upload queue, drag-and-drop |
+| components/source-panel.tsx | Document library: sequential upload queue, source filtering, ingest status |
+| components/people/PeopleDictionary.tsx | People dictionary overlay: search, merge, mention browse/delete, document jump |
+| components/layout/top-bar.tsx | Header chrome: mode tabs, map/people toggles, theme, history |
+| components/layout/source-panel-container.tsx | Collapsible source sidebar wrapper with glass chrome styles |
+| components/layout/overlay-panel.tsx | Shared animated overlay shell for map and people panels |
+| components/layout/rag-area.tsx | RAG runtime wrapper with AI SDK stream callbacks |
 | components/map/CorpusMap.tsx | Interactive MapLibre map: clustering, source filters, confidence threshold, mention actions |
 | components/freeform-chat-panel.tsx | Freeform streaming chat: model and thinking selection, AI-generated titles |
 | components/citation-viewer-modal.tsx | Inline citation reader: parallel content and chunk fetch |
 | components/history-panel.tsx | Session history drawer: debounced search, glassmorphism styling |
+| components/ingest-modal.tsx | Drag-drop upload with geotag/peopletag toggles and optional citation reference |
 | components/assistant-ui/thread.tsx | Chat thread: composer with model, intent, think, and speech controls |
 | components/assistant-ui/thinking-panel.tsx | Pipeline status steps and streaming reasoning display |
 | components/assistant-ui/message-references.tsx | Citation drawer: cited/uncited badges, lazy chunk loading, citation export |
 | lib/session-store.ts | IndexedDB session persistence with reasoning content |
 | lib/format-citations.ts | Footnote and Harvard citation formatters with marker renumbering |
 | lib/text-highlighter.ts | DOM TreeWalker exact substring match and `<mark>` injection |
+| hooks/use-stream-handler.ts | Stream annotation dispatcher bridge into AppContext |
+| hooks/use-persisted-state.ts | localStorage-backed numeric state with cross-tab sync |
 | hooks/useSpeechToText.ts | Offline voice input: MediaRecorder, VAD, silence detection |
 | hooks/useSystemRam.ts | RAM detection via /api/health: gates Deep Research and Think toggle |
 

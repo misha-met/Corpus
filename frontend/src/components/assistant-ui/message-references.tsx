@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import { useAuiState } from "@assistant-ui/react";
 import { useAppState, useAppDispatch } from "@/context/app-context";
 import { groupCitations } from "@/lib/group-citations";
@@ -64,6 +64,29 @@ export function MessageReferences() {
     const [expandedSources, setExpandedSources] = useState<Set<string>>(new Set());
     const [chunkCache, setChunkCache] = useState<Record<string, string>>({});
     const [loadingSources, setLoadingSources] = useState<Set<string>>(new Set());
+    const [citationReferenceBySource, setCitationReferenceBySource] = useState<Map<string, string>>(new Map());
+
+    useEffect(() => {
+        let cancelled = false;
+        sourceApi
+            .listSources()
+            .then((sources) => {
+                if (cancelled) return;
+                const map = new Map<string, string>();
+                for (const source of sources) {
+                    const ref = source.citation_reference?.trim();
+                    if (ref) {
+                        map.set(source.source_id, ref);
+                    }
+                }
+                setCitationReferenceBySource(map);
+            })
+            .catch(() => {
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, []);
 
     const grouped = useMemo(() => groupCitations(citationsWithMarkerPages), [citationsWithMarkerPages]);
 
@@ -127,9 +150,9 @@ export function MessageReferences() {
     function handleCopy(style: "footnote" | "harvard") {
         let text: string;
         if (style === "footnote") {
-            text = formatFootnotesWithText(answerText, citedCitations);
+            text = formatFootnotesWithText(answerText, citedCitations, citationReferenceBySource);
         } else {
-            text = formatHarvardBibliography(citedCitations);
+            text = formatHarvardBibliography(citedCitations, citationReferenceBySource);
         }
         navigator.clipboard.writeText(text).then(() => {
             setCopied(style);
@@ -205,7 +228,7 @@ export function MessageReferences() {
                             <div key={group.sourceId} className="flex flex-col text-sm text-foreground/90 w-full mb-1">
                                 <div className="flex flex-col mb-1 border-l-2 border-[#333] pl-3 py-0.5">
                                     <div className="font-semibold text-foreground break-words line-clamp-2">
-                                        {group.displayName}
+                                        {citationReferenceBySource.get(group.sourceId) ?? group.displayName}
                                     </div>
                                     <div className="flex items-center gap-1.5 flex-wrap mt-1">
                                         {group.citations.map((cit, idx) => {

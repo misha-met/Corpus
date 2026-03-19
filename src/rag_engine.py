@@ -18,7 +18,7 @@ import uuid
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional, TYPE_CHECKING
 
 from .config import (
     CITATIONS_ENABLED_DEFAULT,
@@ -88,6 +88,9 @@ from .query_events import (
 )
 from .storage import StorageConfig, StorageEngine
 
+if TYPE_CHECKING:
+    from .ner import NERDiagnostics
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -103,6 +106,8 @@ class IngestResult:
     children_count: int
     source_id: str
     summarized: bool
+    geotag_ner: Optional["NERDiagnostics"] = None
+    peopletag_ner: Optional["NERDiagnostics"] = None
 
 
 @dataclass(frozen=True)
@@ -185,6 +190,11 @@ _INSTRUCTION_PATTERNS = [
 
 _REPETITION_PATTERN = re.compile(
     r"(\d+\.\s+[A-Z][^.]{10,50}\.?)(\s*\1)+", re.IGNORECASE
+)
+
+_PASSAGE_BLOCK_RE = re.compile(
+    r"^\[PASSAGE\s+(\d+)\]\n.*?^\[PASSAGE END\]$",
+    re.MULTILINE | re.DOTALL,
 )
 
 _CHATTER_PHRASES = [
@@ -278,15 +288,143 @@ def sanitize_output(text: str) -> str:
     return result.strip()
 
 
-def _dedupe_context(texts: Iterable[str]) -> str:
-    seen: set[str] = set()
+def _dedupe_context(
+    texts: Iterable[str],
+    *,
+    source_ids: Optional[Iterable[Optional[str]]] = None,
+) -> str:
+    text_list = list(texts)
+    source_list = list(source_ids) if source_ids is not None else []
+
+    if not source_list:
+        seen: set[str] = set()
+        unique_texts: list[str] = []
+        for text in text_list:
+            cleaned = text.strip()
+            if cleaned and cleaned not in seen:
+                seen.add(cleaned)
+                unique_texts.append(cleaned)
+        return "\n\n".join(unique_texts)
+
+    seen_with_source: set[tuple[str, str]] = set()
     unique_texts = []
-    for text in texts:
+    for idx, text in enumerate(text_list):
         cleaned = text.strip()
-        if cleaned and cleaned not in seen:
-            seen.add(cleaned)
-            unique_texts.append(cleaned)
+        if not cleaned:
+            continue
+        source_id_raw = source_list[idx] if idx < len(source_list) else None
+        source_id = str(source_id_raw).strip() if source_id_raw else ""
+        key = (source_id, cleaned)
+        if key in seen_with_source:
+            continue
+        seen_with_source.add(key)
+        unique_texts.append(cleaned)
     return "\n\n".join(unique_texts)
+
+
+def _normalize_page_number(value: Any) -> Optional[int]:
+    """Normalize citation page numbers to ``int`` when possible."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 1 else None
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            parsed = int(raw)
+        except ValueError:
+            return None
+        return parsed if parsed >= 1 else None
+    return None
+
+
+def _extract_passage_blocks(context: str) -> dict[int, str]:
+    """Extract ``[PASSAGE N] ... [PASSAGE END]`` blocks keyed by passage index."""
+    blocks: dict[int, str] = {}
+    if not context:
+        return blocks
+
+    for match in _PASSAGE_BLOCK_RE.finditer(context):
+        try:
+            index = int(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        blocks[index] = match.group(0).strip()
+    return blocks
+
+
+def _renumber_passage_block(block: str, new_index: int) -> str:
+    return re.sub(
+        r"^\[PASSAGE\s+\d+\]",
+        f"[PASSAGE {new_index}]",
+        block,
+        count=1,
+    )
+
+
+def _dedupe_citations_by_source_page(
+    citation_list: list[dict[str, Any]],
+    context: str,
+) -> tuple[list[dict[str, Any]], str, list[int]]:
+    """Collapse duplicate citations using source/page, with safe fallback.
+
+    Returns a tuple of ``(deduped_citations, deduped_context, kept_positions)``.
+    If context blocks cannot be safely remapped, this function is a no-op.
+    """
+    if not citation_list:
+        return citation_list, context, []
+
+    seen: set[tuple[str, str]] = set()
+    kept_entries: list[dict[str, Any]] = []
+    kept_positions: list[int] = []
+
+    for pos, entry in enumerate(citation_list):
+        source_id = str(entry.get("source_id", "")).strip()
+        page_number = _normalize_page_number(entry.get("page_number"))
+        if page_number is not None:
+            dedupe_token = f"page:{page_number}"
+        else:
+            # Unknown page numbers should not collapse distinct passages.
+            chunk_id = str(entry.get("chunk_id", "")).strip()
+            dedupe_token = f"chunk:{chunk_id}" if chunk_id else f"row:{pos}"
+        key = (source_id, dedupe_token)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept_entries.append(entry)
+        kept_positions.append(pos)
+
+    if len(kept_entries) == len(citation_list):
+        return citation_list, context, list(range(len(citation_list)))
+
+    passage_blocks = _extract_passage_blocks(context)
+    renumbered_citations: list[dict[str, Any]] = []
+    renumbered_blocks: list[str] = []
+
+    for new_index, entry in enumerate(kept_entries, start=1):
+        raw_old_index = entry.get("index")
+        try:
+            old_index = int(raw_old_index)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Citation dedupe fallback: invalid citation index %r", raw_old_index
+            )
+            return citation_list, context, list(range(len(citation_list)))
+
+        old_block = passage_blocks.get(old_index)
+        if old_block is None:
+            logger.warning(
+                "Citation dedupe fallback: missing passage block for index %d", old_index
+            )
+            return citation_list, context, list(range(len(citation_list)))
+
+        updated_entry = {**entry, "index": new_index}
+        renumbered_citations.append(updated_entry)
+        renumbered_blocks.append(_renumber_passage_block(old_block, new_index))
+
+    return renumbered_citations, "\n\n".join(renumbered_blocks), kept_positions
 
 
 def _build_openinference_retrieval_documents(
@@ -463,7 +601,7 @@ class RagEngineConfig:
     mode: Optional[str] = None
     model: Optional[str] = None
     summary_model: str = "mlx-community/LFM2-8B-A1B-4bit"
-    fts_rebuild_policy: str = "deferred"
+    fts_rebuild_policy: str = "immediate"
     fts_rebuild_batch_size: int = 0
     citations_enabled: Optional[bool] = None
 
@@ -865,6 +1003,8 @@ class RagEngine:
         page_number: Optional[int] = None,
         summarize: bool = True,
         geotag: bool = False,
+        peopletag: bool = False,
+        citation_reference: Optional[str] = None,
         page_offset: int = 1,
     ) -> IngestResult:
         """Ingest a document (PDF or Markdown) into the RAG store."""
@@ -882,6 +1022,8 @@ class RagEngine:
                 "rag.ingest.page_offset": page_offset,
                 "rag.ingest.summarize": summarize,
                 "rag.ingest.geotag": geotag,
+                "rag.ingest.peopletag": peopletag,
+                "rag.ingest.citation_reference": citation_reference,
             },
         ) as ingest_span:
             try:
@@ -891,7 +1033,7 @@ class RagEngine:
                 if summarize:
                     generator = self.ensure_summary_generator()
 
-                parents_count, children_count = ingest_file_to_storage(
+                parents_count, children_count, ner_diagnostics = ingest_file_to_storage(
                     file_path,
                     source_id=source_id,
                     page_number=page_number,
@@ -900,6 +1042,8 @@ class RagEngine:
                     summarize=summarize,
                     summary_generator=generator,
                     geotag=geotag,
+                    peopletag=peopletag,
+                    citation_reference=citation_reference,
                     page_offset=page_offset,
                     tracer=self._tracer,
                 )
@@ -913,6 +1057,16 @@ class RagEngine:
                         "output.value": f"{source_id}: {parents_count} parents, {children_count} children",
                         "rag.ingest.parents_count": parents_count,
                         "rag.ingest.children_count": children_count,
+                        "rag.ingest.ner.geotag_method": (
+                            ner_diagnostics.geotag_ner.method
+                            if ner_diagnostics.geotag_ner is not None
+                            else "disabled"
+                        ),
+                        "rag.ingest.ner.peopletag_method": (
+                            ner_diagnostics.peopletag_ner.method
+                            if ner_diagnostics.peopletag_ner is not None
+                            else "disabled"
+                        ),
                     },
                 )
                 return IngestResult(
@@ -920,6 +1074,8 @@ class RagEngine:
                     children_count=children_count,
                     source_id=source_id,
                     summarized=summarize,
+                    geotag_ner=ner_diagnostics.geotag_ner,
+                    peopletag_ner=ner_diagnostics.peopletag_ner,
                 )
             except Exception as exc:
                 mark_span_error(ingest_span, f"{type(exc).__name__}: {exc}")
@@ -1110,6 +1266,10 @@ class RagEngine:
                 self._on_status("Packing token budget...")
                 with profiler.span("Budget packing"):
                     packed = self._step_pack_budget(retrieved, config, generator)
+                cite = packed.cite
+
+                with profiler.span("Citation dedupe"):
+                    packed = self._step_dedupe_citations(packed)
                 cite = packed.cite
 
                 # -- build prompt -------------------------------------------
@@ -1578,6 +1738,12 @@ class RagEngine:
         packed = self._step_pack_budget(retrieved, config, generator)
         cite = packed.cite
 
+        packed = self._step_dedupe_citations(
+            packed,
+            span_name="rag.citations.dedupe.stream",
+        )
+        cite = packed.cite
+
         # -- budget summary status -----------------------------------------
         if packed.pack_result is not None:
             pr = packed.pack_result
@@ -2010,13 +2176,15 @@ class RagEngine:
                     generator_preload_future = self._start_generator_preload()
 
                 with _span("Retrieval (hybrid search + rerank)"):
-                    results = retrieval_engine.search(
+                    response = retrieval_engine.search(
                         query_text,
                         source_id=source_id,
                         params=classified.retrieval_params,
                         retrieval_budget=config.retrieval_budget,
                         intent=classified.intent_result.intent.value,
                     )
+                    results = response.results
+                    retrieval_metrics = response.metrics
 
                 source_ids = sorted(
                     {
@@ -2030,8 +2198,6 @@ class RagEngine:
                     for r in results
                     if (r.parent_text if r.parent_text else r.text)
                 ]
-
-            retrieval_metrics = results[0].metrics if results and results[0].metrics else None
 
             _scores = [r.score for r in results] if results else []
             top_score = max(_scores) if _scores else 0.0
@@ -2248,7 +2414,14 @@ class RagEngine:
                 elif cite:
                     cite = False
                 else:
-                    context = _dedupe_context(retrieved.context_docs)
+                    context_source_ids = [
+                        (result.metadata.get("source_id") if isinstance(result.metadata, dict) else None)
+                        for result in retrieved.results
+                    ]
+                    context = _dedupe_context(
+                        retrieved.context_docs,
+                        source_ids=context_source_ids,
+                    )
 
             if packed_retrieval_results:
                 packed_results_for_preview = packed_retrieval_results
@@ -2324,6 +2497,89 @@ class RagEngine:
                 pack_result=pack_result_obj,
                 packed_metadatas=packed_metadatas,
             )
+
+    def _step_dedupe_citations(
+        self,
+        packed: _PackResult,
+        *,
+        span_name: str = "rag.citations.dedupe",
+    ) -> _PackResult:
+        """Deduplicate packed citations by ``(source_id, page_number)``.
+
+        Retrieval-stage deduplication optimizes candidate diversity. This stage is
+        intentionally later in the pipeline and only collapses citation references.
+        """
+        with start_span(
+            self._tracer,
+            span_name,
+            span_kind=SPAN_KIND_CHAIN,
+            attributes={
+                "rag.citations_enabled": packed.cite,
+                "rag.citation_dedupe.before": len(packed.citation_list),
+                "rag.context_chars_before": len(packed.context or ""),
+            },
+        ) as dedupe_span:
+            if not packed.cite or not packed.citation_list:
+                set_span_attributes(
+                    dedupe_span,
+                    {
+                        "rag.citation_dedupe.applied": False,
+                        "rag.citation_dedupe.after": len(packed.citation_list),
+                        "rag.citation_dedupe.removed": 0,
+                        "rag.context_chars_after": len(packed.context or ""),
+                    },
+                )
+                return packed
+
+            deduped_citations, deduped_context, kept_positions = _dedupe_citations_by_source_page(
+                packed.citation_list,
+                packed.context,
+            )
+
+            before_count = len(packed.citation_list)
+            after_count = len(deduped_citations)
+            removed_count = max(0, before_count - after_count)
+
+            if removed_count == 0:
+                set_span_attributes(
+                    dedupe_span,
+                    {
+                        "rag.citation_dedupe.applied": False,
+                        "rag.citation_dedupe.after": after_count,
+                        "rag.citation_dedupe.removed": 0,
+                        "rag.context_chars_after": len(packed.context or ""),
+                    },
+                )
+                return packed
+
+            deduped_results = [
+                packed.packed_retrieval_results[pos]
+                for pos in kept_positions
+                if pos < len(packed.packed_retrieval_results)
+            ]
+
+            logger.info(
+                "Citation dedupe (source_id,page_number): %d -> %d",
+                before_count,
+                after_count,
+            )
+
+            updated = _dc_replace(
+                packed,
+                context=deduped_context,
+                citation_list=deduped_citations,
+                packed_retrieval_results=deduped_results,
+            )
+            set_span_attributes(
+                dedupe_span,
+                {
+                    "rag.citation_dedupe.applied": True,
+                    "rag.citation_dedupe.after": after_count,
+                    "rag.citation_dedupe.removed": removed_count,
+                    "rag.context_chars_after": len(updated.context or ""),
+                },
+            )
+            return updated
 
     # -- internal pipeline helpers -----------------------------------------
 

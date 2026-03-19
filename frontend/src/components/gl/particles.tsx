@@ -92,7 +92,6 @@ export function Particles({
 
     state.gl.setRenderTarget(target);
     state.gl.clear();
-    // @ts-expect-error three.js renderer accepts these scene/camera objects at runtime.
     state.gl.render(scene, camera);
     state.gl.setRenderTarget(null);
 
@@ -149,7 +148,6 @@ export function Particles({
   return (
     <>
       {createPortal(
-        // @ts-expect-error custom shader material type extends three.js material at runtime.
         <mesh material={simulationMaterial}>
           <bufferGeometry>
             <bufferAttribute
@@ -159,10 +157,8 @@ export function Particles({
             <bufferAttribute attach="attributes-uv" args={[uvs, 2]} />
           </bufferGeometry>
         </mesh>,
-        // @ts-expect-error portal scene target is valid for r3f runtime.
         scene
       )}
-      {/* @ts-expect-error custom shader points material is valid at runtime. */}
       <points material={dofPointsMaterial} {...props}>
         <bufferGeometry>
           <bufferAttribute attach="attributes-position" args={[particles, 3]} />

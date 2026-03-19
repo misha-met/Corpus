@@ -4,7 +4,7 @@
  * Formats the cited (green) citations for copy-to-clipboard.
  *
  * Source of truth for the reference label, in priority order:
- *   1. User-provided citation reference saved at ingest time (localStorage)
+ *   1. User-provided citation reference persisted in backend source metadata
  *   2. Fallback: the source_id (filename stem) with underscores → spaces
  *
  * No attempt is made to parse or guess author/year from filenames.
@@ -13,7 +13,6 @@
  */
 
 import type { Citation } from "./event-parser";
-import { getCitationMeta } from "./citation-meta-store";
 
 const INLINE_CITATION_PATTERN = "\\[(\\d+)(?:\\s*,\\s*p\\.?\\s*(\\d+))?\\]";
 
@@ -49,9 +48,11 @@ export function extractInlineCitationMarkers(messageText: string): InlineCitatio
  *   - The user-provided citation reference (if saved at ingest), or
  *   - The source_id cleaned up: underscores/hyphens → spaces, title-cased.
  */
-function sourceLabel(sourceId: string): string {
-  const stored = getCitationMeta(sourceId);
-  if (stored) return stored;
+function sourceLabel(sourceId: string, citationReferenceBySource?: Map<string, string>): string {
+  const stored = citationReferenceBySource?.get(sourceId);
+  if (stored) {
+    return stored;
+  }
   return sourceId
     .replace(/[_-]+/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
@@ -71,10 +72,13 @@ function sourceLabel(sourceId: string): string {
  * Fallback (filename only):
  *   1. Battery Storage Review, p.4.
  */
-export function formatFootnotes(citedCitations: Citation[]): string {
+export function formatFootnotes(
+  citedCitations: Citation[],
+  citationReferenceBySource?: Map<string, string>
+): string {
   return citedCitations
     .map((c, i) => {
-      const label = sourceLabel(c.source_id);
+      const label = sourceLabel(c.source_id, citationReferenceBySource);
       const page = c.page != null ? `, p.${c.page}` : "";
       return `${i + 1}. ${label}${page}.`;
     })
@@ -95,7 +99,10 @@ export function formatFootnotes(citedCitations: Citation[]): string {
  * Fallback (filename only):
  *   Battery Storage Review. p.4.
  */
-export function formatHarvardBibliography(citedCitations: Citation[]): string {
+export function formatHarvardBibliography(
+  citedCitations: Citation[],
+  citationReferenceBySource?: Map<string, string>
+): string {
   // Group by source_id, preserving first-seen order
   const sourceOrder: string[] = [];
   const bySource = new Map<string, number[]>();
@@ -113,7 +120,7 @@ export function formatHarvardBibliography(citedCitations: Citation[]): string {
 
   return sourceOrder
     .map((sid) => {
-      const label = sourceLabel(sid);
+      const label = sourceLabel(sid, citationReferenceBySource);
       const pages = (bySource.get(sid) ?? []).sort((a, b) => a - b);
       const pagesStr =
         pages.length === 0
@@ -149,7 +156,8 @@ export function formatHarvardBibliography(citedCitations: Citation[]): string {
  */
 export function formatFootnotesWithText(
   messageText: string,
-  citedCitations: Citation[]
+  citedCitations: Citation[],
+  citationReferenceBySource?: Map<string, string>
 ): string {
   // 1. Collect original citation numbers in first-appearance order.
   const markers = extractInlineCitationMarkers(messageText);
@@ -192,7 +200,7 @@ export function formatFootnotesWithText(
     const newN = idx + 1;
     const c = citationsByOriginal.get(orig);
     if (!c) return `${newN}. [${orig}].`;
-    const label = sourceLabel(c.source_id);
+    const label = sourceLabel(c.source_id, citationReferenceBySource);
     const markerPage = markerPageByOriginal.get(orig);
     const pageValue = markerPage ?? c.page ?? null;
     const page = pageValue != null ? `, p.${pageValue}` : "";

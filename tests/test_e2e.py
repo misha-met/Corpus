@@ -135,10 +135,11 @@ class TestEndToEnd:
         )
 
         t0 = time.perf_counter()
-        results = engine.search(query, collect_metrics=True)
+        response = engine.search(query, collect_metrics=True)
+        results = response.results
         retrieval_ms = (time.perf_counter() - t0) * 1000
 
-        metrics = results[0].metrics if results and results[0].metrics else None
+        metrics = response.metrics if results and response.metrics else None
 
         # 4. Budget packing
         parent_texts = [r.parent_text for r in results if r.parent_text]

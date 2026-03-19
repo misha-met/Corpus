@@ -8,9 +8,8 @@ export interface UploadRequest {
   sourceId: string;
   summarize: boolean;
   geotag: boolean;
-  /** Optional citation reference string for Harvard/footnote copy feature.
-   *  e.g. "Smith, J. et al. (2024) 'Climate Change Review'"
-   *  Stored in localStorage keyed by source_id. */
+  peopletag: boolean;
+  /** Optional citation reference string for Harvard/footnote copy feature. */
   citationRef?: string;
   /** Starting page number for the first physical PDF page (default 1). */
   pageOffset?: number;
@@ -47,8 +46,8 @@ export function IngestModal({
   const [showCitationRefs, setShowCitationRefs] = useState(false);
   const [pageOffset, setPageOffset] = useState(1);
   const [showPageOffset, setShowPageOffset] = useState(false);
-  const [summarize, setSummarize] = useState(true);
   const [geotag, setGeotag] = useState(false);
+  const [peopletag, setPeopletag] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -144,8 +143,9 @@ export function IngestModal({
     const reqs: UploadRequest[] = files.map((file, idx) => ({
       file,
       sourceId: normalizedSourceIds[idx],
-      summarize,
+      summarize: true,
       geotag,
+      peopletag,
       citationRef: citationRefs[idx]?.trim() || undefined,
       pageOffset: pageOffset > 1 ? pageOffset : undefined,
     }));
@@ -157,8 +157,8 @@ export function IngestModal({
     sourceIds,
     citationRefs,
     pageOffset,
-    summarize,
     geotag,
+    peopletag,
     existingSourceIds,
     onStartUpload,
     onClose,
@@ -341,8 +341,7 @@ export function IngestModal({
                     </code>
                     <p className="mt-1 text-(--muted-foreground)/70">
                       Leave blank to use the filename as the reference.
-                      You can also add this later — the reference is stored
-                      locally and used whenever you copy citations.
+                      You can also add this later by re-ingesting the source.
                     </p>
                   </div>
 
@@ -429,18 +428,6 @@ export function IngestModal({
             </div>
           )}
 
-          {/* Summarize checkbox */}
-          <div className="flex items-center gap-2.5">
-            <Checkbox
-              id="ingest-summarize"
-              checked={summarize}
-              onChange={setSummarize}
-            />
-            <label htmlFor="ingest-summarize" className="text-sm text-muted-foreground cursor-pointer">
-              Generate summary during ingest
-            </label>
-          </div>
-
           {/* Geotag checkbox */}
           <div className="flex items-start gap-2.5">
             <Checkbox
@@ -452,6 +439,21 @@ export function IngestModal({
               <p>Index locations</p>
               <p className="text-[11px] text-(--muted-foreground)/70">
                 Runs place NER + geocoding
+              </p>
+            </label>
+          </div>
+
+          {/* Peopletag checkbox */}
+          <div className="flex items-start gap-2.5">
+            <Checkbox
+              id="ingest-peopletag"
+              checked={peopletag}
+              onChange={setPeopletag}
+            />
+            <label htmlFor="ingest-peopletag" className="text-sm text-muted-foreground cursor-pointer">
+              <p>Index people names</p>
+              <p className="text-[11px] text-(--muted-foreground)/70">
+                Runs person NER + canonical dictionary matching
               </p>
             </label>
           </div>

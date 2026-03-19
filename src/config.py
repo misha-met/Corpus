@@ -86,13 +86,21 @@ def _env_int(name: str, default: int, *, low: int | None = None, high: int | Non
 
 
 # Geotag and geocoder hardening knobs
-GEOTAG_MIN_CONFIDENCE: float = _env_float("GEOTAG_MIN_CONFIDENCE", 0.75, low=0.0, high=1.0)
+GEOTAG_MIN_CONFIDENCE: float = _env_float("GEOTAG_MIN_CONFIDENCE", 0.5, low=0.0, high=1.0)
 GEOTAG_FUZZY_THRESHOLD: int = _env_int("GEOTAG_FUZZY_THRESHOLD", 75, low=0, high=100)
 GEOTAG_FUZZY_SCORE_FLOOR: int = _env_int("GEOTAG_FUZZY_SCORE_FLOOR", 78, low=0, high=100)
 GEOTAG_FUZZY_MARGIN_THRESHOLD: float = _env_float("GEOTAG_FUZZY_MARGIN_THRESHOLD", 4.0, low=0.0)
 GEOTAG_ENTITY_TYPE_PENALTY: float = _env_float("GEOTAG_ENTITY_TYPE_PENALTY", 0.12, low=0.0, high=1.0)
 GEOTAG_GENERIC_TOKEN_PENALTY: float = _env_float("GEOTAG_GENERIC_TOKEN_PENALTY", 0.08, low=0.0, high=1.0)
 GEOTAG_NER_CONTEXT_WINDOW: int = _env_int("GEOTAG_NER_CONTEXT_WINDOW", 8, low=0, high=48)
+GEOTAG_NER_THRESHOLD: float = _env_float("GEOTAG_NER_THRESHOLD", 0.40, low=0.0, high=1.0)
+
+# People dictionary ingest knobs
+PEOPLETAG_MIN_CONFIDENCE: float = _env_float("PEOPLETAG_MIN_CONFIDENCE", 0.70, low=0.0, high=1.0)
+PEOPLETAG_NER_CONTEXT_WINDOW: int = _env_int("PEOPLETAG_NER_CONTEXT_WINDOW", 8, low=0, high=48)
+PEOPLETAG_NER_THRESHOLD: float = _env_float("PEOPLETAG_NER_THRESHOLD", 0.45, low=0.0, high=1.0)
+PEOPLETAG_FUZZY_THRESHOLD_LASTNAME: int = _env_int("PEOPLETAG_FUZZY_THRESHOLD_LASTNAME", 96, low=0, high=100)
+PEOPLETAG_FUZZY_THRESHOLD_FULLNAME: int = _env_int("PEOPLETAG_FUZZY_THRESHOLD_FULLNAME", 93, low=0, high=100)
 
 # Rollback toggles
 USE_HARDENED_GEOCODER: bool = _env_bool("USE_HARDENED_GEOCODER", False)
@@ -101,7 +109,14 @@ USE_SOURCE_IDS_FILTER: bool = _env_bool("USE_SOURCE_IDS_FILTER", True)
 
 @dataclass(frozen=True)
 class ModelConfig:
-    """Configuration for RAG pipeline models and retrieval parameters."""
+    """Configuration for RAG pipeline models and retrieval parameters.
+
+    Retrieval note: BM25/FTS uses LanceDB's default tokenizer for the indexed
+    text column. If production relevance requires different lexical behavior,
+    configure a custom LanceDB FTS tokenization profile when creating the
+    index. Injecting HuggingFace tokenizers directly into LanceDB FTS is not
+    currently supported.
+    """
     mode: str
     llm_model: str
     embedding_model: str
@@ -118,6 +133,8 @@ class ModelConfig:
     top_k_final: int = 5
     reranker_threshold: float = 0.05
     reranker_min_docs: int = 3
+    bm25_weight: float = 0.5
+    use_hybrid: bool = True
     reranker_enabled: bool = True
     context_expansion_enabled: bool = True
     system_ram_gb: float = 0.0
@@ -156,6 +173,8 @@ class ResolvedRetrievalParams:
     top_k_final: int
     reranker_threshold: float
     reranker_min_docs: int
+    bm25_weight: float = 0.5
+    use_hybrid: bool = True
     max_children_per_parent: int = 2
 
 
@@ -219,6 +238,8 @@ def resolve_retrieval_params(mode_config: ModelConfig, intent: str) -> ResolvedR
             if overrides.reranker_min_docs is not None
             else mode_config.reranker_min_docs
         ),
+        bm25_weight=mode_config.bm25_weight,
+        use_hybrid=mode_config.use_hybrid,
         max_children_per_parent=mode_config.max_children_per_parent,
     )
 

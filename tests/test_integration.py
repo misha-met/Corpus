@@ -68,7 +68,8 @@ class TestIngestToRetrieval:
             reranker=mock_reranker,
             config=config,
         )
-        results = engine.search("Chomsky language acquisition")
+        response = engine.search("Chomsky language acquisition")
+        results = response.results
         assert len(results) > 0
         # Results should contain text from our corpus
         all_text = " ".join(r.text for r in results)
@@ -95,7 +96,8 @@ class TestIngestToRetrieval:
             reranker=mock_reranker,
             config=config,
         )
-        results = engine.search("epistemology knowledge")
+        response = engine.search("epistemology knowledge")
+        results = response.results
         for r in results:
             if r.metadata.get("parent_id"):
                 assert r.parent_text is not None, (
@@ -130,7 +132,8 @@ class TestRetrievalToBudgetPacking:
             reranker=mock_reranker,
             config=config,
         )
-        results = engine.search("Chomsky language theory")
+        response = engine.search("Chomsky language theory")
+        results = response.results
         parent_texts = [r.parent_text for r in results if r.parent_text]
 
         if parent_texts:
@@ -185,7 +188,8 @@ class TestRetrievalToCitations:
             reranker=mock_reranker,
             config=config,
         )
-        results = engine.search("Chomsky theory language")
+        response = engine.search("Chomsky theory language")
+        results = response.results
         parent_texts = [r.parent_text for r in results if r.parent_text]
         metadatas = [r.metadata for r in results if r.parent_text]
 
@@ -230,7 +234,8 @@ class TestRetrievalToCitations:
             reranker=mock_reranker,
             config=config,
         )
-        results = engine.search("epistemology knowledge")
+        response = engine.search("epistemology knowledge")
+        results = response.results
         parent_texts = [r.parent_text for r in results if r.parent_text]
 
         if parent_texts:
@@ -325,7 +330,8 @@ class TestModeSpecificBehaviour:
                 reranker=mock_reranker,
                 config=config,
             )
-            results = engine.search("Chomsky language")
+            response = engine.search("Chomsky language")
+            results = response.results
             results_by_mode[mode] = len(results)
             logger.info(f"Mode {mode}: {len(results)} results")
 
@@ -359,9 +365,10 @@ class TestCrossStageMetrics:
             reranker=mock_reranker,
             config=config,
         )
-        results = engine.search("Chomsky language theory", collect_metrics=True)
+        response = engine.search("Chomsky language theory", collect_metrics=True)
+        results = response.results
         assert results
-        metrics = results[0].metrics
+        metrics = response.metrics
         assert metrics is not None
 
         # Timing should be populated
@@ -415,10 +422,11 @@ class TestPipelineLatency:
 
         for q in valid_queries:
             with Timer("pipeline", query=q) as t:
-                results = engine.search(q, collect_metrics=True)
+                response = engine.search(q, collect_metrics=True)
+                results = response.results
 
             pipeline_ms = t.result.elapsed_ms
-            metrics = results[0].metrics if results and results[0].metrics else None
+            metrics = response.metrics if results and response.metrics else None
             stage_breakdown = {}
             if metrics:
                 stage_breakdown = {
@@ -476,16 +484,17 @@ class TestPipelineLatency:
                 config=config,
             )
             with Timer("mode_comparison", mode=mode_name) as t:
-                results = engine.search(query, collect_metrics=True)
+                response = engine.search(query, collect_metrics=True)
+                results = response.results
             mode_timings[mode_name] = {
                 "total_ms": t.result.elapsed_ms,
                 "result_count": len(results),
             }
-            if results and results[0].metrics:
+            if results and response.metrics:
                 mode_timings[mode_name]["breakdown"] = {
-                    "dense_ms": results[0].metrics.timing.hybrid_search_ms,
-                    "sparse_ms": results[0].metrics.timing.sparse_search_ms,
-                    "rerank_ms": results[0].metrics.timing.rerank_ms,
+                    "dense_ms": response.metrics.timing.hybrid_search_ms,
+                    "sparse_ms": response.metrics.timing.sparse_search_ms,
+                    "rerank_ms": response.metrics.timing.rerank_ms,
                 }
 
         logger.info(f"MODE_COMPARISON: {json.dumps(mode_timings, indent=2)}")

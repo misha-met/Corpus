@@ -69,6 +69,8 @@ export interface AppState {
   intentOverride: string;
   /** Active chat mode: "rag" for document-QA, "freeform" for non-RAG chat */
   chatMode: "rag" | "freeform";
+  /** Currently selected source IDs from the source panel. */
+  selectedSourceIds: string[];
 }
 
 const initialState: AppState = {
@@ -85,6 +87,7 @@ const initialState: AppState = {
   currentAssistantMessageId: null,
   intentOverride: "auto",
   chatMode: "rag",
+  selectedSourceIds: [],
 };
 
 // ---------------------------------------------------------------------------
@@ -117,7 +120,8 @@ export type AppAction =
   | { type: "ADD_THINKING_STEP"; message: string }
   | { type: "SET_TRACE_INFO"; traceId: string; spanId: string }
   | { type: "SET_INTENT_OVERRIDE"; intentOverride: string }
-  | { type: "SET_CHAT_MODE"; mode: "rag" | "freeform" };
+  | { type: "SET_CHAT_MODE"; mode: "rag" | "freeform" }
+  | { type: "SET_SELECTED_SOURCE_IDS"; sourceIds: string[] };
 
 // ---------------------------------------------------------------------------
 // Reducer
@@ -204,6 +208,8 @@ function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, intentOverride: action.intentOverride };
     case "SET_CHAT_MODE":
       return { ...state, chatMode: action.mode };
+    case "SET_SELECTED_SOURCE_IDS":
+      return { ...state, selectedSourceIds: action.sourceIds };
     default:
       return state;
   }

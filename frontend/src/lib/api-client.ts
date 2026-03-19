@@ -11,6 +11,8 @@ export interface SourceInfo {
   summary: string | null;
   source_path: string | null;
   snapshot_path: string | null;
+  citation_reference?: string | null;
+  page_offset?: number;
   source_size_bytes?: number | null;
   content_size_bytes?: number | null;
 }
@@ -24,6 +26,14 @@ export interface IngestResponse {
   parents_count: number;
   children_count: number;
   summarized: boolean;
+  geotag_ner?: NERDiagnostics | null;
+  peopletag_ner?: NERDiagnostics | null;
+}
+
+export interface NERDiagnostics {
+  ner_available: boolean;
+  method: string;
+  warning?: string | null;
 }
 
 export interface SourceContentResponse {
@@ -120,6 +130,45 @@ export interface GeoMentionsResponse {
   mentions: GeoMentionGroup[];
 }
 
+export interface PersonMention {
+  id: string;
+  source_id: string;
+  chunk_id: string;
+  raw_name: string;
+  canonical_name: string;
+  confidence: number;
+  method: string;
+  role_hint?: string | null;
+  context_snippet: string;
+}
+
+export interface PersonSummary {
+  canonical_name: string;
+  mention_count: number;
+  source_count: number;
+  source_ids: string[];
+  variants: string[];
+  roles: string[];
+  avg_confidence: number;
+}
+
+export interface PeopleListResponse {
+  count: number;
+  people: PersonSummary[];
+}
+
+export interface PersonMentionsResponse {
+  canonical_name: string;
+  count: number;
+  mentions: PersonMention[];
+}
+
+export interface PeopleMergeResponse {
+  source_canonical_name: string;
+  target_canonical_name: string;
+  merged_count: number;
+}
+
 export interface ApiError {
   error: {
     code: string;
@@ -211,6 +260,8 @@ class SourceApiClient {
     sourceId: string,
     summarize: boolean = true,
     geotag: boolean = false,
+    peopletag: boolean = false,
+    citationReference?: string,
   ): Promise<IngestResponse> {
     const res = await fetch(`${this.baseUrl}/sources/ingest`, {
       method: "POST",
@@ -220,6 +271,8 @@ class SourceApiClient {
         source_id: sourceId,
         summarize,
         geotag,
+        peopletag,
+        citation_reference: citationReference,
       }),
     });
     if (!res.ok) {
@@ -235,13 +288,19 @@ class SourceApiClient {
     summarize: boolean = true,
     pageOffset?: number,
     geotag: boolean = false,
+    peopletag: boolean = false,
+    citationReference?: string,
   ): Promise<IngestResponse> {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("source_id", sourceId);
     formData.append("summarize", String(summarize));
     formData.append("geotag", String(geotag));
+    formData.append("peopletag", String(peopletag));
     formData.append("page_offset", String(pageOffset ?? 1));
+    if (citationReference) {
+      formData.append("citation_reference", citationReference);
+    }
 
     // Call the backend directly to bypass the Next.js dev proxy
     // which has a ~30s timeout — upload+ingest can take minutes.
@@ -293,6 +352,7 @@ class SourceApiClient {
     offset: number = 0,
     detailed: boolean = true,
     sourceIds?: string[],
+    q?: string,
   ): Promise<GeoMentionsResponse> {
     const params = new URLSearchParams({
       min_confidence: String(minConfidence),
@@ -317,6 +377,9 @@ class SourceApiClient {
         }
       }
     }
+    if (typeof q === "string" && q.trim().length > 0) {
+      params.set("q", q.trim());
+    }
 
     const res = await fetch(`${this.baseUrl}/geo/mentions?${params.toString()}`);
     if (!res.ok) {
@@ -335,6 +398,122 @@ class SourceApiClient {
       const message = await this.parseErrorResponse(res);
       throw new Error(message);
     }
+  }
+
+  async getPeople(
+    sourceId?: string,
+    minConfidence: number = 0.0,
+    q?: string,
+    limit: number = 200,
+    offset: number = 0,
+    sourceIds?: string[],
+  ): Promise<PeopleListResponse> {
+    const params = new URLSearchParams({
+      min_confidence: String(minConfidence),
+      limit: String(limit),
+      offset: String(offset),
+    });
+    if (sourceId) {
+      params.set("source_id", sourceId);
+    }
+    if (q && q.trim().length > 0) {
+      params.set("q", q.trim());
+    }
+    if (sourceIds !== undefined) {
+      if (sourceIds.length === 0) {
+        params.append("source_ids", "");
+      } else {
+        const seen = new Set<string>();
+        for (const raw of sourceIds) {
+          const sid = String(raw).trim();
+          if (!sid || seen.has(sid)) continue;
+          seen.add(sid);
+          params.append("source_ids", sid);
+        }
+      }
+    }
+
+    const res = await fetch(`${this.baseUrl}/people?${params.toString()}`);
+    if (!res.ok) {
+      const message = await this.parseErrorResponse(res);
+      throw new Error(message);
+    }
+    return res.json();
+  }
+
+  async getPeopleMentions(
+    canonicalName: string,
+    sourceId?: string,
+    minConfidence: number = 0.0,
+    limit: number = 1000,
+    offset: number = 0,
+    sourceIds?: string[],
+  ): Promise<PersonMentionsResponse> {
+    const params = new URLSearchParams({
+      canonical_name: canonicalName,
+      min_confidence: String(minConfidence),
+      limit: String(limit),
+      offset: String(offset),
+    });
+    if (sourceId) {
+      params.set("source_id", sourceId);
+    }
+    if (sourceIds !== undefined) {
+      if (sourceIds.length === 0) {
+        params.append("source_ids", "");
+      } else {
+        const seen = new Set<string>();
+        for (const raw of sourceIds) {
+          const sid = String(raw).trim();
+          if (!sid || seen.has(sid)) continue;
+          seen.add(sid);
+          params.append("source_ids", sid);
+        }
+      }
+    }
+
+    const res = await fetch(`${this.baseUrl}/people/mentions?${params.toString()}`);
+    if (!res.ok) {
+      const message = await this.parseErrorResponse(res);
+      throw new Error(message);
+    }
+    return res.json();
+  }
+
+  async deletePeopleMention(mentionId: string): Promise<void> {
+    const res = await fetch(
+      `${this.baseUrl}/people/mentions/${encodeURIComponent(mentionId)}`,
+      { method: "DELETE" },
+    );
+    if (!res.ok) {
+      const message = await this.parseErrorResponse(res);
+      throw new Error(message);
+    }
+  }
+
+  async mergePeopleCanonical(
+    sourceCanonicalName: string,
+    targetCanonicalName: string,
+  ): Promise<PeopleMergeResponse> {
+    const source = sourceCanonicalName.trim();
+    const target = targetCanonicalName.trim();
+    if (!source || !target) {
+      throw new Error("Source and target canonical names are required.");
+    }
+
+    const res = await fetch(`${this.baseUrl}/people/merge`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        source_canonical_name: source,
+        target_canonical_name: target,
+      }),
+    });
+    if (!res.ok) {
+      const message = await this.parseErrorResponse(res);
+      throw new Error(message);
+    }
+    return res.json();
   }
 }
 

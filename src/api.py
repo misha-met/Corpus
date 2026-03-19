@@ -42,6 +42,11 @@ from .api_schemas import (
     HealthResponse,
     IngestRequest,
     IngestResponse,
+    NERDiagnosticsResponse,
+    PeopleListResponse,
+    PeopleMergeRequest,
+    PeopleMergeResponse,
+    PersonMentionsResponse,
     QueryRequest,
     QueryResponse,
     SourceContentResponse,
@@ -308,6 +313,17 @@ async def health():
     from .config import get_system_ram_gb
 
     phoenix_status = get_phoenix_runtime_status()
+    fts_policy: Optional[str] = None
+    fts_dirty: Optional[bool] = None
+    fts_pending_rows: Optional[int] = None
+    if _engine is not None:
+        try:
+            fts_status = _engine.storage.get_fts_status()  # type: ignore[union-attr]
+            fts_policy = fts_status.get("fts_policy")
+            fts_dirty = bool(fts_status.get("fts_dirty"))
+            fts_pending_rows = int(fts_status.get("fts_pending_rows", 0))
+        except Exception:
+            logger.debug("Unable to collect FTS status for health endpoint", exc_info=True)
 
     return HealthResponse(
         status="ok",
@@ -318,6 +334,9 @@ async def health():
         phoenix_project_name=phoenix_status.project_name,
         phoenix_endpoint=phoenix_status.endpoint,
         phoenix_error=phoenix_status.error,
+        fts_policy=fts_policy,
+        fts_dirty=fts_dirty,
+        fts_pending_rows=fts_pending_rows,
     )
 
 
@@ -417,6 +436,7 @@ async def get_geo_mentions(
     request: Request,
     source_id: str | None = None,
     source_ids: list[str] | None = Query(default=None),
+    q: str | None = Query(default=None),
     min_confidence: float = Query(0.75, ge=0.0, le=1.0),
     limit: int = Query(1000, ge=1, le=50_000),
     offset: int = Query(0, ge=0),
@@ -455,6 +475,7 @@ async def get_geo_mentions(
             storage.get_geo_mentions,
             source_id=normalized_source_id or None,
             source_ids=effective_source_ids,
+            q=q,
             min_confidence=min_confidence,
             limit=limit,
             offset=offset,
@@ -463,7 +484,16 @@ async def get_geo_mentions(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     groups: dict[int, dict] = {}
+    seen_geo_keys: set[tuple[str, str, str]] = set()
     for row in rows:
+        source_key = str(row.get("source_id", "")).strip()
+        chunk_key = str(row.get("chunk_id", "")).strip()
+        canonical_place = str(row.get("place_name", "")).strip()
+        geo_identity_key = (source_key, chunk_key, canonical_place)
+        if geo_identity_key in seen_geo_keys:
+            continue
+        seen_geo_keys.add(geo_identity_key)
+
         gid = row["geonameid"]
         if gid not in groups:
             group = {
@@ -518,6 +548,240 @@ async def delete_geo_mention(mention_id: str) -> None:
     engine = await asyncio.to_thread(_get_engine)
     storage = engine.storage  # type: ignore[union-attr]
     await asyncio.to_thread(storage.delete_geo_mention, mention_id)
+
+
+@app.get("/api/people", response_model=PeopleListResponse)
+async def get_people(
+    request: Request,
+    source_id: str | None = None,
+    source_ids: list[str] | None = Query(default=None),
+    min_confidence: float = Query(0.0, ge=0.0, le=1.0),
+    q: str | None = Query(default=None),
+    limit: int = Query(200, ge=1, le=50_000),
+    offset: int = Query(0, ge=0),
+) -> PeopleListResponse:
+    """Return canonical people grouped from mention-level rows."""
+    normalized_source_id = source_id.strip() if isinstance(source_id, str) else ""
+
+    raw_source_ids = request.query_params.getlist("source_ids")
+    source_ids_provided = "source_ids" in request.query_params
+    normalized_source_ids: list[str] = []
+    if source_ids_provided:
+        for raw in raw_source_ids:
+            sid = raw.strip()
+            if sid and sid not in normalized_source_ids:
+                normalized_source_ids.append(sid)
+
+    if source_ids_provided and not normalized_source_ids and not normalized_source_id:
+        return PeopleListResponse(count=0, people=[])
+
+    effective_source_ids: list[str] | None = None
+    union: list[str] = []
+    if normalized_source_id:
+        union.append(normalized_source_id)
+    for sid in normalized_source_ids:
+        if sid not in union:
+            union.append(sid)
+    if union:
+        effective_source_ids = union
+
+    engine = await asyncio.to_thread(_get_engine)
+    storage = engine.storage  # type: ignore[union-attr]
+
+    try:
+        rows = await asyncio.to_thread(
+            storage.get_person_mentions,
+            source_id=normalized_source_id or None,
+            source_ids=effective_source_ids,
+            min_confidence=min_confidence,
+            q=q,
+            limit=50_000,
+            offset=0,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    grouped: dict[str, dict[str, object]] = {}
+    seen_people_keys: set[tuple[str, str, str]] = set()
+    for row in rows:
+        source_key = str(row.get("source_id", "")).strip()
+        chunk_key = str(row.get("chunk_id", "")).strip()
+        raw_name = str(row.get("raw_name", "")).strip()
+        if not raw_name:
+            continue
+        person_identity_key = (source_key, chunk_key, raw_name)
+        if person_identity_key in seen_people_keys:
+            continue
+        seen_people_keys.add(person_identity_key)
+
+        canonical = str(row.get("canonical_name", "")).strip()
+        if not canonical:
+            continue
+
+        group = grouped.get(canonical)
+        if group is None:
+            group = {
+                "canonical_name": canonical,
+                "mention_count": 0,
+                "source_ids": set(),
+                "variants": set(),
+                "roles": set(),
+                "confidence_sum": 0.0,
+            }
+            grouped[canonical] = group
+
+        group["mention_count"] = int(group["mention_count"]) + 1
+        source_set = group["source_ids"]
+        if isinstance(source_set, set):
+            source_set.add(str(row.get("source_id", "")))
+
+        variants_set = group["variants"]
+        if isinstance(variants_set, set):
+            if raw_name:
+                variants_set.add(raw_name)
+
+        roles_set = group["roles"]
+        if isinstance(roles_set, set):
+            role = row.get("role_hint")
+            if role is not None and str(role).strip():
+                roles_set.add(str(role).strip())
+
+        try:
+            conf = float(row.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            conf = 0.0
+        group["confidence_sum"] = float(group["confidence_sum"]) + conf
+
+    ordered = sorted(
+        grouped.values(),
+        key=lambda item: (-int(item["mention_count"]), str(item["canonical_name"]).lower()),
+    )
+
+    paged = ordered[offset : offset + limit]
+    people = [
+        {
+            "canonical_name": str(item["canonical_name"]),
+            "mention_count": int(item["mention_count"]),
+            "source_count": len(item["source_ids"]) if isinstance(item["source_ids"], set) else 0,
+            "source_ids": sorted(item["source_ids"]) if isinstance(item["source_ids"], set) else [],
+            "variants": sorted(item["variants"]) if isinstance(item["variants"], set) else [],
+            "roles": sorted(item["roles"]) if isinstance(item["roles"], set) else [],
+            "avg_confidence": round(
+                float(item["confidence_sum"]) / max(1, int(item["mention_count"])),
+                4,
+            ),
+        }
+        for item in paged
+    ]
+    return PeopleListResponse(count=len(ordered), people=people)
+
+
+@app.post("/api/people/merge", response_model=PeopleMergeResponse)
+async def merge_people(request: PeopleMergeRequest) -> PeopleMergeResponse:
+    """Merge one canonical person name into another and re-warm resolver state."""
+    from .person_resolver import get_person_resolver
+
+    source = request.source_canonical_name.strip()
+    target = request.target_canonical_name.strip()
+    if not source or not target:
+        raise HTTPException(status_code=422, detail="source_canonical_name and target_canonical_name must be non-empty")
+
+    engine = await asyncio.to_thread(_get_engine)
+    storage = engine.storage  # type: ignore[union-attr]
+
+    merged_count = await asyncio.to_thread(
+        storage.merge_person_canonical_names,
+        source,
+        target,
+    )
+
+    resolver = get_person_resolver()
+    rows = await asyncio.to_thread(storage.list_person_mentions_for_registry)
+    await asyncio.to_thread(resolver.warm_from_rows, rows)
+
+    return PeopleMergeResponse(
+        source_canonical_name=source,
+        target_canonical_name=target,
+        merged_count=merged_count,
+    )
+
+
+@app.get("/api/people/mentions", response_model=PersonMentionsResponse)
+async def get_people_mentions(
+    request: Request,
+    canonical_name: str = Query(..., min_length=1),
+    source_id: str | None = None,
+    source_ids: list[str] | None = Query(default=None),
+    min_confidence: float = Query(0.0, ge=0.0, le=1.0),
+    limit: int = Query(1000, ge=1, le=50_000),
+    offset: int = Query(0, ge=0),
+) -> PersonMentionsResponse:
+    """Return mention rows for one canonical person."""
+    normalized_source_id = source_id.strip() if isinstance(source_id, str) else ""
+
+    raw_source_ids = request.query_params.getlist("source_ids")
+    source_ids_provided = "source_ids" in request.query_params
+    normalized_source_ids: list[str] = []
+    if source_ids_provided:
+        for raw in raw_source_ids:
+            sid = raw.strip()
+            if sid and sid not in normalized_source_ids:
+                normalized_source_ids.append(sid)
+
+    if source_ids_provided and not normalized_source_ids and not normalized_source_id:
+        return PersonMentionsResponse(canonical_name=canonical_name, count=0, mentions=[])
+
+    effective_source_ids: list[str] | None = None
+    union: list[str] = []
+    if normalized_source_id:
+        union.append(normalized_source_id)
+    for sid in normalized_source_ids:
+        if sid not in union:
+            union.append(sid)
+    if union:
+        effective_source_ids = union
+
+    engine = await asyncio.to_thread(_get_engine)
+    storage = engine.storage  # type: ignore[union-attr]
+    try:
+        mentions = await asyncio.to_thread(
+            storage.get_person_mentions_by_canonical,
+            canonical_name,
+            source_id=normalized_source_id or None,
+            source_ids=effective_source_ids,
+            min_confidence=min_confidence,
+            limit=limit,
+            offset=offset,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return PersonMentionsResponse(
+        canonical_name=canonical_name,
+        count=len(mentions),
+        mentions=mentions,
+    )
+
+
+@app.delete("/api/people/mentions/{mention_id}", status_code=204)
+async def delete_people_mention(mention_id: str) -> None:
+    """Delete one person mention and eagerly update resolver registry."""
+    from .person_resolver import get_person_resolver
+
+    engine = await asyncio.to_thread(_get_engine)
+    storage = engine.storage  # type: ignore[union-attr]
+
+    mention = await asyncio.to_thread(storage.get_person_mention, mention_id)
+    await asyncio.to_thread(storage.delete_person_mention, mention_id)
+
+    if mention is not None:
+        resolver = get_person_resolver()
+        await asyncio.to_thread(
+            resolver.remove_mention,
+            canonical_name=str(mention.get("canonical_name", "")),
+            raw_name=str(mention.get("raw_name", "")),
+            source_id=str(mention.get("source_id", "")),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -837,6 +1101,28 @@ async def chat(request: Request, chat_request: ChatRequest):
             status_code=429,
             content=http_error_body("LOCK_BUSY", "Another query is already in progress"),
         )
+
+    if chat_request.data and "source_ids" in chat_request.data:
+        source_id_raw = chat_request.data.get("source_id")
+        has_source_id = isinstance(source_id_raw, str) and bool(source_id_raw.strip())
+        source_ids_raw = chat_request.data.get("source_ids")
+        normalized_source_ids: list[str] = []
+        if isinstance(source_ids_raw, list):
+            for value in source_ids_raw:
+                if value is None:
+                    continue
+                sid = str(value).strip()
+                if sid and sid not in normalized_source_ids:
+                    normalized_source_ids.append(sid)
+
+        if not has_source_id and not normalized_source_ids:
+            return JSONResponse(
+                status_code=422,
+                content=http_error_body(
+                    "NO_SOURCES_SELECTED",
+                    "Select at least one source before sending a RAG query.",
+                ),
+            )
 
     logger.info("Chat: request received")
 
@@ -1191,13 +1477,20 @@ async def query_endpoint(request: Request, query_request: QueryRequest):
     """Query endpoint with optional AI SDK UI message stream output."""
     source_id = None
     normalized_source_ids: list[str] = []
-    if query_request.source_ids:
+    if query_request.source_ids is not None:
         for value in query_request.source_ids:
             if value is None:
                 continue
             sid = str(value).strip()
             if sid and sid not in normalized_source_ids:
                 normalized_source_ids.append(sid)
+
+    if query_request.source_ids is not None and not normalized_source_ids:
+        raise HTTPException(
+            status_code=422,
+            detail="Select at least one source before sending a RAG query.",
+        )
+
     if len(normalized_source_ids) == 1:
         source_id = normalized_source_ids[0]
     elif len(normalized_source_ids) > 1:
@@ -1256,7 +1549,7 @@ async def list_sources():
     engine = await asyncio.to_thread(_get_engine)
     storage = engine.storage  # type: ignore[union-attr]
 
-    # Get full details from summaries table (schema v2)
+    # Get full details from summaries table
     details = storage.get_source_details()
     # Also get source IDs from parent chunks (may include sources without summaries)
     all_ids = set(storage.list_source_ids())
@@ -1279,6 +1572,7 @@ async def list_sources():
             source_size_bytes=source_size_bytes,
             content_size_bytes=source_size_bytes or snapshot_size_bytes,
             page_offset=detail.get("page_offset") or 1,
+            citation_reference=detail.get("citation_reference") or None,
         ))
 
     # Add any source IDs that have chunks but no summary
@@ -1293,6 +1587,7 @@ async def _post_ingest_snapshot(
     source_id: str,
     file_path: str,
     *,
+    citation_reference: Optional[str] = None,
     page_offset: int = 1,
 ) -> None:
     """Create text snapshot and update summary record with file paths.
@@ -1316,20 +1611,38 @@ async def _post_ingest_snapshot(
     except Exception as snap_exc:
         logger.warning("Failed to create snapshot for %s: %s", source_id, snap_exc)
 
-    # Update the summary record with file paths (schema v3)
+    resolved_source_path = str(Path(file_path).resolve())
+
     try:
-        summaries = storage.get_source_summaries()
-        summary_text = summaries.get(source_id, "")
-        if summary_text:
-            storage.upsert_source_summary(
-                source_id=source_id,
-                summary=summary_text,
-                source_path=str(Path(file_path).resolve()),
-                snapshot_path=snapshot_path,
-                page_offset=page_offset,
-            )
+        storage.persist_source_page_offset(
+            source_id=source_id,
+            page_offset=page_offset,
+            source_path=resolved_source_path,
+            snapshot_path=snapshot_path,
+            citation_reference=citation_reference,
+        )
     except Exception as path_exc:
         logger.warning("Failed to update source paths for %s: %s", source_id, path_exc)
+
+
+def _to_ner_diagnostics_response(diag: object | None) -> Optional[NERDiagnosticsResponse]:
+    """Best-effort conversion from ingest diagnostics objects to API schema."""
+    if diag is None:
+        return None
+
+    method = getattr(diag, "method", None)
+    if method is None:
+        return None
+
+    ner_available_raw = getattr(diag, "ner_available", False)
+    warning_raw = getattr(diag, "warning", None)
+    warning_value = str(warning_raw) if warning_raw is not None else None
+
+    return NERDiagnosticsResponse(
+        ner_available=bool(ner_available_raw),
+        method=str(method),
+        warning=warning_value,
+    )
 
 
 @app.post("/api/sources/ingest", response_model=IngestResponse)
@@ -1360,9 +1673,12 @@ async def ingest_source(request: IngestRequest):
             "source_id": source_id,
             "summarize": request.summarize,
             "page_offset": page_offset,
+            "citation_reference": request.citation_reference,
         }
         if request.geotag:
             ingest_kwargs["geotag"] = True
+        if request.peopletag:
+            ingest_kwargs["peopletag"] = True
 
         # Run ingest in thread (blocking operation)
         result = await asyncio.to_thread(
@@ -1371,13 +1687,21 @@ async def ingest_source(request: IngestRequest):
             **ingest_kwargs,
         )
 
-        await _post_ingest_snapshot(engine, source_id, file_path, page_offset=page_offset)
+        await _post_ingest_snapshot(
+            engine,
+            source_id,
+            file_path,
+            citation_reference=request.citation_reference,
+            page_offset=page_offset,
+        )
 
         return IngestResponse(
             source_id=result.source_id,
             parents_count=result.parents_count,
             children_count=result.children_count,
             summarized=result.summarized,
+            geotag_ner=_to_ner_diagnostics_response(getattr(result, "geotag_ner", None)),
+            peopletag_ner=_to_ner_diagnostics_response(getattr(result, "peopletag_ner", None)),
         )
 
     except Exception as exc:
@@ -1427,7 +1751,9 @@ async def upload_source(
     source_id: str = Form(""),
     summarize: bool = Form(True),
     geotag: bool = Form(False),
+    peopletag: bool = Form(False),
     page_offset: int = Form(1),
+    citation_reference: str = Form(""),
 ):
     """Upload and ingest a document (PDF or Markdown) from the browser.
 
@@ -1495,9 +1821,12 @@ async def upload_source(
             "source_id": sid,
             "summarize": summarize,
             "page_offset": page_offset,
+            "citation_reference": citation_reference.strip() or None,
         }
         if geotag:
             ingest_kwargs["geotag"] = True
+        if peopletag:
+            ingest_kwargs["peopletag"] = True
 
         # Run ingest in thread (blocking operation)
         result = await asyncio.to_thread(
@@ -1506,13 +1835,21 @@ async def upload_source(
             **ingest_kwargs,
         )
 
-        await _post_ingest_snapshot(engine, sid, str(dest), page_offset=page_offset)
+        await _post_ingest_snapshot(
+            engine,
+            sid,
+            str(dest),
+            citation_reference=citation_reference.strip() or None,
+            page_offset=page_offset,
+        )
 
         return IngestResponse(
             source_id=result.source_id,
             parents_count=result.parents_count,
             children_count=result.children_count,
             summarized=result.summarized,
+            geotag_ner=_to_ner_diagnostics_response(getattr(result, "geotag_ner", None)),
+            peopletag_ner=_to_ner_diagnostics_response(getattr(result, "peopletag_ner", None)),
         )
 
     except Exception as exc:
@@ -1535,6 +1872,7 @@ async def upload_source(
 async def delete_source(source_id: str):
     """Delete a source and all its chunks, summary, and cached snapshot."""
     from .source_cache import delete_snapshot
+    from .person_resolver import get_person_resolver
 
     try:
         engine = await asyncio.to_thread(_get_engine)
@@ -1546,6 +1884,14 @@ async def delete_source(source_id: str):
 
         # Delete from storage (children, parents, summary)
         deleted = await asyncio.to_thread(storage.delete_source, source_id)
+
+        # Keep in-memory resolver registry aligned with persisted table rows.
+        try:
+            resolver = get_person_resolver()
+            rows = await asyncio.to_thread(storage.list_person_mentions_for_registry)
+            await asyncio.to_thread(resolver.warm_from_rows, rows)
+        except Exception:
+            logger.warning("Failed to re-warm person resolver after source delete", exc_info=True)
 
         # Delete snapshot file
         if snapshot_path:
@@ -1624,7 +1970,12 @@ async def get_source_content(source_id: str):
         snapshot_path = detail.get("snapshot_path", "") or None
         fmt = _detect_format(source_path)
 
-        result = await asyncio.to_thread(resolve_content, source_path, snapshot_path)
+        result = await asyncio.to_thread(
+            resolve_content,
+            source_path,
+            snapshot_path,
+            prefer_snapshot=True,
+        )
         if result is None:
             # Fallback: try to assemble content from parent texts
             parent_texts = storage.get_parent_texts_by_source(source_id=source_id)

@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 class StorageConfig:
     lance_dir: Path
     lance_table: str = "child_chunks"
-    fts_rebuild_policy: str = "deferred"
+    fts_rebuild_policy: str = "immediate"
     fts_rebuild_batch_size: int = 0
 
 
@@ -45,6 +45,7 @@ class StorageEngine:
     _PARENTS_TABLE = "parent_chunks"
     _SUMMARIES_TABLE = "source_summaries"
     _GEO_MENTIONS_TABLE = "geo_mentions"
+    _PERSON_MENTIONS_TABLE = "person_mentions"
     _MAX_IN_CLAUSE_VALUES = 256
     _GEO_MENTIONS_SCHEMA = pa.schema([
         pa.field("id", pa.string()),
@@ -66,6 +67,17 @@ class StorageEngine:
         pa.field("ner_score", pa.float64()),
         pa.field("geocoder_version", pa.string()),
         pa.field("geocoded_at", pa.float64()),
+    ])
+    _PERSON_MENTIONS_SCHEMA = pa.schema([
+        pa.field("id", pa.string()),
+        pa.field("source_id", pa.string()),
+        pa.field("chunk_id", pa.string()),
+        pa.field("raw_name", pa.string()),
+        pa.field("canonical_name", pa.string()),
+        pa.field("confidence", pa.float32()),
+        pa.field("method", pa.string()),
+        pa.field("role_hint", pa.string()),
+        pa.field("context_snippet", pa.string()),
     ])
 
     def __init__(self, config: StorageConfig) -> None:
@@ -119,6 +131,15 @@ class StorageEngine:
         except ValueError:
             pass  # Table does not exist yet
 
+        # --- person mentions (no vectors) ---
+        self._person_mentions: Optional[lancedb.table.Table] = None
+        self._person_mentions_indexes_ready = False
+        try:
+            self._person_mentions = self._db.open_table(self._PERSON_MENTIONS_TABLE)
+            self._ensure_person_mentions_indexes()
+        except ValueError:
+            pass  # Table does not exist yet
+
     def close(self) -> None:
         pass  # LanceDB connections do not require explicit close
 
@@ -126,7 +147,7 @@ class StorageEngine:
     # Schema migrations
     # ------------------------------------------------------------------
 
-    _SUMMARIES_V2_COLUMNS = ("source_path", "snapshot_path")
+    _SUMMARIES_V2_COLUMNS = ("source_path", "snapshot_path", "citation_reference")
     _SUMMARIES_V3_COLUMNS = ("page_offset",)  # int32; absence treated as 1 at read time
     _RANGE_COLUMNS = ("start_page", "end_page")
 
@@ -227,6 +248,50 @@ class StorageEngine:
                 logger.debug("Skipping geo_mentions index for %s: %s", column, exc)
             self._geo_mentions_indexes_ready = True
 
+    def _ensure_person_mentions_indexes(self) -> None:
+        """Best-effort scalar indexes for person mention filters."""
+        if self._person_mentions is None or self._person_mentions_indexes_ready:
+            return
+        for column in ("source_id", "canonical_name", "confidence"):
+            try:
+                self._person_mentions.create_scalar_index(column)
+            except TypeError:
+                try:
+                    self._person_mentions.create_scalar_index(column, replace=False)
+                except Exception as exc:
+                    logger.debug("Skipping person_mentions index for %s: %s", column, exc)
+            except Exception as exc:
+                logger.debug("Skipping person_mentions index for %s: %s", column, exc)
+        self._person_mentions_indexes_ready = True
+
+    def _ensure_person_mentions_table(self) -> Optional[lancedb.table.Table]:
+        if self._person_mentions is not None:
+            self._ensure_person_mentions_indexes()
+            return self._person_mentions
+        try:
+            self._person_mentions = self._db.create_table(
+                self._PERSON_MENTIONS_TABLE,
+                schema=self._PERSON_MENTIONS_SCHEMA,
+                exist_ok=True,
+            )
+            self._person_mentions_indexes_ready = False
+            self._ensure_person_mentions_indexes()
+            return self._person_mentions
+        except Exception as exc:
+            logger.error("Failed to create/open '%s': %s", self._PERSON_MENTIONS_TABLE, exc)
+            return None
+
+    def _recreate_person_mentions_table(self) -> Optional[lancedb.table.Table]:
+        """Drop and recreate person_mentions for explicit schema reset workflows."""
+        try:
+            self._db.drop_table(self._PERSON_MENTIONS_TABLE)
+        except Exception as exc:
+            logger.debug("Could not drop '%s' before recreate: %s", self._PERSON_MENTIONS_TABLE, exc)
+
+        self._person_mentions = None
+        self._person_mentions_indexes_ready = False
+        return self._ensure_person_mentions_table()
+
     @staticmethod
     def _escape_sql_literal(value: str) -> str:
         return value.replace("'", "''")
@@ -241,6 +306,12 @@ class StorageEngine:
             return "1 = 0"
         escaped = ", ".join(f"'{cls._escape_sql_literal(v)}'" for v in values)
         return f"{column} IN ({escaped})"
+
+    @classmethod
+    def _where_contains_ci(cls, column: str, value: str) -> str:
+        """Case-insensitive SQL substring predicate for Lance/DataFusion backends."""
+        escaped = cls._escape_sql_literal(value.lower())
+        return f"LOWER({column}) LIKE '%{escaped}%'"
 
     @staticmethod
     def _chunk(values: list[str], size: int) -> Iterable[list[str]]:
@@ -293,6 +364,13 @@ class StorageEngine:
             self._ensure_fts_index(force_rebuild=True)
             logger.info("Refreshed dirty FTS index before hybrid search")
 
+    def get_fts_status(self) -> dict[str, Any]:
+        return {
+            "fts_policy": self._config.fts_rebuild_policy,
+            "fts_dirty": self._fts_dirty,
+            "fts_pending_rows": int(self._pending_fts_rows),
+        }
+
     def get_child_vector_dimension(self) -> Optional[int]:
         """Return child vector dimension if available, otherwise None."""
         if self._table is None:
@@ -320,6 +398,7 @@ class StorageEngine:
             self._PARENTS_TABLE,
             self._SUMMARIES_TABLE,
             self._GEO_MENTIONS_TABLE,
+            self._PERSON_MENTIONS_TABLE,
         ):
             try:
                 self._db.drop_table(table_name)
@@ -331,6 +410,9 @@ class StorageEngine:
         self._parents = None
         self._summaries = None
         self._geo_mentions = None
+        self._person_mentions = None
+        self._geo_mentions_indexes_ready = False
+        self._person_mentions_indexes_ready = False
         self._fts_dirty = False
         self._pending_fts_rows = 0
 
@@ -562,6 +644,7 @@ class StorageEngine:
         query_vector: list[float],
         top_k: int,
         source_id: Optional[str],
+        bm25_weight: float,
     ) -> list[dict[str, Any]]:
         if self._table is None:
             return []
@@ -571,8 +654,25 @@ class StorageEngine:
             .search(query_type="hybrid")
             .vector(query_vector)
             .text(query_text)
-            .limit(top_k)
         )
+
+        # Preserve the current default hybrid ranking behavior unless an
+        # explicit non-default BM25 coefficient is requested.
+        clamped_bm25_weight = max(0.0, min(1.0, float(bm25_weight)))
+        if abs(clamped_bm25_weight - 0.5) > 1e-9:
+            try:
+                from lancedb.rerankers import LinearCombinationReranker
+
+                vector_weight = 1.0 - clamped_bm25_weight
+                builder = builder.rerank(LinearCombinationReranker(weight=vector_weight))
+            except Exception as exc:
+                logger.warning(
+                    "Unable to apply bm25_weight=%s; using default LanceDB hybrid fusion instead: %s",
+                    clamped_bm25_weight,
+                    exc,
+                )
+
+        builder = builder.limit(top_k)
         if source_id:
             builder = builder.where(self._where_eq("source_id", source_id), prefilter=True)
         return builder.to_list()
@@ -584,6 +684,7 @@ class StorageEngine:
         query_vector: list[float],
         top_k: int,
         source_id: Optional[str],
+        bm25_weight: float,
     ) -> list[dict[str, Any]]:
         try:
             return self._execute_hybrid_search(
@@ -591,6 +692,7 @@ class StorageEngine:
                 query_vector=query_vector,
                 top_k=top_k,
                 source_id=source_id,
+                bm25_weight=bm25_weight,
             )
         except Exception as exc:
             logger.warning(
@@ -603,6 +705,7 @@ class StorageEngine:
                 query_vector=query_vector,
                 top_k=top_k,
                 source_id=source_id,
+                bm25_weight=bm25_weight,
             )
 
     def hybrid_search(
@@ -612,6 +715,7 @@ class StorageEngine:
         query_vector: list[float],
         top_k: int,
         source_id: Optional[str] = None,
+        bm25_weight: float = 0.5,
     ) -> list[dict[str, Any]]:
         """LanceDB native hybrid search (vector ANN + full-text BM25 with RRF fusion)."""
         if self._table is None:
@@ -623,6 +727,7 @@ class StorageEngine:
             query_vector=query_vector,
             top_k=top_k,
             source_id=source_id,
+            bm25_weight=bm25_weight,
         )
 
         results: list[dict[str, Any]] = []
@@ -637,13 +742,59 @@ class StorageEngine:
             })
         return results
 
+    def vector_search(
+        self,
+        *,
+        query_vector: list[float],
+        top_k: int,
+        source_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Dense vector-only search used when hybrid retrieval is disabled."""
+        if self._table is None:
+            raise RuntimeError("LanceDB table is not initialized. Run ingest first.")
+
+        builder = self._table.search(query_vector).limit(top_k)
+        if source_id:
+            builder = builder.where(self._where_eq("source_id", source_id), prefilter=True)
+
+        rows = builder.to_list()
+        results: list[dict[str, Any]] = []
+        for rank, row in enumerate(rows, start=1):
+            distance_raw = row.get("_distance")
+            score: float
+            try:
+                distance = float(distance_raw)
+            except (TypeError, ValueError):
+                score = float(row.get("_score", 0.0))
+            else:
+                score = 1.0 / (1.0 + max(0.0, distance))
+
+            results.append(
+                {
+                    "id": row.get("id", ""),
+                    "text": row.get("text", ""),
+                    "metadata": self._row_to_metadata(row),
+                    "score": score,
+                    "rank": rank,
+                }
+            )
+        return results
+
     def list_source_ids(self) -> list[str]:
         if self._parents is None:
             return []
         rows = self._parents.to_arrow().to_pylist()
         return sorted(set(r["source_id"] for r in rows if r.get("source_id")))
 
-    def persist_source_page_offset(self, source_id: str, page_offset: int = 1) -> None:
+    def persist_source_page_offset(
+        self,
+        source_id: str,
+        page_offset: int = 1,
+        *,
+        source_path: Optional[str] = None,
+        snapshot_path: Optional[str] = None,
+        citation_reference: Optional[str] = None,
+    ) -> None:
         """Persist the page offset for a source, preserving existing summary/path fields.
 
         Creates a minimal record if no record exists yet — this handles the
@@ -657,6 +808,7 @@ class StorageEngine:
         existing_summary = ""
         existing_source_path = ""
         existing_snapshot_path = ""
+        existing_citation_reference = ""
 
         if self._summaries is not None:
             rows = (
@@ -670,13 +822,19 @@ class StorageEngine:
                 existing_summary = r.get("summary") or ""
                 existing_source_path = r.get("source_path") or ""
                 existing_snapshot_path = r.get("snapshot_path") or ""
+                existing_citation_reference = r.get("citation_reference") or ""
                 self._summaries.delete(self._where_eq("source_id", sid))
 
         record: dict[str, Any] = {
             "source_id": sid,
             "summary": existing_summary,
-            "source_path": existing_source_path,
-            "snapshot_path": existing_snapshot_path,
+            "source_path": source_path if source_path is not None else existing_source_path,
+            "snapshot_path": snapshot_path if snapshot_path is not None else existing_snapshot_path,
+            "citation_reference": (
+                citation_reference
+                if citation_reference is not None
+                else existing_citation_reference
+            ),
             "page_offset": page_offset,
         }
         if self._summaries is None:
@@ -695,6 +853,7 @@ class StorageEngine:
         summary: str,
         source_path: Optional[str] = None,
         snapshot_path: Optional[str] = None,
+        citation_reference: Optional[str] = None,
         page_offset: int = 1,
     ) -> None:
         """Insert or update a source summary record (schema v3).
@@ -722,6 +881,7 @@ class StorageEngine:
             "summary": summary.strip(),
             "source_path": source_path or "",
             "snapshot_path": snapshot_path or "",
+            "citation_reference": citation_reference or "",
             "page_offset": page_offset,
         }
         if self._summaries is None:
@@ -766,7 +926,7 @@ class StorageEngine:
         """Return full details for all sources (schema v3 fields).
 
         Returns list of dicts with keys: source_id, summary, source_path,
-        snapshot_path, page_offset.
+        snapshot_path, citation_reference, page_offset.
         """
         if self._summaries is None:
             return []
@@ -777,6 +937,7 @@ class StorageEngine:
                 "summary": r.get("summary", ""),
                 "source_path": r.get("source_path", ""),
                 "snapshot_path": r.get("snapshot_path", ""),
+                "citation_reference": r.get("citation_reference", ""),
                 "page_offset": int(r.get("page_offset") or 1),
             }
             for r in rows
@@ -801,6 +962,7 @@ class StorageEngine:
             "summary": r.get("summary", ""),
             "source_path": r.get("source_path", ""),
             "snapshot_path": r.get("snapshot_path", ""),
+            "citation_reference": r.get("citation_reference", ""),
             "page_offset": int(r.get("page_offset") or 1),
         }
 
@@ -942,6 +1104,7 @@ class StorageEngine:
         source_id: str | None = None,
         source_ids: Optional[list[str]] = None,
         min_confidence: float = 0.0,
+        q: str | None = None,
         limit: int = 1000,
         offset: int = 0,
     ) -> list[dict]:
@@ -975,6 +1138,8 @@ class StorageEngine:
         if source_ids is not None and not normalized_sources and not normalized_single:
             return []
 
+        search_text = q.strip().lower() if isinstance(q, str) else ""
+
         table = self._geo_mentions
         if table is None:
             try:
@@ -991,36 +1156,71 @@ class StorageEngine:
             where_parts.append(self._where_in("source_id", normalized_sources))
         elif normalized_single:
             where_parts.append(self._where_eq("source_id", normalized_single))
-        where = " AND ".join(f"({part})" for part in where_parts)
+        base_where = " AND ".join(f"({part})" for part in where_parts)
+        select_columns = [
+            "id",
+            "source_id",
+            "chunk_id",
+            "place_name",
+            "matched_input",
+            "matched_on",
+            "geonameid",
+            "lat",
+            "lon",
+            "confidence",
+            "method",
+            "raw_score",
+            "is_ambiguous",
+            "candidate_count",
+            "margin_score",
+            "entity_type",
+            "ner_score",
+            "geocoder_version",
+            "geocoded_at",
+        ]
 
-        rows = (
-            table.search()
-            .where(where, prefilter=True)
-            .select([
-                "id",
-                "source_id",
-                "chunk_id",
-                "place_name",
-                "matched_input",
-                "matched_on",
-                "geonameid",
-                "lat",
-                "lon",
-                "confidence",
-                "method",
-                "raw_score",
-                "is_ambiguous",
-                "candidate_count",
-                "margin_score",
-                "entity_type",
-                "ner_score",
-                "geocoder_version",
-                "geocoded_at",
-            ])
-            .offset(offset)
-            .limit(limit)
-            .to_list()
-        )
+        rows: list[dict[str, Any]]
+        if search_text:
+            search_predicate = (
+                f"({self._where_contains_ci('place_name', search_text)}) OR "
+                f"({self._where_contains_ci('matched_input', search_text)})"
+            )
+            pushed_where = f"({base_where}) AND ({search_predicate})"
+            try:
+                rows = (
+                    table.search()
+                    .where(pushed_where, prefilter=True)
+                    .select(select_columns)
+                    .offset(offset)
+                    .limit(limit)
+                    .to_list()
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Geo mention text filter pushdown unsupported; falling back to in-memory filtering: %s",
+                    exc,
+                )
+                rows = (
+                    table.search()
+                    .where(base_where, prefilter=True)
+                    .select(select_columns)
+                    .to_list()
+                )
+                rows = [
+                    row
+                    for row in rows
+                    if search_text in str(row.get("place_name", "")).lower()
+                    or search_text in str(row.get("matched_input", "")).lower()
+                ][offset : offset + limit]
+        else:
+            rows = (
+                table.search()
+                .where(base_where, prefilter=True)
+                .select(select_columns)
+                .offset(offset)
+                .limit(limit)
+                .to_list()
+            )
         return [
             {
                 "id": str(row.get("id", "")),
@@ -1075,8 +1275,416 @@ class StorageEngine:
                 return
         table.delete(self._where_eq("id", mention_id))
 
+    def upsert_person_mentions(self, mentions: list[dict]) -> None:
+        """Batch write person mentions. Creates table if not present."""
+        if not mentions:
+            return
+        table = self._ensure_person_mentions_table()
+        if table is None:
+            return
+
+        records: list[dict[str, Any]] = []
+        for row in mentions:
+            mention_id = str(row.get("id", "")).strip()
+            source_id = str(row.get("source_id", "")).strip()
+            chunk_id = str(row.get("chunk_id", "")).strip()
+            raw_name = str(row.get("raw_name", "")).strip()
+            canonical_name = str(row.get("canonical_name", "")).strip()
+            method = str(row.get("method", "")).strip()
+
+            if not mention_id or not source_id or not chunk_id or not raw_name or not canonical_name:
+                continue
+            try:
+                confidence = float(row.get("confidence"))
+            except (TypeError, ValueError):
+                continue
+
+            role_hint_raw = row.get("role_hint")
+            role_hint = str(role_hint_raw).strip() if role_hint_raw is not None else ""
+            context_snippet_raw = row.get("context_snippet")
+            context_snippet = str(context_snippet_raw).strip() if context_snippet_raw is not None else ""
+
+            records.append(
+                {
+                    "id": mention_id,
+                    "source_id": source_id,
+                    "chunk_id": chunk_id,
+                    "raw_name": raw_name,
+                    "canonical_name": canonical_name,
+                    "confidence": confidence,
+                    "method": method,
+                    "role_hint": role_hint or None,
+                    "context_snippet": context_snippet,
+                }
+            )
+
+        if not records:
+            return
+
+        unique_ids = list(dict.fromkeys(record["id"] for record in records))
+        try:
+            for id_batch in self._chunk(unique_ids, self._MAX_IN_CLAUSE_VALUES):
+                table.delete(self._where_in("id", id_batch))
+            table.add(records)
+        except Exception as exc:
+            logger.error("Failed to upsert person mentions: %s", exc)
+            raise
+
+    def get_person_mentions(
+        self,
+        source_id: str | None = None,
+        source_ids: Optional[list[str]] = None,
+        canonical_name: str | None = None,
+        min_confidence: float = 0.0,
+        q: str | None = None,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Return mention-level person rows with source_id/source_ids union semantics."""
+        try:
+            normalized_min_confidence = float(min_confidence)
+        except (TypeError, ValueError):
+            raise ValueError("min_confidence must be a finite float in range [0.0, 1.0].")
+
+        if not math.isfinite(normalized_min_confidence) or not (0.0 <= normalized_min_confidence <= 1.0):
+            raise ValueError("min_confidence must be a finite float in range [0.0, 1.0].")
+        if limit < 1:
+            raise ValueError("limit must be >= 1.")
+        if offset < 0:
+            raise ValueError("offset must be >= 0.")
+
+        normalized_single = source_id.strip() if isinstance(source_id, str) else ""
+        normalized_sources: list[str] = []
+        if source_ids is not None:
+            for raw in source_ids:
+                if raw is None:
+                    continue
+                sid = str(raw).strip()
+                if sid and sid not in normalized_sources:
+                    normalized_sources.append(sid)
+
+        if normalized_single and normalized_single not in normalized_sources:
+            normalized_sources.append(normalized_single)
+
+        if source_ids is not None and not normalized_sources and not normalized_single:
+            return []
+
+        normalized_canonical = canonical_name.strip() if isinstance(canonical_name, str) else ""
+        if canonical_name is not None and not normalized_canonical:
+            return []
+
+        search_text = q.strip().lower() if isinstance(q, str) else ""
+
+        table = self._person_mentions
+        if table is None:
+            try:
+                table = self._db.open_table(self._PERSON_MENTIONS_TABLE)
+                self._person_mentions = table
+                self._person_mentions_indexes_ready = False
+                self._ensure_person_mentions_indexes()
+            except ValueError:
+                return []
+
+        where_parts = [f"confidence >= {normalized_min_confidence}"]
+        if normalized_sources:
+            where_parts.append(self._where_in("source_id", normalized_sources))
+        elif normalized_single:
+            where_parts.append(self._where_eq("source_id", normalized_single))
+        if normalized_canonical:
+            where_parts.append(self._where_eq("canonical_name", normalized_canonical))
+        base_where = " AND ".join(f"({part})" for part in where_parts)
+        select_columns = [
+            "id",
+            "source_id",
+            "chunk_id",
+            "raw_name",
+            "canonical_name",
+            "confidence",
+            "method",
+            "role_hint",
+            "context_snippet",
+        ]
+
+        if search_text:
+            search_predicate = (
+                f"({self._where_contains_ci('canonical_name', search_text)}) OR "
+                f"({self._where_contains_ci('raw_name', search_text)})"
+            )
+            pushed_where = f"({base_where}) AND ({search_predicate})"
+            try:
+                rows = (
+                    table.search()
+                    .where(pushed_where, prefilter=True)
+                    .select(select_columns)
+                    .offset(offset)
+                    .limit(limit)
+                    .to_list()
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Person mention text filter pushdown unsupported; falling back to in-memory filtering: %s",
+                    exc,
+                )
+                # Fallback path intentionally pulls the already source/confidence-scoped
+                # result set and filters in Python. This is acceptable for the expected
+                # mention-table sizes in offline single-user workspaces.
+                rows = (
+                    table.search()
+                    .where(base_where, prefilter=True)
+                    .select(select_columns)
+                    .to_list()
+                )
+                rows = [
+                    row
+                    for row in rows
+                    if search_text in str(row.get("canonical_name", "")).lower()
+                    or search_text in str(row.get("raw_name", "")).lower()
+                ][offset : offset + limit]
+        else:
+            rows = (
+                table.search()
+                .where(base_where, prefilter=True)
+                .select(select_columns)
+                .offset(offset)
+                .limit(limit)
+                .to_list()
+            )
+
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            if row.get("id") is None:
+                continue
+            confidence_raw = row.get("confidence")
+            try:
+                confidence = float(confidence_raw)
+            except (TypeError, ValueError):
+                continue
+            result.append(
+                {
+                    "id": str(row.get("id", "")),
+                    "source_id": str(row.get("source_id", "")),
+                    "chunk_id": str(row.get("chunk_id", "")),
+                    "raw_name": str(row.get("raw_name", "")),
+                    "canonical_name": str(row.get("canonical_name", "")),
+                    "confidence": confidence,
+                    "method": str(row.get("method", "")),
+                    "role_hint": str(row.get("role_hint", "")) if row.get("role_hint") is not None else None,
+                    "context_snippet": str(row.get("context_snippet", "")),
+                }
+            )
+        return result
+
+    def get_person_mentions_by_canonical(
+        self,
+        canonical_name: str,
+        *,
+        source_id: str | None = None,
+        source_ids: Optional[list[str]] = None,
+        min_confidence: float = 0.0,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> list[dict]:
+        return self.get_person_mentions(
+            source_id=source_id,
+            source_ids=source_ids,
+            canonical_name=canonical_name,
+            min_confidence=min_confidence,
+            limit=limit,
+            offset=offset,
+        )
+
+    def get_person_mention(self, mention_id: str) -> Optional[dict[str, Any]]:
+        table = self._person_mentions
+        if table is None:
+            try:
+                table = self._db.open_table(self._PERSON_MENTIONS_TABLE)
+                self._person_mentions = table
+            except ValueError:
+                return None
+
+        rows = (
+            table.search()
+            .where(self._where_eq("id", mention_id), prefilter=True)
+            .select([
+                "id",
+                "source_id",
+                "chunk_id",
+                "raw_name",
+                "canonical_name",
+                "confidence",
+                "method",
+                "role_hint",
+                "context_snippet",
+            ])
+            .limit(1)
+            .to_list()
+        )
+        if not rows:
+            return None
+
+        row = rows[0]
+        confidence_raw = row.get("confidence")
+        try:
+            confidence = float(confidence_raw)
+        except (TypeError, ValueError):
+            confidence = 0.0
+
+        return {
+            "id": str(row.get("id", "")),
+            "source_id": str(row.get("source_id", "")),
+            "chunk_id": str(row.get("chunk_id", "")),
+            "raw_name": str(row.get("raw_name", "")),
+            "canonical_name": str(row.get("canonical_name", "")),
+            "confidence": confidence,
+            "method": str(row.get("method", "")),
+            "role_hint": str(row.get("role_hint", "")) if row.get("role_hint") is not None else None,
+            "context_snippet": str(row.get("context_snippet", "")),
+        }
+
+    def delete_person_mentions_by_source(self, source_id: str) -> None:
+        table = self._person_mentions
+        if table is None:
+            try:
+                table = self._db.open_table(self._PERSON_MENTIONS_TABLE)
+                self._person_mentions = table
+            except ValueError:
+                return
+        table.delete(self._where_eq("source_id", source_id))
+
+    def delete_person_mention(self, mention_id: str) -> None:
+        table = self._person_mentions
+        if table is None:
+            try:
+                table = self._db.open_table(self._PERSON_MENTIONS_TABLE)
+                self._person_mentions = table
+            except ValueError:
+                return
+        table.delete(self._where_eq("id", mention_id))
+
+    def merge_person_canonical_names(
+        self,
+        source_canonical_name: str,
+        target_canonical_name: str,
+    ) -> int:
+        """Merge all mentions from one canonical name into another.
+
+        Returns the number of mention rows rewritten.
+        """
+        source = source_canonical_name.strip()
+        target = target_canonical_name.strip()
+        if not source or not target:
+            raise ValueError("source_canonical_name and target_canonical_name must be non-empty.")
+        if source == target:
+            return 0
+
+        table = self._person_mentions
+        if table is None:
+            try:
+                table = self._db.open_table(self._PERSON_MENTIONS_TABLE)
+                self._person_mentions = table
+            except ValueError:
+                return 0
+
+        source_rows = (
+            table.search()
+            .where(self._where_eq("canonical_name", source), prefilter=True)
+            .select([
+                "id",
+                "source_id",
+                "chunk_id",
+                "raw_name",
+                "canonical_name",
+                "confidence",
+                "method",
+                "role_hint",
+                "context_snippet",
+            ])
+            .to_list()
+        )
+        if not source_rows:
+            return 0
+
+        rewritten: list[dict[str, Any]] = []
+        mention_ids: list[str] = []
+        for row in source_rows:
+            mention_id = str(row.get("id", "")).strip()
+            source_id = str(row.get("source_id", "")).strip()
+            chunk_id = str(row.get("chunk_id", "")).strip()
+            raw_name = str(row.get("raw_name", "")).strip()
+            method = str(row.get("method", "")).strip()
+            if not mention_id or not source_id or not chunk_id or not raw_name:
+                continue
+
+            try:
+                confidence = float(row.get("confidence"))
+            except (TypeError, ValueError):
+                confidence = 0.0
+
+            role_hint_raw = row.get("role_hint")
+            role_hint = str(role_hint_raw).strip() if role_hint_raw is not None else ""
+            context_snippet_raw = row.get("context_snippet")
+            context_snippet = str(context_snippet_raw).strip() if context_snippet_raw is not None else ""
+
+            mention_ids.append(mention_id)
+            rewritten.append(
+                {
+                    "id": mention_id,
+                    "source_id": source_id,
+                    "chunk_id": chunk_id,
+                    "raw_name": raw_name,
+                    "canonical_name": target,
+                    "confidence": confidence,
+                    "method": method,
+                    "role_hint": role_hint or None,
+                    "context_snippet": context_snippet,
+                }
+            )
+
+        if not rewritten:
+            return 0
+
+        try:
+            for id_batch in self._chunk(mention_ids, self._MAX_IN_CLAUSE_VALUES):
+                table.delete(self._where_in("id", id_batch))
+            table.add(rewritten)
+        except Exception as exc:
+            logger.error(
+                "Failed to merge canonical names from '%s' into '%s': %s",
+                source,
+                target,
+                exc,
+            )
+            raise
+
+        return len(rewritten)
+
+    def list_person_mentions_for_registry(self) -> list[dict[str, Any]]:
+        """Return minimal row shape used by PersonResolver warm/re-warm."""
+        table = self._person_mentions
+        if table is None:
+            try:
+                table = self._db.open_table(self._PERSON_MENTIONS_TABLE)
+                self._person_mentions = table
+            except ValueError:
+                return []
+
+        rows = (
+            table.search()
+            .select(["source_id", "raw_name", "canonical_name"])
+            .to_list()
+        )
+        return [
+            {
+                "source_id": str(row.get("source_id", "")),
+                "raw_name": str(row.get("raw_name", "")),
+                "canonical_name": str(row.get("canonical_name", "")),
+            }
+            for row in rows
+            if row.get("canonical_name") is not None and row.get("raw_name") is not None
+        ]
+
     def delete_source(self, source_id: str) -> bool:
-        """Delete all data for a source: children, parents, summary, geo mentions.
+        """Delete all data for a source: children, parents, summary, geo/person mentions.
 
         Returns True if the source existed (had any data), False otherwise.
         Raises ``RuntimeError`` if any individual delete step fails so
@@ -1120,6 +1728,9 @@ class StorageEngine:
                 logger.error("Failed to delete summary for source '%s': %s", sid, exc)
                 errors.append(f"summary: {exc}")
 
+        # Entity mention tables are not DB-enforced foreign-key cascades, so
+        # source deletes must explicitly clear both geo/person side tables.
+        # Keep these calls paired with parent/child/summary deletion.
         # Delete geo mentions
         try:
             self.delete_geo_mentions_by_source(sid)
@@ -1127,6 +1738,14 @@ class StorageEngine:
         except Exception as exc:
             logger.error("Failed to delete geo mentions for source '%s': %s", sid, exc)
             errors.append(f"geo_mentions: {exc}")
+
+        # Delete person mentions
+        try:
+            self.delete_person_mentions_by_source(sid)
+            logger.info("Deleted person mentions for source '%s'", sid)
+        except Exception as exc:
+            logger.error("Failed to delete person mentions for source '%s': %s", sid, exc)
+            errors.append(f"person_mentions: {exc}")
 
         if errors:
             raise RuntimeError(

@@ -159,9 +159,12 @@ def test_forward_latency(gc: OfflineGeocoder) -> None:
 
     t0 = time.perf_counter()
     for _ in range(50):
-        gc.forward.__wrapped__(gc, "Constantinople")
+        raw = gc._forward_core("constantinople", 72)
+        assert raw is not None
+        refined = gc._refine_match(raw, "constantinople", (), None)
+        assert refined is not None
     elapsed = time.perf_counter() - t0
-    assert elapsed / 50 < 0.1, f"forward() avg {elapsed / 50:.3f}s > 100ms"
+    assert elapsed / 50 < 0.1, f"uncached forward avg {elapsed / 50:.3f}s > 100ms"
 
 
 @pytest.mark.slow

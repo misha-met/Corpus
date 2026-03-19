@@ -4,8 +4,8 @@ Supports PDF and Markdown source documents.
 
 Architecture
 ~~~~~~~~~~~~
-- PDF extraction cascades through four strategies in order: PyPDF →
-  pdfminer → PyMuPDF → Tesseract OCR.  The first strategy that returns
+- PDF extraction cascades through four strategies in order: PyMuPDF →
+  PyPDF → pdfminer → Tesseract OCR.  The first strategy that returns
   non-empty text wins; later strategies are only tried if earlier ones fail
   or return empty output.
 - Text is chunked into overlapping parent chunks (~1 200 tokens with 150-
@@ -22,7 +22,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, TYPE_CHECKING
 
 from .models import ChildChunk, Metadata, ParentChunk
 from .generation import build_ingest_summary_messages
@@ -36,6 +36,9 @@ from .phoenix_tracing import (
     start_span,
 )
 from .storage import StorageEngine
+
+if TYPE_CHECKING:
+    from .ner import NERDiagnostics
 
 logger = logging.getLogger(__name__)
 
@@ -65,10 +68,9 @@ PARENT_MAX_TOKENS = 1500
 PARENT_TARGET_TOKENS = 1200
 PARENT_OVERLAP_TOKENS = 150
 
-CHILD_MIN_TOKENS = 200
-CHILD_MAX_TOKENS = 300
-CHILD_TARGET_TOKENS = 250
-CHILD_OVERLAP_TOKENS = 50
+CHILD_MIN_TOKENS = 120
+CHILD_MAX_TOKENS = 250
+CHILD_TARGET_TOKENS = 200
 CHILD_OVERLAP_SENTENCES = 2
 
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
@@ -160,23 +162,40 @@ def _split_sentences(text: str) -> list[str]:
 
 
 def _split_long_sentence_on_clause(sentence: str, target_tokens: int) -> list[str]:
-    if _token_count(sentence) <= max(1, int(target_tokens * 0.4)):
+    """Recursively split a single long sentence into smaller units.
+    
+    Tries to split at midpoint clause boundaries (comma, semicolon, conjunctions).
+    If no clause boundary is found and the sentence is still too long, falls
+    back to a forced split by word count to ensure GLiNER token limits are met.
+    """
+    total_tokens = _token_count(sentence)
+    if total_tokens <= target_tokens:
         return [sentence]
 
     boundary_matches = list(CLAUSE_BOUNDARY_RE.finditer(sentence))
-    if not boundary_matches:
-        return [sentence]
+    split_index: int | None = None
 
-    midpoint = len(sentence) / 2
-    best = min(boundary_matches, key=lambda match: abs(match.start() - midpoint))
-    split_index = best.start() + 1 if sentence[best.start()] in {",", ";"} else best.start()
+    if boundary_matches:
+        midpoint = len(sentence) / 2
+        best = min(boundary_matches, key=lambda match: abs(match.start() - midpoint))
+        split_index = best.start() + 1 if sentence[best.start()] in {",", ";"} else best.start()
+    elif total_tokens > int(target_tokens * 1.2):
+        # Fallback: force split at word midpoint if no elegant boundary exists
+        words = _tokenize(sentence)
+        mid_word = len(words) // 2
+        left_text = _detokenize(words[:mid_word])
+        split_index = len(left_text)
+
+    if split_index is None:
+        return [sentence]
 
     left = sentence[:split_index].strip()
     right = sentence[split_index:].strip()
     if not left or not right:
         return [sentence]
 
-    return [left, right]
+    # Recursively split both halves if they remain too long
+    return _split_long_sentence_on_clause(left, target_tokens) + _split_long_sentence_on_clause(right, target_tokens)
 
 
 def _parse_markdown_sections(text: str) -> list[_Section]:
@@ -401,6 +420,14 @@ class _PageData:
     display_page: Optional[str]
 
 
+@dataclass(frozen=True)
+class IngestNERDiagnostics:
+    """NER diagnostics returned by ingest-time entity extraction helpers."""
+
+    geotag_ner: Optional["NERDiagnostics"] = None
+    peopletag_ner: Optional["NERDiagnostics"] = None
+
+
 def _chunk_pages(
     pages: list[_PageData],
     source_id: str,
@@ -423,8 +450,34 @@ def _chunk_pages(
     return parents, children
 
 
+def _extract_pymupdf(path: Path, *, page_offset: int = 1, **_kw) -> list[_PageData]:
+    """Strategy 1: PyMuPDF per-page extraction."""
+    try:
+        import fitz
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("PyMuPDF is required for primary PDF extraction.") from exc
+    doc = fitz.open(str(path))
+    pages: list[_PageData] = []
+    for index in range(doc.page_count):
+        page = doc.load_page(index)
+        page_text = clean_ocr_artifacts((page.get_text("text") or "").strip())
+        if not page_text:
+            continue
+        page_label: Optional[str] = None
+        try:
+            if hasattr(page, "get_label"):
+                page_label = page.get_label()
+        except Exception:
+            pass
+        page_number = index + page_offset
+        display_page = str(page_number) if page_offset != 1 else (page_label if page_label else str(page_number))
+        marked_text = f"{_format_page_marker(page_number)}\n{page_text}"
+        pages.append(_PageData(marked_text, page_number, page_label, display_page))
+    return pages
+
+
 def _extract_pypdf(reader, *, page_offset: int = 1, **_kw) -> list[_PageData]:
-    """Strategy 1: pypdf per-page extraction."""
+    """Strategy 2: pypdf per-page fallback."""
     pages: list[_PageData] = []
     for index, page in enumerate(reader.pages, start=1):
         page_text = clean_ocr_artifacts((page.extract_text() or "").strip())
@@ -444,7 +497,7 @@ def _extract_pypdf(reader, *, page_offset: int = 1, **_kw) -> list[_PageData]:
 
 
 def _extract_pdfminer(path: Path, *, reader, page_offset: int = 1, **_kw) -> list[_PageData]:
-    """Strategy 2: pdfminer per-page fallback."""
+    """Strategy 3: pdfminer per-page fallback."""
     try:
         from pdfminer.high_level import extract_text
     except Exception as exc:  # pragma: no cover
@@ -466,32 +519,6 @@ def _extract_pdfminer(path: Path, *, reader, page_offset: int = 1, **_kw) -> lis
         page_number = index + page_offset
         marked_text = f"{_format_page_marker(page_number)}\n{page_text}"
         pages.append(_PageData(marked_text, page_number, None, str(page_number)))
-    return pages
-
-
-def _extract_pymupdf(path: Path, *, page_offset: int = 1, **_kw) -> list[_PageData]:
-    """Strategy 3: PyMuPDF per-page fallback."""
-    try:
-        import fitz
-    except Exception as exc:  # pragma: no cover
-        raise RuntimeError("PyMuPDF is required for additional PDF extraction fallback.") from exc
-    doc = fitz.open(str(path))
-    pages: list[_PageData] = []
-    for index in range(doc.page_count):
-        page = doc.load_page(index)
-        page_text = clean_ocr_artifacts((page.get_text("text") or "").strip())
-        if not page_text:
-            continue
-        page_label: Optional[str] = None
-        try:
-            if hasattr(page, "get_label"):
-                page_label = page.get_label()
-        except Exception:
-            pass
-        page_number = index + page_offset
-        display_page = str(page_number) if page_offset != 1 else (page_label if page_label else str(page_number))
-        marked_text = f"{_format_page_marker(page_number)}\n{page_text}"
-        pages.append(_PageData(marked_text, page_number, page_label, display_page))
     return pages
 
 
@@ -521,7 +548,7 @@ def _extract_ocr(reader, path: Path, *, page_offset: int = 1, **_kw) -> list[_Pa
 
 
 # Ordered extraction strategies for PDF ingestion
-_PDF_STRATEGIES = [_extract_pypdf, _extract_pdfminer, _extract_pymupdf, _extract_ocr]
+_PDF_STRATEGIES = [_extract_pymupdf, _extract_pypdf, _extract_pdfminer, _extract_ocr]
 
 
 def ingest_pdf(
@@ -555,10 +582,6 @@ def ingest_pdf(
                 return parents, children
 
     raise ValueError("No extractable text found in PDF, even after OCR.")
-    if not children:
-        raise ValueError("No child chunks produced from PDF content.")
-
-    return parents, children
 
 
 def _coerce_embeddings(raw_embeddings: object) -> list[list[float]]:
@@ -569,12 +592,26 @@ def _coerce_embeddings(raw_embeddings: object) -> list[list[float]]:
     raise TypeError("Unsupported embeddings type.")
 
 
+def _context_snippet(text: str, start: int, end: int, radius: int = 120) -> str:
+    lo = max(0, int(start) - radius)
+    hi = min(len(text), int(end) + radius)
+    snippet = text[lo:hi].strip()
+    return re.sub(r"\s+", " ", snippet)
+
+
 def _geotag_chunks(
     source_id: str,
     child_chunks: list[ChildChunk],
     storage: StorageEngine,
-) -> None:
+    *,
+    ner_lists: Optional[list[list[dict[str, Any]]]] = None,
+    ner_diagnostics: Optional["NERDiagnostics"] = None,
+) -> "NERDiagnostics":
     """Extract place mentions with NER, geocode, and store grouped mention rows."""
+    from .ner import NERDiagnostics
+
+    diagnostics = ner_diagnostics
+
     try:
         import time
         import uuid
@@ -582,10 +619,21 @@ def _geotag_chunks(
         from .config import (
             GEOTAG_FUZZY_THRESHOLD,
             GEOTAG_MIN_CONFIDENCE,
+            GEOTAG_NER_THRESHOLD,
             GEOTAG_NER_CONTEXT_WINDOW,
         )
         from .geocoder import get_geocoder
-        from .ner import extract_place_candidates_ner
+        from .ner import extract_place_candidates_ner_with_diagnostics
+
+        if ner_lists is None:
+            texts = [chunk.text for chunk in child_chunks]
+            ner_lists, diagnostics = extract_place_candidates_ner_with_diagnostics(
+                texts,
+                threshold=GEOTAG_NER_THRESHOLD,
+                context_window_words=GEOTAG_NER_CONTEXT_WINDOW,
+            )
+        elif diagnostics is None:
+            diagnostics = NERDiagnostics(ner_available=True, method="gliner")
 
         geocoder = get_geocoder()
         if not geocoder.is_available():
@@ -593,7 +641,7 @@ def _geotag_chunks(
             geocoder.warm(background=False)
         if not geocoder.is_available():
             logger.warning("Geocoder unavailable after warm attempt — skipping geotagging for %s", source_id)
-            return
+            return diagnostics or NERDiagnostics(ner_available=True, method="gliner")
 
         status = geocoder.status()
         version_info = status.get("version_info") if isinstance(status, dict) else None
@@ -601,80 +649,216 @@ def _geotag_chunks(
         if isinstance(version_info, dict):
             geocoder_version = str(version_info.get("checksum") or version_info.get("build_timestamp") or "unknown")
 
-        texts = [chunk.text for chunk in child_chunks]
-        ner_lists = extract_place_candidates_ner(
-            texts,
-            context_window_words=GEOTAG_NER_CONTEXT_WINDOW,
-        )
         geocoded_at = time.time()
 
         mentions: list[dict] = []
         seen: set[tuple[int, str]] = set()
 
+        # Flatten all candidates across all chunks so the geocoder can use
+        # coherence across the whole document in one batch call
+        flat_candidates: list[tuple[ChildChunk, dict]] = []
         for chunk, place_candidates in zip(child_chunks, ner_lists):
             for candidate in place_candidates:
                 normalized = str(candidate.get("text", "")).strip()
-                if not normalized:
+                if normalized:
+                    flat_candidates.append((chunk, candidate))
+
+        place_names = [str(c.get("text", "")).strip() for _, c in flat_candidates]
+        entity_types = [
+            str(c.get("entity_type", "")).upper().strip() or None
+            for _, c in flat_candidates
+        ]
+
+        batch_results = geocoder.forward_batch(
+            place_names,
+            threshold=GEOTAG_FUZZY_THRESHOLD,
+            entity_types=entity_types,
+        )
+
+        for (chunk, candidate), match in zip(flat_candidates, batch_results):
+            if match is None:
+                continue
+            if match.confidence < GEOTAG_MIN_CONFIDENCE:
+                continue
+            key = (match.place.geonameid, chunk.id)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            normalized = str(candidate.get("text", "")).strip()
+            entity_type = str(candidate.get("entity_type", "")).upper().strip() or None
+
+            ner_score_raw = candidate.get("score", 0.0)
+            try:
+                ner_score = float(ner_score_raw)
+            except (TypeError, ValueError):
+                ner_score = 0.0
+
+            mentions.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "source_id": source_id,
+                    "chunk_id": chunk.id,
+                    "place_name": match.place.name,
+                    "matched_input": normalized,
+                    "geonameid": match.place.geonameid,
+                    "lat": match.place.lat,
+                    "lon": match.place.lon,
+                    "confidence": round(match.confidence, 4),
+                    "method": match.method.value,
+                    "matched_on": match.matched_on,
+                    "raw_score": round(float(match.score), 4),
+                    "is_ambiguous": bool(match.ambiguous),
+                    "candidate_count": int(match.candidate_count),
+                    "margin_score": None if match.margin_score is None else round(float(match.margin_score), 4),
+                    "entity_type": entity_type,
+                    "ner_score": round(ner_score, 4),
+                    "geocoder_version": geocoder_version,
+                    "geocoded_at": geocoded_at,
+                }
+            )
+
+        if mentions:
+            storage.upsert_geo_mentions(mentions)
+            logger.info("Geotagged %d mentions for source %s.", len(mentions), source_id)
+        return diagnostics or NERDiagnostics(ner_available=True, method="gliner")
+    except Exception as exc:
+        logger.warning("Geotagging failed for %s (ingest unaffected): %s", source_id, exc)
+        warning = f"Geotagging failed (ingest unaffected): {type(exc).__name__}: {exc}"
+        if diagnostics is not None:
+            prior = diagnostics.warning
+            merged_warning = f"{prior}; {warning}" if prior else warning
+            return NERDiagnostics(
+                ner_available=diagnostics.ner_available,
+                method=diagnostics.method,
+                warning=merged_warning,
+            )
+        return NERDiagnostics(ner_available=False, method="empty", warning=warning)
+
+
+def _peopletag_chunks(
+    source_id: str,
+    child_chunks: list[ChildChunk],
+    storage: StorageEngine,
+    *,
+    ner_lists: Optional[list[list[dict[str, Any]]]] = None,
+    ner_diagnostics: Optional["NERDiagnostics"] = None,
+) -> "NERDiagnostics":
+    """Extract person mentions, resolve canonical names, and persist mention rows."""
+    from .ner import NERDiagnostics
+
+    diagnostics = ner_diagnostics
+
+    try:
+        import uuid
+
+        from .config import (
+            PEOPLETAG_MIN_CONFIDENCE,
+            PEOPLETAG_NER_CONTEXT_WINDOW,
+            PEOPLETAG_NER_THRESHOLD,
+        )
+        from .ner import extract_person_candidates_ner_with_diagnostics
+        from .person_resolver import get_person_resolver
+
+        # Re-ingest guard: clear prior mentions for this source before reprocessing.
+        storage.delete_person_mentions_by_source(source_id)
+
+        resolver = get_person_resolver()
+        resolver.warm_from_rows(storage.list_person_mentions_for_registry())
+
+        if ner_lists is None:
+            texts = [chunk.text for chunk in child_chunks]
+            ner_lists, diagnostics = extract_person_candidates_ner_with_diagnostics(
+                texts,
+                threshold=PEOPLETAG_NER_THRESHOLD,
+                context_window_words=PEOPLETAG_NER_CONTEXT_WINDOW,
+            )
+        elif diagnostics is None:
+            diagnostics = NERDiagnostics(ner_available=True, method="gliner")
+
+        mentions: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+
+        for chunk, candidates in zip(child_chunks, ner_lists):
+            for candidate in candidates:
+                raw_name = str(candidate.get("text", "")).strip()
+                if not raw_name:
                     continue
 
-                context_words = tuple(
+                try:
+                    ner_score = float(candidate.get("score", 0.0))
+                except (TypeError, ValueError):
+                    ner_score = 0.0
+                if ner_score < PEOPLETAG_MIN_CONFIDENCE:
+                    continue
+
+                try:
+                    start = int(candidate.get("start", 0))
+                except (TypeError, ValueError):
+                    start = 0
+                try:
+                    end = int(candidate.get("end", start + len(raw_name)))
+                except (TypeError, ValueError):
+                    end = start + len(raw_name)
+                start = max(0, start)
+                end = max(start, min(len(chunk.text), end))
+
+                context_words = [
                     word.strip()
                     for word in candidate.get("context_words", [])
                     if isinstance(word, str) and word.strip()
-                )
-                entity_type_raw = candidate.get("entity_type")
-                entity_type = str(entity_type_raw).upper().strip() if entity_type_raw else None
+                ]
+                snippet = _context_snippet(chunk.text, start, end)
 
-                match = geocoder.forward(
-                    normalized,
-                    threshold=GEOTAG_FUZZY_THRESHOLD,
-                    context_words=context_words,
-                    entity_type=entity_type,
-                )
-                if match is None:
-                    continue
-                if match.confidence < GEOTAG_MIN_CONFIDENCE:
-                    continue
-                key = (match.place.geonameid, chunk.id)
+                key = (source_id, raw_name.lower(), snippet)
                 if key in seen:
                     continue
                 seen.add(key)
 
-                ner_score_raw = candidate.get("score", 0.0)
-                try:
-                    ner_score = float(ner_score_raw)
-                except (TypeError, ValueError):
-                    ner_score = 0.0
+                resolved = resolver.resolve(
+                    raw_name=raw_name,
+                    source_id=source_id,
+                    ner_score=ner_score,
+                    context_words=context_words,
+                    context_snippet=snippet,
+                )
+                if not resolved:
+                    continue
+
+                confidence = float(resolved.get("confidence", 0.0))
+                if confidence < PEOPLETAG_MIN_CONFIDENCE:
+                    continue
 
                 mentions.append(
                     {
                         "id": str(uuid.uuid4()),
                         "source_id": source_id,
                         "chunk_id": chunk.id,
-                        "place_name": match.place.name,
-                        "matched_input": normalized,
-                        "geonameid": match.place.geonameid,
-                        "lat": match.place.lat,
-                        "lon": match.place.lon,
-                        "confidence": round(match.confidence, 4),
-                        "method": match.method.value,
-                        "matched_on": match.matched_on,
-                        "raw_score": round(float(match.score), 4),
-                        "is_ambiguous": bool(match.ambiguous),
-                        "candidate_count": int(match.candidate_count),
-                        "margin_score": None if match.margin_score is None else round(float(match.margin_score), 4),
-                        "entity_type": entity_type,
-                        "ner_score": round(ner_score, 4),
-                        "geocoder_version": geocoder_version,
-                        "geocoded_at": geocoded_at,
+                        "raw_name": str(resolved.get("raw_name", raw_name)),
+                        "canonical_name": str(resolved.get("canonical_name", raw_name)),
+                        "confidence": confidence,
+                        "method": str(resolved.get("method", "new")),
+                        "role_hint": resolved.get("role_hint"),
+                        "context_snippet": str(resolved.get("context_snippet", snippet)),
                     }
                 )
 
         if mentions:
-            storage.upsert_geo_mentions(mentions)
-            logger.info("Geotagged %d mentions for source %s.", len(mentions), source_id)
+            storage.upsert_person_mentions(mentions)
+            logger.info("Peopletagged %d mentions for source %s.", len(mentions), source_id)
+        return diagnostics or NERDiagnostics(ner_available=True, method="gliner")
     except Exception as exc:
-        logger.warning("Geotagging failed for %s (ingest unaffected): %s", source_id, exc)
+        logger.warning("Peopletagging failed for %s (ingest unaffected): %s", source_id, exc)
+        warning = f"Peopletagging failed (ingest unaffected): {type(exc).__name__}: {exc}"
+        if diagnostics is not None:
+            prior = diagnostics.warning
+            merged_warning = f"{prior}; {warning}" if prior else warning
+            return NERDiagnostics(
+                ner_available=diagnostics.ner_available,
+                method=diagnostics.method,
+                warning=merged_warning,
+            )
+        return NERDiagnostics(ner_available=False, method="empty", warning=warning)
 
 
 def ingest_file_to_storage(
@@ -687,9 +871,11 @@ def ingest_file_to_storage(
     summarize: bool = False,
     summary_generator: Optional[MlxGenerator] = None,
     geotag: bool = False,
+    peopletag: bool = False,
+    citation_reference: Optional[str] = None,
     page_offset: int = 1,
     tracer: Optional[Any] = None,
-) -> tuple[int, int]:
+) -> tuple[int, int, IngestNERDiagnostics]:
     path = Path(file_path)
     suffix = path.suffix.lower()
     with start_span(
@@ -704,6 +890,8 @@ def ingest_file_to_storage(
             "rag.ingest.page_offset": page_offset,
             "rag.ingest.summarize": summarize,
             "rag.ingest.geotag": geotag,
+            "rag.ingest.peopletag": peopletag,
+            "rag.ingest.citation_reference": citation_reference,
         },
     ) as ingest_span:
         try:
@@ -780,8 +968,73 @@ def ingest_file_to_storage(
                         logger.exception("Rollback delete_source('%s') also failed", source_id)
                     raise
 
-            if geotag:
-                _geotag_chunks(source_id, children, storage)
+            if geotag and peopletag:
+                from .config import (
+                    GEOTAG_NER_CONTEXT_WINDOW,
+                    GEOTAG_NER_THRESHOLD,
+                    PEOPLETAG_NER_CONTEXT_WINDOW,
+                    PEOPLETAG_NER_THRESHOLD,
+                )
+                from .ner import extract_place_and_person_candidates_ner_with_diagnostics
+
+                texts = [child.text for child in children]
+                (
+                    place_candidates,
+                    person_candidates,
+                    geotag_diag,
+                    peopletag_diag,
+                ) = extract_place_and_person_candidates_ner_with_diagnostics(
+                    texts,
+                    geo_threshold=GEOTAG_NER_THRESHOLD,
+                    people_threshold=PEOPLETAG_NER_THRESHOLD,
+                    geo_context_window_words=GEOTAG_NER_CONTEXT_WINDOW,
+                    people_context_window_words=PEOPLETAG_NER_CONTEXT_WINDOW,
+                )
+                geotag_diag = _geotag_chunks(
+                    source_id,
+                    children,
+                    storage,
+                    ner_lists=place_candidates,
+                    ner_diagnostics=geotag_diag,
+                )
+                peopletag_diag = _peopletag_chunks(
+                    source_id,
+                    children,
+                    storage,
+                    ner_lists=person_candidates,
+                    ner_diagnostics=peopletag_diag,
+                )
+                ingest_ner_diagnostics = IngestNERDiagnostics(
+                    geotag_ner=geotag_diag,
+                    peopletag_ner=peopletag_diag,
+                )
+            else:
+                geotag_diag = None
+                peopletag_diag = None
+                if geotag:
+                    geotag_diag = _geotag_chunks(source_id, children, storage)
+                if peopletag:
+                    peopletag_diag = _peopletag_chunks(source_id, children, storage)
+                ingest_ner_diagnostics = IngestNERDiagnostics(
+                    geotag_ner=geotag_diag,
+                    peopletag_ner=peopletag_diag,
+                )
+
+            set_span_attributes(
+                ingest_span,
+                {
+                    "rag.ingest.ner.geotag_method": (
+                        ingest_ner_diagnostics.geotag_ner.method
+                        if ingest_ner_diagnostics.geotag_ner is not None
+                        else "disabled"
+                    ),
+                    "rag.ingest.ner.peopletag_method": (
+                        ingest_ner_diagnostics.peopletag_ner.method
+                        if ingest_ner_diagnostics.peopletag_ner is not None
+                        else "disabled"
+                    ),
+                },
+            )
 
             if summarize:
                 generator = summary_generator
@@ -800,7 +1053,12 @@ def ingest_file_to_storage(
                     context = _sample_context(context, _SUMMARY_CONTEXT_CHAR_LIMIT)
                     messages = build_ingest_summary_messages(context)
                     summary = generator.generate_chat(messages)
-                    storage.upsert_source_summary(source_id=source_id, summary=summary, page_offset=page_offset)
+                    storage.upsert_source_summary(
+                        source_id=source_id,
+                        summary=summary,
+                        citation_reference=citation_reference,
+                        page_offset=page_offset,
+                    )
                     set_span_attributes(
                         summary_span,
                         {
@@ -817,7 +1075,11 @@ def ingest_file_to_storage(
                 span_kind=SPAN_KIND_CHAIN,
                 attributes={"rag.ingest.page_offset": page_offset},
             ):
-                storage.persist_source_page_offset(source_id, page_offset)
+                storage.persist_source_page_offset(
+                    source_id,
+                    page_offset,
+                    citation_reference=citation_reference,
+                )
 
             set_span_attributes(
                 ingest_span,
@@ -827,7 +1089,7 @@ def ingest_file_to_storage(
                     "output.value": f"{source_id}: {len(parents)} parents, {len(children)} children",
                 },
             )
-            return len(parents), len(children)
+            return len(parents), len(children), ingest_ner_diagnostics
         except Exception as exc:
             mark_span_error(ingest_span, f"{type(exc).__name__}: {exc}")
             raise

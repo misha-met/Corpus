@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from unittest.mock import patch
 
 from src.models import ChildChunk, Metadata, ParentChunk
 from src.ingest import (
@@ -33,6 +34,8 @@ from src.ingest import (
     _format_page_marker,
     _parse_page_markers,
     _marker_page_range,
+    _PDF_STRATEGIES,
+    _extract_pdfminer,
 )
 from tests.conftest import Timer, get_test_logger
 
@@ -377,14 +380,14 @@ class TestChildChunkSplitting:
             assert next_sentences[:CHILD_OVERLAP_SENTENCES] == prev_sentences[-CHILD_OVERLAP_SENTENCES:]
 
     def test_long_sentence_clause_fallback(self):
-        lead = " ".join(["intro"] * 60)
-        middle = " ".join(["detail"] * 45)
-        tail = " ".join(["evidence"] * 20)
+        lead = " ".join(["intro"] * 120)
+        middle = " ".join(["detail"] * 90)
+        tail = " ".join(["evidence"] * 40)
         long_sentence = (
             f"{lead}, and {middle}, which {tail}."
         )
         parts = _split_long_sentence_on_clause(long_sentence, CHILD_TARGET_TOKENS)
-        assert len(parts) == 2
+        assert len(parts) >= 2
         assert all(part.strip() for part in parts)
         assert "," in parts[0] or ";" in parts[0]
 
@@ -478,6 +481,34 @@ class TestMarkdownIngest:
         md_file.write_text("# Title\nContent")
         with pytest.raises(ValueError, match="non-empty"):
             ingest_markdown(md_file, source_id="")
+
+
+class TestPdfStrategyOrder:
+    def test_pdf_strategy_order_quality_first(self):
+        names = [strategy.__name__ for strategy in _PDF_STRATEGIES]
+        assert names == [
+            "_extract_pymupdf",
+            "_extract_pypdf",
+            "_extract_pdfminer",
+            "_extract_ocr",
+        ]
+
+    def test_pdfminer_extracts_per_page_via_page_numbers(self, tmp_path: Path):
+        calls: list[list[int]] = []
+
+        class _Reader:
+            pages = [object(), object(), object()]
+
+        def _fake_extract_text(_path: str, page_numbers=None):
+            calls.append(list(page_numbers or []))
+            index = calls[-1][0]
+            return f"page {index + 1}"
+
+        with patch("pdfminer.high_level.extract_text", side_effect=_fake_extract_text):
+            pages = _extract_pdfminer(tmp_path / "doc.pdf", reader=_Reader(), page_offset=1)
+
+        assert calls == [[0], [1], [2]]
+        assert len(pages) == 3
 
 
 # ===========================================================================

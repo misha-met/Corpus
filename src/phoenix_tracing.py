@@ -388,12 +388,16 @@ def format_openinference_document(
         "document.id": document_id,
         "document.score": round(float(score), 6),
         "document.content": clean_content,
-        "document.metadata": {
-            "source_id": meta.get("source_id"),
-            "page_number": meta.get("page_number"),
-            "display_page": meta.get("display_page"),
-            "header_path": meta.get("header_path"),
-        },
+        # OpenInference requires metadata as a JSON *string*, not a nested dict.
+        "document.metadata": json.dumps(
+            {
+                "source_id": meta.get("source_id"),
+                "page_number": meta.get("page_number"),
+                "display_page": meta.get("display_page"),
+                "header_path": meta.get("header_path"),
+            },
+            ensure_ascii=True,
+        ),
     }
 
 
@@ -437,7 +441,17 @@ def set_reranker_documents(
     top_k: Optional[int] = None,
     max_text_chars: int = 4096,
 ) -> None:
-    """Emit OpenInference RERANKER attributes: input/output documents, query, top_k."""
+    """Emit OpenInference RERANKER attributes: input/output documents, query, top_k.
+
+    Emits both root arrays and flattened indexed keys:
+        reranker.input_documents.{i}.document.id
+        reranker.input_documents.{i}.document.content
+        reranker.input_documents.{i}.document.score
+        reranker.input_documents.{i}.document.metadata  (JSON string)
+    Root arrays are serialized as JSON strings (one element per document) so
+    callers can inspect the list-level attribute while flattened keys remain
+    available for UIs that rely on indexed OpenInference fields.
+    """
 
     if span is None:
         return
@@ -447,12 +461,21 @@ def set_reranker_documents(
     if top_k is not None:
         set_span_attribute(span, "reranker.top_k", int(top_k))
 
-    # Emit root array for UI parsing
-    if input_documents:
-        docs_json = [to_json(doc) if isinstance(doc, dict) else str(doc) for doc in input_documents]
-        set_span_attribute(span, "reranker.input_documents", docs_json, max_text_chars=max_text_chars)
+    # Root arrays encoded as JSON strings for compatibility with tests and tools.
+    input_docs_json = [
+        to_json(doc) if isinstance(doc, dict) else str(doc)
+        for doc in input_documents
+    ]
+    output_docs_json = [
+        to_json(doc) if isinstance(doc, dict) else str(doc)
+        for doc in output_documents
+    ]
+    set_span_attribute(span, "reranker.input_documents", input_docs_json, max_text_chars=max_text_chars)
+    set_span_attribute(span, "reranker.output_documents", output_docs_json, max_text_chars=max_text_chars)
 
-    # Emit flattened reranker.input_documents.{i}.document.* keys
+    # Flattened reranker.input_documents.{i}.document.* keys only.
+    # Each `doc` dict already has keys like "document.id", "document.content",
+    # "document.score", "document.metadata" (from format_openinference_document).
     for index, doc in enumerate(input_documents):
         if not isinstance(doc, dict):
             continue
@@ -460,12 +483,7 @@ def set_reranker_documents(
         for key, value in doc.items():
             set_span_attribute(span, f"{prefix}.{key}", value, max_text_chars=max_text_chars)
 
-    # Emit root array for UI parsing
-    if output_documents:
-        docs_json = [to_json(doc) if isinstance(doc, dict) else str(doc) for doc in output_documents]
-        set_span_attribute(span, "reranker.output_documents", docs_json, max_text_chars=max_text_chars)
-
-    # Emit flattened reranker.output_documents.{i}.document.* keys
+    # Flattened reranker.output_documents.{i}.document.* keys only.
     for index, doc in enumerate(output_documents):
         if not isinstance(doc, dict):
             continue
@@ -581,6 +599,94 @@ def to_json(value: Any) -> str:
     """JSON helper for span attributes and structured diagnostics."""
 
     return json.dumps(value, ensure_ascii=True)
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — graph.node.* helper
+# ---------------------------------------------------------------------------
+
+def set_graph_node(span: Any, node_id: str, parent_id: str, name: str) -> None:
+    """Attach Phoenix pipeline graph node attributes to a span.
+
+    Phoenix can visualise the stage DAG when each child span carries these
+    three attributes.  Call immediately after opening the span.
+    """
+    if span is None:
+        return
+    span.set_attribute("graph.node.id", node_id)
+    span.set_attribute("graph.node.parent_id", parent_id)
+    span.set_attribute("graph.node.name", name)
+
+
+# ---------------------------------------------------------------------------
+# Task 6 — suppress_tracing() context manager
+# ---------------------------------------------------------------------------
+
+def tracing_suppressed():
+    """Context manager that suppresses all OpenInference/OTEL tracing.
+
+    Useful in unit tests and dry-run modes::
+
+        with tracing_suppressed():
+            engine.search(query)
+    """
+    try:
+        from openinference.instrumentation import suppress_tracing  # type: ignore[import-untyped]
+        return suppress_tracing()
+    except ImportError:  # pragma: no cover — openinference not installed
+        from contextlib import nullcontext
+        return nullcontext()
+
+
+# ---------------------------------------------------------------------------
+# Task 7 — retrieval evaluation hook (stub)
+# ---------------------------------------------------------------------------
+
+def log_retrieval_evaluations(
+    px_client: Any,
+    span_id: str,
+    results: list,
+    eval_name: str = "retrieval_relevance",
+) -> None:
+    """Log document-level relevance evaluations to Phoenix.
+
+    Wire an LLM-as-judge scorer here before calling this function.  The
+    DataFrame construction below is complete; only the `score` column values
+    need to be filled in by an actual scorer.
+
+    Args:
+        px_client:  A ``phoenix.Client`` instance.
+        span_id:    The span ID of the ``retrieval.search`` span to attach evals to.
+        results:    List of ``RetrievalResult`` objects from ``search()``.
+        eval_name:  Label used in the Phoenix UI for this evaluation series.
+
+    Raises:
+        NotImplementedError: Always — wire an LLM scorer before use.
+    """
+    try:
+        import pandas as pd  # type: ignore[import-untyped]
+        from phoenix.trace import DocumentEvaluations  # type: ignore[import-untyped]
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError(
+            "pandas and arize-phoenix are required for log_retrieval_evaluations"
+        ) from exc
+
+    rows = []
+    for position, result in enumerate(results):
+        rows.append(
+            {
+                "span_id": span_id,
+                "document_position": position,
+                # TODO: replace with LLM-as-judge score for the (query, doc) pair.
+                "score": None,
+                "label": None,
+                "explanation": None,
+            }
+        )
+
+    df = pd.DataFrame(rows).set_index("span_id")
+    # px_client.log_evaluations(DocumentEvaluations(dataframe=df, eval_name=eval_name))
+    raise NotImplementedError("Wire an LLM-as-judge scorer here")
 
 
 def annotate_span_feedback(

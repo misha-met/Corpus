@@ -81,14 +81,26 @@ function ToolFallbackRoot({
   );
 }
 
-type ToolStatus = ToolCallMessagePartStatus["type"];
+type ToolStatus = "running" | "complete" | "incomplete" | "requires-action";
 
-const statusIconMap: Record<ToolStatus, React.ElementType> = {
-  running: LoaderIcon,
-  complete: CheckIcon,
-  incomplete: XCircleIcon,
-  "requires-action": AlertCircleIcon,
-};
+function ToolStatusIcon({
+  statusType,
+  className,
+}: {
+  statusType: ToolStatus;
+  className?: string;
+}) {
+  if (statusType === "running") {
+    return <LoaderIcon data-slot="tool-fallback-trigger-icon" className={className} />;
+  }
+  if (statusType === "incomplete") {
+    return <XCircleIcon data-slot="tool-fallback-trigger-icon" className={className} />;
+  }
+  if (statusType === "requires-action") {
+    return <AlertCircleIcon data-slot="tool-fallback-trigger-icon" className={className} />;
+  }
+  return <CheckIcon data-slot="tool-fallback-trigger-icon" className={className} />;
+}
 
 function ToolFallbackTrigger({
   toolName,
@@ -99,12 +111,11 @@ function ToolFallbackTrigger({
   toolName: string;
   status?: ToolCallMessagePartStatus;
 }) {
-  const statusType = status?.type ?? "complete";
+  const statusType = (status?.type as ToolStatus | undefined) ?? "complete";
   const isRunning = statusType === "running";
   const isCancelled =
     status?.type === "incomplete" && status.reason === "cancelled";
 
-  const Icon = statusIconMap[statusType];
   const label = isCancelled ? "Cancelled tool" : "Used tool";
 
   return (
@@ -116,8 +127,8 @@ function ToolFallbackTrigger({
       )}
       {...props}
     >
-      <Icon
-        data-slot="tool-fallback-trigger-icon"
+      <ToolStatusIcon
+        statusType={statusType}
         className={cn(
           "aui-tool-fallback-trigger-icon size-4 shrink-0",
           isCancelled && "text-muted-foreground",

@@ -238,12 +238,17 @@ class TestExp2DedupOrder:
                 reranker=reranker, config=config,
             )
             t0 = time.perf_counter()
-            current_results = engine_current.search(q)
+            response = engine_current.search(q)
+            current_results = response.results
             current_ms = (time.perf_counter() - t0) * 1000
 
             # --- Alternative: hybrid → rerank → dedup ---
             t0 = time.perf_counter()
-            fused = engine_current._hybrid_search(q, config.top_k_fused)
+            fused = engine_current._hybrid_search_decoupled(
+                embedding_query=q,
+                bm25_query=q,
+                top_k=config.top_k_fused,
+            )
 
             # Hydrate missing text/metadata
             missing_ids = [item["id"] for item in fused if "text" not in item or "metadata" not in item]
@@ -330,7 +335,11 @@ class TestExp2DedupOrder:
 
         for q in EXPERIMENT_QUERIES:
             # Current pipeline: hybrid → dedup → rerank
-            fused = engine._hybrid_search(q, config.top_k_fused)
+            fused = engine._hybrid_search_decoupled(
+                embedding_query=q,
+                bm25_query=q,
+                top_k=config.top_k_fused,
+            )
 
             before_dedup = len(fused)
             deduped, _ = engine._deduplicate_by_parent(fused, config.top_k_fused)
@@ -634,8 +643,10 @@ class TestExp4Caching:
         )
 
         for q in EXPERIMENT_QUERIES:
-            direct = engine_direct.search(q)
-            cached = engine_cached.search(q)
+            response = engine_direct.search(q)
+            direct = response.results
+            response = engine_cached.search(q)
+            cached = response.results
             assert len(direct) == len(cached), f"Result count mismatch for '{q}'"
             for d, c in zip(direct, cached):
                 assert d.child_id == c.child_id, f"Child ID mismatch for '{q}'"

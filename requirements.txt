@@ -33,4 +33,3 @@ pycountry==24.6.1
 
 # Offline ingest-time NER geotagging
 gliner>=0.2.5
-gliner-spacy

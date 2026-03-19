@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from src.config import ModelConfig
+from src.models import ChildChunk, Metadata, ParentChunk
 from src import retrieval
 from src.retrieval import RetrievalEngine, RetrievalResult
 from src.metrics import DeduplicationMetrics, ThresholdMetrics
@@ -118,6 +119,45 @@ class TestHybridSearch:
         )
         assert len(results) > 0
         assert all((r.get("metadata") or {}).get("source_id") == "test_doc_linguistics" for r in results)
+
+    def test_subword_heavy_query_runs_without_error(self, retrieval_engine: RetrievalEngine):
+        response = retrieval_engine.search("noam chomsky's theory of language")
+        assert isinstance(response.results, list)
+
+    def test_custom_bm25_weight_is_forwarded(self, retrieval_engine: RetrievalEngine, monkeypatch):
+        captured: dict[str, float] = {}
+
+        def _fake_hybrid_search(*, query_text, query_vector, top_k, source_id=None, bm25_weight=0.5):
+            _ = query_text, query_vector, top_k, source_id
+            captured["bm25_weight"] = float(bm25_weight)
+            return []
+
+        monkeypatch.setattr(retrieval_engine._storage, "hybrid_search", _fake_hybrid_search)
+
+        response = retrieval_engine.search("Chomsky language", bm25_weight=0.2)
+
+        assert response.results == []
+        assert captured["bm25_weight"] == pytest.approx(0.2)
+
+    def test_use_hybrid_false_uses_vector_search(self, retrieval_engine: RetrievalEngine, monkeypatch):
+        calls = {"vector": 0}
+
+        def _fake_vector_search(*, query_vector, top_k, source_id=None):
+            _ = query_vector, top_k, source_id
+            calls["vector"] += 1
+            return []
+
+        def _fail_hybrid_search(*args, **kwargs):
+            _ = args, kwargs
+            raise AssertionError("hybrid_search should not be called when use_hybrid=False")
+
+        monkeypatch.setattr(retrieval_engine._storage, "vector_search", _fake_vector_search)
+        monkeypatch.setattr(retrieval_engine._storage, "hybrid_search", _fail_hybrid_search)
+
+        response = retrieval_engine.search("Chomsky language", use_hybrid=False)
+
+        assert response.results == []
+        assert calls["vector"] == 1
 
 
 # ===========================================================================
@@ -300,7 +340,8 @@ class TestThresholdFiltering:
             reranker=mock_reranker,
             config=config,
         )
-        results = engine.search("Chomsky")
+        response = engine.search("Chomsky")
+        results = response.results
         # Should still get results (safety net if needed)
         assert len(results) >= 1
 
@@ -325,7 +366,8 @@ class TestThresholdFiltering:
             reranker=mock_reranker,
             config=config,
         )
-        results = engine.search("Chomsky language theory")
+        response = engine.search("Chomsky language theory")
+        results = response.results
         # Safety net should provide at least min_docs
         assert len(results) >= 1  # May be less due to final dedup
 
@@ -337,9 +379,10 @@ class TestThresholdFiltering:
             reranker=mock_reranker,
             config=_make_config("regular"),
         )
-        results = engine.search("Chomsky theory")
-        if results and results[0].metrics:
-            metrics = results[0].metrics
+        response = engine.search("Chomsky theory")
+        results = response.results
+        if results and response.metrics:
+            metrics = response.metrics
             assert metrics.threshold is not None
 
     def test_safety_net_tags_below_threshold_items(
@@ -392,7 +435,9 @@ class TestThresholdFiltering:
         monkeypatch.setattr(engine, "_hybrid_search_decoupled", _fake_hybrid)
         monkeypatch.setattr(engine, "_rerank", _fake_rerank)
 
-        results = engine.search("test query")
+        response = engine.search("test query")
+
+        results = response.results
 
         # Safety net fires: threshold=0.5 passes only a1 (score 0.90), but
         # min_docs=3 extends to b1 and c1.
@@ -464,7 +509,9 @@ class TestThresholdFiltering:
         monkeypatch.setattr(engine, "_rerank", _fake_rerank)
         monkeypatch.setattr(retrieval, "_WORD_TO_TOKEN_RATIO", 1.0)
 
-        results = engine.search("what mentions of ChatGPT are there", intent="factual")
+        response = engine.search("what mentions of ChatGPT are there", intent="factual")
+
+        results = response.results
         sources = {r.metadata.get("source_id") for r in results if r.metadata.get("source_id")}
         assert "source_b" not in sources
         assert sources == {"source_a"}
@@ -518,7 +565,9 @@ class TestThresholdFiltering:
         monkeypatch.setattr(engine, "_rerank", _fake_rerank)
         monkeypatch.setattr(retrieval, "_WORD_TO_TOKEN_RATIO", 1.0)
 
-        results = engine.search("who is Romeo", intent="factual")
+        response = engine.search("who is Romeo", intent="factual")
+
+        results = response.results
         sources = {r.metadata.get("source_id") for r in results if r.metadata.get("source_id")}
         assert "source_b" in sources
 
@@ -529,24 +578,28 @@ class TestThresholdFiltering:
 
 class TestFullSearch:
     def test_search_returns_results(self, retrieval_engine: RetrievalEngine):
-        results = retrieval_engine.search("Chomsky language theory")
+        response = retrieval_engine.search("Chomsky language theory")
+        results = response.results
         assert len(results) > 0
         assert isinstance(results[0], RetrievalResult)
 
     def test_search_results_have_text(self, retrieval_engine: RetrievalEngine):
-        results = retrieval_engine.search("epistemology knowledge")
+        response = retrieval_engine.search("epistemology knowledge")
+        results = response.results
         for r in results:
             assert r.text or r.parent_text
 
     def test_search_results_have_score(self, retrieval_engine: RetrievalEngine):
-        results = retrieval_engine.search("ethics moral philosophy")
+        response = retrieval_engine.search("ethics moral philosophy")
+        results = response.results
         for r in results:
             assert isinstance(r.score, float)
 
     def test_search_metrics_collected(self, retrieval_engine: RetrievalEngine):
-        results = retrieval_engine.search("Chomsky", collect_metrics=True)
+        response = retrieval_engine.search("Chomsky", collect_metrics=True)
+        results = response.results
         if results:
-            metrics = results[0].metrics
+            metrics = response.metrics
             assert metrics is not None
             assert metrics.timing.total_ms > 0
             assert metrics.timing.hybrid_search_ms >= 0
@@ -555,7 +608,8 @@ class TestFullSearch:
     def test_search_max_two_children_per_parent(self, retrieval_engine: RetrievalEngine):
         """Final results should have at most 2 children per parent_id (max_children_per_parent=2)."""
         from collections import Counter
-        results = retrieval_engine.search("Chomsky language")
+        response = retrieval_engine.search("Chomsky language")
+        results = response.results
         parent_ids = [
             r.metadata.get("parent_id") for r in results
             if r.metadata.get("parent_id")
@@ -565,9 +619,99 @@ class TestFullSearch:
 
     def test_search_deterministic(self, retrieval_engine: RetrievalEngine):
         """Same query should produce same results."""
-        r1 = retrieval_engine.search("Chomsky theory")
-        r2 = retrieval_engine.search("Chomsky theory")
+        response = retrieval_engine.search("Chomsky theory")
+        r1 = response.results
+        response = retrieval_engine.search("Chomsky theory")
+        r2 = response.results
         assert [r.child_id for r in r1] == [r.child_id for r in r2]
+
+    def test_identical_passage_across_sources_both_retrievable(
+        self,
+        tmp_storage,
+        mock_embedder: MockEmbeddingModel,
+        mock_reranker: MockReranker,
+    ):
+        shared_text = (
+            "Noam Chomsky's theory of language acquisition argues that children "
+            "acquire grammar despite limited input from the environment."
+        )
+
+        parent_a = ParentChunk(
+            id="p-shared-a",
+            text=shared_text,
+            metadata=Metadata(
+                source_id="shared_doc_a",
+                page_number=1,
+                page_label="1",
+                display_page="1",
+                header_path="Document",
+                parent_id=None,
+            ),
+        )
+        parent_b = ParentChunk(
+            id="p-shared-b",
+            text=shared_text,
+            metadata=Metadata(
+                source_id="shared_doc_b",
+                page_number=1,
+                page_label="1",
+                display_page="1",
+                header_path="Document",
+                parent_id=None,
+            ),
+        )
+        child_a = ChildChunk(
+            id="c-shared-a",
+            text=shared_text,
+            metadata=Metadata(
+                source_id="shared_doc_a",
+                page_number=1,
+                page_label="1",
+                display_page="1",
+                header_path="Document",
+                parent_id=parent_a.id,
+            ),
+        )
+        child_b = ChildChunk(
+            id="c-shared-b",
+            text=shared_text,
+            metadata=Metadata(
+                source_id="shared_doc_b",
+                page_number=1,
+                page_label="1",
+                display_page="1",
+                header_path="Document",
+                parent_id=parent_b.id,
+            ),
+        )
+
+        tmp_storage.add_parents([parent_a, parent_b])
+        tmp_storage.add_children(
+            [child_a, child_b],
+            embeddings=mock_embedder.encode([shared_text, shared_text], normalize_embeddings=True),
+        )
+
+        engine = RetrievalEngine(
+            storage=tmp_storage,
+            embedding_model=mock_embedder,
+            reranker=mock_reranker,
+            config=_make_config("regular"),
+        )
+        response = engine.search(
+            "noam chomsky's theory of language",
+            top_k_fused=32,
+            top_k_rerank=24,
+            top_k_final=12,
+        )
+
+        source_ids = {
+            str(result.metadata.get("source_id"))
+            for result in response.results
+            if isinstance(result.metadata, dict) and result.metadata.get("source_id")
+        }
+
+        assert "shared_doc_a" in source_ids
+        assert "shared_doc_b" in source_ids
 
 
 # ===========================================================================
@@ -624,7 +768,8 @@ class TestRetrievalLatency:
         queries = [q for q in FIXED_QUERIES if q.strip()]
         for q in queries:
             with Timer("full_search", query=q) as t:
-                results = retrieval_engine.search(q)
+                response = retrieval_engine.search(q)
+                results = response.results
             result_count = len(results)
             logger.info(
                 f"full_search '{q[:40]}...': {t.result.elapsed_ms:.2f}ms, {result_count} results"
