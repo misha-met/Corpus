@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional
 from unittest.mock import patch
 
@@ -33,6 +34,7 @@ class MockEngineWithStorage:
 
     def __init__(self, storage: StorageEngine):
         self._storage = storage
+        self.simulate_ner_unavailable = False
 
     @property
     def storage(self) -> StorageEngine:
@@ -52,7 +54,7 @@ class MockEngineWithStorage:
     ):
         """Simulate ingest by storing parent chunks and a summary."""
         from src.models import Metadata, ParentChunk
-        _ = page_number, geotag, peopletag, page_offset, citation_reference
+        _ = page_number, page_offset, citation_reference
 
         # Read the file content
         text = Path(file_path).read_text(encoding="utf-8")
@@ -76,14 +78,45 @@ class MockEngineWithStorage:
                 source_path=str(Path(file_path).resolve()),
             )
 
-        class _Result:
-            def __init__(self):
-                self.source_id = source_id
-                self.parents_count = 1
-                self.children_count = 0
-                self.summarized = summarize
+        geotag_diag = None
+        peopletag_diag = None
 
-        return _Result()
+        if geotag:
+            if self.simulate_ner_unavailable:
+                geotag_diag = SimpleNamespace(
+                    ner_available=False,
+                    method="regex_fallback",
+                    warning="GLiNER unavailable; regex fallback used",
+                )
+            else:
+                geotag_diag = SimpleNamespace(
+                    ner_available=True,
+                    method="gliner",
+                    warning=None,
+                )
+
+        if peopletag:
+            if self.simulate_ner_unavailable:
+                peopletag_diag = SimpleNamespace(
+                    ner_available=False,
+                    method="empty",
+                    warning="GLiNER unavailable; person extraction returned empty",
+                )
+            else:
+                peopletag_diag = SimpleNamespace(
+                    ner_available=True,
+                    method="gliner",
+                    warning=None,
+                )
+
+        return SimpleNamespace(
+            source_id=source_id,
+            parents_count=1,
+            children_count=0,
+            summarized=summarize,
+            geotag_ner=geotag_diag,
+            peopletag_ner=peopletag_diag,
+        )
 
     def query_events(self, *args, **kwargs):
         yield from []
@@ -272,6 +305,61 @@ class TestGeoMentionsContract:
         assert "doc_a" in all_sources
         assert "doc_b" in all_sources
 
+    @pytest.mark.anyio
+    async def test_geo_mentions_dedupes_duplicate_rows_by_source_chunk_place(self, mock_engine) -> None:
+        self._seed_mentions(mock_engine.storage)
+        mock_engine.storage.upsert_geo_mentions(
+            [
+                {
+                    "id": "m-doc-a-dup",
+                    "source_id": "doc_a",
+                    "chunk_id": "c-doc-a",
+                    "place_name": "Paris",
+                    "matched_input": "Paris",
+                    "matched_on": "paris",
+                    "geonameid": 2988507,
+                    "lat": 48.8566,
+                    "lon": 2.3522,
+                    "confidence": 0.95,
+                    "method": "exact",
+                }
+            ]
+        )
+
+        with patch("src.api.app_config.USE_SOURCE_IDS_FILTER", True):
+            with patch("src.api._get_engine", return_value=mock_engine):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url="http://test"
+                ) as client:
+                    resp = await client.get(
+                        "/api/geo/mentions",
+                        params={"min_confidence": 0.0, "detailed": True},
+                    )
+
+        assert resp.status_code == 200
+        mentions = resp.json()["mentions"]
+        paris = next(item for item in mentions if item["place_name"] == "Paris")
+        assert paris["mention_count"] == 1
+
+    @pytest.mark.anyio
+    async def test_geo_mentions_q_filter_returns_matching_places(self, mock_engine) -> None:
+        self._seed_mentions(mock_engine.storage)
+
+        with patch("src.api.app_config.USE_SOURCE_IDS_FILTER", True):
+            with patch("src.api._get_engine", return_value=mock_engine):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url="http://test"
+                ) as client:
+                    resp = await client.get(
+                        "/api/geo/mentions",
+                        params={"min_confidence": 0.0, "q": "pari"},
+                    )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["count"] == 1
+        assert body["mentions"][0]["place_name"] == "Paris"
+
 
 # ---------------------------------------------------------------------------
 # POST /api/sources/ingest
@@ -379,6 +467,33 @@ class TestIngestEndpoint:
         assert row["source_path"] is not None
         assert row["snapshot_path"] is not None
 
+    @pytest.mark.anyio
+    async def test_ingest_reports_degraded_ner_diagnostics(self, mock_engine, sample_file) -> None:
+        mock_engine.simulate_ner_unavailable = True
+
+        with patch("src.api._get_engine", return_value=mock_engine):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                resp = await client.post(
+                    "/api/sources/ingest",
+                    json={
+                        "file_path": str(sample_file),
+                        "source_id": "degraded_ner_doc",
+                        "summarize": False,
+                        "geotag": True,
+                        "peopletag": True,
+                    },
+                )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["source_id"] == "degraded_ner_doc"
+        assert data["geotag_ner"]["ner_available"] is False
+        assert data["geotag_ner"]["method"] == "regex_fallback"
+        assert data["peopletag_ner"]["ner_available"] is False
+        assert data["peopletag_ner"]["method"] == "empty"
+
 
 # ---------------------------------------------------------------------------
 # POST /api/sources/upload
@@ -481,6 +596,35 @@ class TestUploadEndpoint:
         sources = list_resp.json()["sources"]
         row = next(source for source in sources if source["source_id"] == "upload_citation_doc")
         assert row["citation_reference"] == "Doe (2025) Upload Citation"
+
+    @pytest.mark.anyio
+    async def test_upload_reports_degraded_ner_diagnostics(self, mock_engine, sample_file) -> None:
+        mock_engine.simulate_ner_unavailable = True
+
+        with patch("src.api._get_engine", return_value=mock_engine):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                with sample_file.open("rb") as handle:
+                    resp = await client.post(
+                        "/api/sources/upload",
+                        files={"file": ("sample.md", handle, "text/markdown")},
+                        data={
+                            "source_id": "upload_degraded_ner",
+                            "summarize": "false",
+                            "geotag": "true",
+                            "peopletag": "true",
+                            "page_offset": "1",
+                        },
+                    )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["source_id"] == "upload_degraded_ner"
+        assert data["geotag_ner"]["ner_available"] is False
+        assert data["geotag_ner"]["method"] == "regex_fallback"
+        assert data["peopletag_ner"]["ner_available"] is False
+        assert data["peopletag_ner"]["method"] == "empty"
 
 
 # ---------------------------------------------------------------------------

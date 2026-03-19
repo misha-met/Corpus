@@ -128,6 +128,56 @@ class TestPeopleListEndpoint:
         assert empty_resp.json()["count"] == 0
         assert empty_resp.json()["people"] == []
 
+    @pytest.mark.anyio
+    async def test_people_dedupes_duplicate_rows_by_source_chunk_raw_name(self, mock_engine: MockEngineWithStorage) -> None:
+        _seed_person_mentions(mock_engine.storage)
+        mock_engine.storage.upsert_person_mentions(
+            [
+                {
+                    "id": "pm-dup",
+                    "source_id": "doc_a",
+                    "chunk_id": "chunk-a1",
+                    "raw_name": "Noam Chomsky",
+                    "canonical_name": "Noam Chomsky",
+                    "confidence": 0.96,
+                    "method": "new",
+                    "role_hint": "author",
+                    "context_snippet": "duplicate",
+                }
+            ]
+        )
+
+        with patch("src.api._get_engine", return_value=mock_engine):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://test",
+            ) as client:
+                resp = await client.get("/api/people", params={"min_confidence": 0.0})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        noam = next(item for item in data["people"] if item["canonical_name"] == "Noam Chomsky")
+        assert noam["mention_count"] == 2
+
+    @pytest.mark.anyio
+    async def test_people_q_filter_returns_matching_canonical_names(self, mock_engine: MockEngineWithStorage) -> None:
+        _seed_person_mentions(mock_engine.storage)
+
+        with patch("src.api._get_engine", return_value=mock_engine):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://test",
+            ) as client:
+                resp = await client.get(
+                    "/api/people",
+                    params={"min_confidence": 0.0, "q": "foucault"},
+                )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["count"] == 1
+        assert body["people"][0]["canonical_name"] == "Michel Foucault"
+
 
 class TestPeopleMentionsEndpoint:
     @pytest.mark.anyio

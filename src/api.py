@@ -481,7 +481,16 @@ async def get_geo_mentions(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     groups: dict[int, dict] = {}
+    seen_geo_keys: set[tuple[str, str, str]] = set()
     for row in rows:
+        source_key = str(row.get("source_id", "")).strip()
+        chunk_key = str(row.get("chunk_id", "")).strip()
+        canonical_place = str(row.get("place_name", "")).strip()
+        geo_identity_key = (source_key, chunk_key, canonical_place)
+        if geo_identity_key in seen_geo_keys:
+            continue
+        seen_geo_keys.add(geo_identity_key)
+
         gid = row["geonameid"]
         if gid not in groups:
             group = {
@@ -590,7 +599,18 @@ async def get_people(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     grouped: dict[str, dict[str, object]] = {}
+    seen_people_keys: set[tuple[str, str, str]] = set()
     for row in rows:
+        source_key = str(row.get("source_id", "")).strip()
+        chunk_key = str(row.get("chunk_id", "")).strip()
+        raw_name = str(row.get("raw_name", "")).strip()
+        if not raw_name:
+            continue
+        person_identity_key = (source_key, chunk_key, raw_name)
+        if person_identity_key in seen_people_keys:
+            continue
+        seen_people_keys.add(person_identity_key)
+
         canonical = str(row.get("canonical_name", "")).strip()
         if not canonical:
             continue
@@ -614,7 +634,6 @@ async def get_people(
 
         variants_set = group["variants"]
         if isinstance(variants_set, set):
-            raw_name = str(row.get("raw_name", "")).strip()
             if raw_name:
                 variants_set.add(raw_name)
 
