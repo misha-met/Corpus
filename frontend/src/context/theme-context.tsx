@@ -2,7 +2,7 @@
 
 import React, { createContext, useCallback, useContext, useSyncExternalStore } from "react";
 
-export type BackgroundTheme = "stars" | "meteors" | "rain" | "mesh" | "starfield" | "particles" | "darkveil";
+export type BackgroundTheme = "stars" | "meteors" | "rain" | "starfield" | "particles" | "darkveil";
 
 const STORAGE_KEY = "dh-background-theme";
 const THEME_CHANGE_EVENT = "dh-theme-change";
@@ -10,7 +10,6 @@ const THEMES: BackgroundTheme[] = [
   "stars",
   "meteors",
   "rain",
-  "mesh",
   "starfield",
   "particles",
   "darkveil",

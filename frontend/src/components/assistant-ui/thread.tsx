@@ -346,7 +346,7 @@ const Composer: FC = () => {
 
   return (
     <ComposerPrimitive.Root
-      className="aui-composer-root group/composer relative flex w-full flex-col"
+      className="aui-composer-root group/composer relative flex w-full flex-col font-sans"
       data-empty={isEmpty}
       data-running={isRunning}
     >
@@ -408,10 +408,10 @@ const Composer: FC = () => {
             </TooltipTrigger>
             <TooltipContent side="top">
               {thinkingEnabled === true
-                ? "Thinking forced on — click to force off"
+                ? "Thinking Toggle"
                 : thinkingEnabled === false
-                  ? "Thinking forced off — click for auto"
-                  : "Thinking auto (intent-driven) — click to force on"}
+                  ? "Thinking Toggle"
+                  : "Thinking Toggle"}
             </TooltipContent>
           </Tooltip>
         )}

@@ -15,11 +15,6 @@ export const GLASS: Record<
     backdrop: "blur(9px) saturate(100%)",
     border: "rgba(255,255,255,0.000)",
   },
-  mesh: {
-    bg: "rgba(0,0,0,0.055)",
-    backdrop: "blur(9px) saturate(110%)",
-    border: "rgba(255,255,255,0.000)",
-  },
   starfield: {
     bg: "rgba(0,0,0,0.165)",
     backdrop: "blur(10px) saturate(100%)",
@@ -55,7 +50,6 @@ export const THEMES: { id: BackgroundTheme; label: string }[] = [
   { id: "stars", label: "Stars" },
   { id: "meteors", label: "Meteors" },
   { id: "rain", label: "Rain" },
-  { id: "mesh", label: "Gradient" },
   { id: "starfield", label: "Starfield" },
   { id: "particles", label: "Particles" },
   { id: "darkveil", label: "Dark Veil" },
@@ -71,6 +65,6 @@ export interface ChromeStyles {
 
 export const CLS_TAB_ACTIVE = "bg-white/15 text-white border border-white/25 shadow-sm";
 export const CLS_TAB_INACTIVE = "text-white/40 hover:text-white/70 hover:bg-white/8";
-export const CLS_TAB_BASE = "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-all";
+export const CLS_TAB_BASE = "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium font-sans rounded-md transition-all";
 export const OVERLAY_TRANSITION = "opacity 420ms cubic-bezier(0.22,1,0.36,1), transform 520ms cubic-bezier(0.22,1,0.36,1), filter 420ms ease";
 export const CHROME_TRANSITION = "background 520ms cubic-bezier(0.22,1,0.36,1), border-color 520ms cubic-bezier(0.22,1,0.36,1), backdrop-filter 520ms cubic-bezier(0.22,1,0.36,1)";

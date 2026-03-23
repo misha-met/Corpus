@@ -7,6 +7,7 @@ import {
   type ChatSession,
 } from "@/lib/session-store";
 import { useTheme } from "@/context/theme-context";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -46,7 +47,8 @@ export interface HistoryPanelProps {
 
 export function HistoryPanel({ open, onClose, onRestore, panelBg: panelBgProp, panelBackdrop: panelBackdropProp, panelBorderColor: panelBorderColorProp }: HistoryPanelProps) {
   const { theme } = useTheme();
-  const isGlassTheme = theme === "particles" || theme === "mesh";
+  const reduceMotion = useReducedMotion();
+  const isGlassTheme = theme === "particles";
   const panelBg = panelBgProp ?? (isGlassTheme ? "rgba(255,255,255,0.08)" : "rgba(14,14,14,0.88)");
   const panelBackdrop = panelBackdropProp ?? "blur(12px)";
   const panelBorderColor = panelBorderColorProp ?? "rgba(255,255,255,0.12)";
@@ -104,20 +106,33 @@ export function HistoryPanel({ open, onClose, onRestore, panelBg: panelBgProp, p
     );
   });
 
-  if (!open) return null;
-
   return (
-    <aside
-      className="flex flex-col w-72 shrink-0 overflow-hidden"
-      style={{
-        background: panelBg,
-        borderLeft: `1px solid ${panelBorderColor}`,
-        boxShadow: "-2px 0 8px rgba(0,0,0,0.45), -1px 0 2px rgba(0,0,0,0.35), inset 1px 0 0 rgba(255,255,255,0.04)",
-        backdropFilter: panelBackdrop,
-        WebkitBackdropFilter: panelBackdrop,
-        isolation: "isolate",
-      }}
-    >
+    <AnimatePresence initial={false}>
+      {open && (
+        <motion.aside
+          key="chat-history-panel"
+          className="flex flex-col shrink-0 overflow-hidden"
+          initial={{ width: 0, opacity: 0, x: 8 }}
+          animate={{ width: 288, opacity: 1, x: 0 }}
+          exit={{ width: 0, opacity: 0, x: 8 }}
+          transition={
+            reduceMotion
+              ? { duration: 0 }
+              : {
+                width: { duration: 0.36, ease: [0.22, 1, 0.36, 1] },
+                opacity: { duration: 0.28, ease: "easeOut" },
+                x: { duration: 0.36, ease: [0.22, 1, 0.36, 1] },
+              }
+          }
+          style={{
+            background: panelBg,
+            borderLeft: `1px solid ${panelBorderColor}`,
+            boxShadow: "-2px 0 8px rgba(0,0,0,0.45), -1px 0 2px rgba(0,0,0,0.35), inset 1px 0 0 rgba(255,255,255,0.04)",
+            backdropFilter: panelBackdrop,
+            WebkitBackdropFilter: panelBackdrop,
+            isolation: "isolate",
+          }}
+        >
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 shrink-0" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
           <h2 className="text-sm font-semibold text-foreground tracking-wide">
@@ -236,11 +251,13 @@ export function HistoryPanel({ open, onClose, onRestore, panelBg: panelBgProp, p
         {/* Footer */}
         {sessions.length > 0 && (
           <div className="px-4 py-2 shrink-0" style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
-            <p className="text-[10px] text-muted-foreground text-center" style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+            <p className="text-[10px] text-muted-foreground text-center">
               {sessions.length} saved conversation{sessions.length !== 1 ? "s" : ""}
             </p>
           </div>
         )}
-      </aside>
+        </motion.aside>
+      )}
+    </AnimatePresence>
   );
 }
