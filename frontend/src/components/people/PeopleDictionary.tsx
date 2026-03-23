@@ -97,6 +97,10 @@ export function PeopleDictionary({
   const [mergeTargetCanonical, setMergeTargetCanonical] = useState<string | null>(null);
   const [mergeError, setMergeError] = useState<string | null>(null);
   const [isMerging, setIsMerging] = useState(false);
+  const [pendingDeleteGroup, setPendingDeleteGroup] = useState<{
+    groupKey: string;
+    mentions: PersonMention[];
+  } | null>(null);
   const [chunkPageLabels, setChunkPageLabels] = useState<Record<string, string>>({});
   const [isResolvingPages, setIsResolvingPages] = useState(false);
 
@@ -453,7 +457,7 @@ export function PeopleDictionary({
     });
   }, [dispatch]);
 
-  const handleDeleteMentionGroup = useCallback(async (groupKey: string, mentions: PersonMention[]) => {
+  const executeDeleteMentionGroup = useCallback(async (groupKey: string, mentions: PersonMention[]) => {
     const mentionIds = Array.from(new Set(mentions.map((mention) => mention.id)));
     if (mentionIds.length === 0) return;
 
@@ -482,6 +486,17 @@ export function PeopleDictionary({
       setDeletingMentionKey(null);
     }
   }, [expandedCanonical, fetchMentions, fetchPeople, listQueryKey, mentionsQueryKey, queryClient]);
+
+  const handleRequestDeleteMentionGroup = useCallback((groupKey: string, mentions: PersonMention[]) => {
+    if (mentions.length === 0) return;
+    setPendingDeleteGroup({ groupKey, mentions });
+  }, []);
+
+  const handleConfirmDeleteMentionGroup = useCallback(async () => {
+    if (!pendingDeleteGroup) return;
+    await executeDeleteMentionGroup(pendingDeleteGroup.groupKey, pendingDeleteGroup.mentions);
+    setPendingDeleteGroup(null);
+  }, [executeDeleteMentionGroup, pendingDeleteGroup]);
 
   if (normalizedSourceIds.length === 0) {
     return (
@@ -576,13 +591,14 @@ export function PeopleDictionary({
             <p>No people indexed yet. Enable &quot;Index people names&quot; when ingesting documents.</p>
           </div>
         ) : (
-          <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+          <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3" style={{ contentVisibility: "auto", containIntrinsicSize: "900px" }}>
             {people.map((person: PersonSummary) => {
               const expanded = expandedCanonical === person.canonical_name;
               return (
                 <div
                   key={person.canonical_name}
                   className="mb-3 rounded-xl border border-white/12 bg-white/[0.035] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+                  style={{ contentVisibility: "auto", containIntrinsicSize: "120px" }}
                 >
                   <div
                     role="button"
@@ -593,7 +609,8 @@ export function PeopleDictionary({
                       event.preventDefault();
                       setExpandedCanonical((prev) => (prev === person.canonical_name ? null : person.canonical_name));
                     }}
-                    className="w-full cursor-pointer px-3.5 py-3 text-left focus:outline-none"
+                    className="w-full cursor-pointer px-3.5 py-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
+                    aria-label={`Toggle details for ${person.canonical_name}`}
                   >
                     <div className="flex items-center justify-between gap-2">
                       <p className="truncate text-sm font-semibold text-white/92">{person.canonical_name}</p>
@@ -637,7 +654,7 @@ export function PeopleDictionary({
                   {expanded && (
                     <div className="border-t border-white/10 px-3.5 py-3">
                       {mentionsQuery.isLoading || mentionsQuery.isFetching ? (
-                        <p className="text-xs text-white/60">Loading mentions...</p>
+                        <p className="text-xs text-white/60">Loading mentions…</p>
                       ) : mentionGroups.length === 0 ? (
                         <p className="text-xs text-white/60">No mentions for this person in the selected sources.</p>
                       ) : (
@@ -666,7 +683,7 @@ export function PeopleDictionary({
                             )}
 
                             {isResolvingPages && group.pageLabel === UNKNOWN_PAGE_LABEL && (
-                              <p className="mt-1 text-[10px] text-white/55">Resolving page number...</p>
+                              <p className="mt-1 text-[10px] text-white/55">Resolving page number…</p>
                             )}
 
                             {group.mentions.length > 1 ? (
@@ -699,12 +716,12 @@ export function PeopleDictionary({
                                           </button>
                                           <button
                                             type="button"
-                                            onClick={() => handleDeleteMentionGroup(mentionDeleteKey, [mention])}
+                                            onClick={() => handleRequestDeleteMentionGroup(mentionDeleteKey, [mention])}
                                             disabled={deletingMentionKey === mentionDeleteKey}
                                             className="inline-flex items-center gap-1 rounded-md border border-red-400/35 bg-red-500/[0.08] px-1.5 py-1 text-[10px] text-red-300 transition-colors hover:bg-red-500/[0.16] disabled:opacity-50"
                                           >
                                             <Trash2 className="h-3 w-3" />
-                                            {deletingMentionKey === mentionDeleteKey ? "Deleting..." : "Delete"}
+                                            {deletingMentionKey === mentionDeleteKey ? "Deleting…" : "Delete"}
                                           </button>
                                         </div>
                                       </div>
@@ -714,13 +731,13 @@ export function PeopleDictionary({
 
                                 <button
                                   type="button"
-                                  onClick={() => handleDeleteMentionGroup(group.key, group.mentions)}
+                                  onClick={() => handleRequestDeleteMentionGroup(group.key, group.mentions)}
                                   disabled={deletingMentionKey === group.key}
                                   className="inline-flex items-center gap-1 rounded-md border border-red-400/35 bg-red-500/[0.08] px-2 py-1 text-[11px] text-red-300 transition-colors hover:bg-red-500/[0.16] disabled:opacity-50"
                                 >
                                   <Trash2 className="h-3.5 w-3.5" />
                                   {deletingMentionKey === group.key
-                                    ? "Deleting all..."
+                                    ? "Deleting all…"
                                     : `Delete all ${group.mentions.length}`}
                                 </button>
                               </div>
@@ -739,12 +756,12 @@ export function PeopleDictionary({
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() => handleDeleteMentionGroup(group.key, group.mentions)}
+                                  onClick={() => handleRequestDeleteMentionGroup(group.key, group.mentions)}
                                   disabled={deletingMentionKey === group.key}
                                   className="inline-flex items-center gap-1 rounded-md border border-red-400/35 bg-red-500/[0.08] px-2 py-1 text-[11px] text-red-300 transition-colors hover:bg-red-500/[0.16] disabled:opacity-50"
                                 >
                                   <Trash2 className="h-3.5 w-3.5" />
-                                  {deletingMentionKey === group.key ? "Deleting..." : "Delete"}
+                                  {deletingMentionKey === group.key ? "Deleting…" : "Delete"}
                                 </button>
                               </div>
                             )}
@@ -852,6 +869,40 @@ export function PeopleDictionary({
             >
               {isMerging && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
               {isMerging ? "Merging..." : "Merge Into Selected"}
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={pendingDeleteGroup !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingDeleteGroup(null);
+        }}
+      >
+        <DialogContent className="max-w-md border border-white/18 bg-[#111317] text-white sm:rounded-xl [&>button]:border [&>button]:border-white/20 [&>button]:bg-black/45 [&>button]:text-white/80 [&>button]:opacity-100 [&>button]:hover:text-white">
+          <DialogHeader>
+            <DialogTitle className="text-base text-white">Delete Mention{(pendingDeleteGroup?.mentions.length ?? 0) > 1 ? "s" : ""}?</DialogTitle>
+            <DialogDescription className="text-xs text-white/65">
+              This permanently removes {(pendingDeleteGroup?.mentions.length ?? 0)} indexed mention{(pendingDeleteGroup?.mentions.length ?? 0) === 1 ? "" : "s"} from the people dictionary.
+            </DialogDescription>
+          </DialogHeader>
+
+          <DialogFooter className="flex items-center justify-between gap-2 sm:justify-between">
+            <button
+              type="button"
+              onClick={() => setPendingDeleteGroup(null)}
+              className="rounded-md border border-white/18 bg-white/[0.04] px-3 py-1.5 text-xs text-white/82 transition-colors hover:bg-white/10"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleConfirmDeleteMentionGroup()}
+              disabled={deletingMentionKey !== null}
+              className="rounded-md border border-red-400/35 bg-red-500/[0.14] px-3 py-1.5 text-xs font-medium text-red-100 transition-colors hover:bg-red-500/[0.22] disabled:opacity-60"
+            >
+              Delete
             </button>
           </DialogFooter>
         </DialogContent>

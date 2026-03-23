@@ -190,6 +190,7 @@ export function IngestModal({
           <button
             onClick={onClose}
             className="p-1 text-muted-foreground hover:text-foreground hover:bg-white/5 rounded-lg transition-colors"
+            aria-label="Close add source modal"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -205,6 +206,14 @@ export function IngestModal({
             onDragLeave={() => setDragOver(false)}
             onDrop={handleDrop}
             onClick={() => fileInputRef.current?.click()}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter" && e.key !== " ") return;
+              e.preventDefault();
+              fileInputRef.current?.click();
+            }}
+            role="button"
+            tabIndex={0}
+            aria-label="Choose source files"
             className={`flex flex-col items-center justify-center gap-2 px-4 py-8 border-2 border-dashed rounded-xl cursor-pointer transition-colors ${
               dragOver
                 ? "border-white/50 bg-white/8"
@@ -219,6 +228,7 @@ export function IngestModal({
               multiple
               accept=".pdf,.md,.markdown"
               className="hidden"
+              aria-label="Choose source files"
               onChange={(e) => {
                 if (e.target.files && e.target.files.length > 0) {
                   handleFileSelect(e.target.files);
@@ -274,7 +284,7 @@ export function IngestModal({
                   })
                 }
                 placeholder="Auto-generated from filename"
-                className="w-full px-3 py-2 rounded-lg text-sm text-foreground placeholder-muted-foreground focus:outline-none transition-colors"
+                className="w-full px-3 py-2 rounded-lg text-sm text-foreground placeholder-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 transition-colors"
                 style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }}
               />
               <p className="mt-1 text-[11px] text-(--muted-foreground)/60">
@@ -300,7 +310,7 @@ export function IngestModal({
                           return next;
                         })
                       }
-                      className="w-full px-3 py-1.5 rounded-lg text-sm text-foreground placeholder-muted-foreground focus:outline-none"
+                      className="w-full px-3 py-1.5 rounded-lg text-sm text-foreground placeholder-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
                       style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }}
                     />
                   </div>
@@ -357,7 +367,7 @@ export function IngestModal({
                         })
                       }
                       placeholder="e.g. Smith, J. et al. (2024) 'Climate Change Review'"
-                      className="w-full px-3 py-2 rounded-lg text-sm text-foreground placeholder-muted-foreground focus:outline-none transition-colors"
+                      className="w-full px-3 py-2 rounded-lg text-sm text-foreground placeholder-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 transition-colors"
                       style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }}
                     />
                   ) : (
@@ -378,7 +388,7 @@ export function IngestModal({
                               })
                             }
                             placeholder="e.g. Smith, J. (2024) 'Title'"
-                            className="w-full px-3 py-1.5 rounded-lg text-sm text-foreground placeholder-muted-foreground focus:outline-none"
+                            className="w-full px-3 py-1.5 rounded-lg text-sm text-foreground placeholder-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
                             style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }}
                           />
                         </div>
@@ -416,7 +426,7 @@ export function IngestModal({
                     step={1}
                     value={pageOffset}
                     onChange={(e) => setPageOffset(Math.max(1, parseInt(e.target.value, 10) || 1))}
-                    className="w-32 px-3 py-2 rounded-lg text-sm text-foreground placeholder-muted-foreground focus:outline-none transition-colors"
+                    className="w-32 px-3 py-2 rounded-lg text-sm text-foreground placeholder-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 transition-colors"
                     style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)" }}
                   />
                   <p className="text-[11px] text-(--muted-foreground)/70">

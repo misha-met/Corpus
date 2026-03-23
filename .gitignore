@@ -63,3 +63,4 @@ chroma/
 # Ignore unsaved/scratch editor files created by VS Code or browsers
 # e.g. "Untitled-1", "Untitled-7" from DevTools/Editor paste
 Untitled*
+benchmarks/qwen35_m4max_rag_energy_benchmark.py

@@ -96,6 +96,7 @@ export const PickerContent = React.forwardRef<
           "0 8px 32px rgba(0,0,0,0.7), 0 2px 8px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.05)",
         ...style,
       }}
+      role="listbox"
       {...props}
     >
       {children}
@@ -117,10 +118,9 @@ export const PickerItem = React.forwardRef<HTMLButtonElement, PickerItemProps>(
     <button
       ref={ref}
       type="button"
-      role="option"
-      aria-selected={selected}
+      aria-pressed={selected}
       className={cn(
-        "relative flex w-full cursor-default select-none items-start gap-2 rounded-lg py-2 pl-3 pr-9 text-sm outline-none text-left",
+        "relative flex w-full cursor-default select-none items-start gap-2 rounded-lg py-2 pl-3 pr-9 text-sm outline-none text-left focus-visible:ring-2 focus-visible:ring-white/30",
         "hover:bg-white/8 focus-visible:bg-white/8 transition-colors",
         "disabled:pointer-events-none disabled:opacity-50",
         className,

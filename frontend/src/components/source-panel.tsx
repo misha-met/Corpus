@@ -13,6 +13,14 @@ import { File } from "@/components/assistant-ui/file";
 import { useAppState, useAppDispatch } from "@/context/app-context";
 import { Checkbox } from "@/components/ui/checkbox";
 import { MarkdownRenderer } from "@/components/markdown-renderer";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 interface SourcePanelProps {
   selectedSourceIds: string[];
@@ -50,6 +58,7 @@ export function SourcePanel({
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showIngestModal, setShowIngestModal] = useState(false);
+  const [pendingDeleteSourceId, setPendingDeleteSourceId] = useState<string | null>(null);
   const [highlightSourceId, setHighlightSourceId] = useState<string | null>(null);
   const [activeSourceId, setActiveSourceId] = useState<string | null>(null);
   const [uploadQueue, setUploadQueue] = useState<UploadRequest[]>([]);
@@ -304,9 +313,14 @@ export function SourcePanel({
     }
   }
 
-  async function handleDelete(sourceId: string, e: React.MouseEvent) {
+  function handleRequestDelete(sourceId: string, e: React.MouseEvent) {
     e.stopPropagation();
-    if (!confirm(`Delete source "${sourceId}" and all its data?`)) return;
+    setPendingDeleteSourceId(sourceId);
+  }
+
+  async function handleConfirmDelete() {
+    if (!pendingDeleteSourceId) return;
+    const sourceId = pendingDeleteSourceId;
 
     try {
       await sourceApi.deleteSource(sourceId);
@@ -328,6 +342,8 @@ export function SourcePanel({
       setError(
         err instanceof Error ? err.message : "Failed to delete source"
       );
+    } finally {
+      setPendingDeleteSourceId(null);
     }
   }
 
@@ -387,6 +403,7 @@ export function SourcePanel({
             disabled={isLoading}
             className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-white/5 rounded transition-colors disabled:opacity-50"
             title="Refresh sources"
+            aria-label="Refresh sources"
           >
             <svg
               className={`w-4 h-4 ${isLoading ? "animate-spin" : ""}`}
@@ -406,6 +423,7 @@ export function SourcePanel({
             onClick={onCollapse}
             className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-white/5 rounded transition-colors"
             title="Collapse sidebar"
+            aria-label="Collapse sidebar"
           >
             <svg
               className="w-4 h-4"
@@ -540,6 +558,7 @@ export function SourcePanel({
                 onClick={() => setUploadStatus(null)}
                 className="shrink-0 p-0.5 text-red-400/60 hover:text-red-300 transition-colors"
                 title="Dismiss"
+                aria-label="Dismiss upload error"
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -557,7 +576,7 @@ export function SourcePanel({
             return (
               <div
                 key={source.source_id}
-                className={`px-3 py-2.5 rounded-lg hover:bg-[#1a1a1a] transition-colors group cursor-pointer ${isHighlighted ? "bg-[#1c1c1c]" : ""
+                className={`px-3 py-2.5 rounded-lg hover:bg-[#1a1a1a] transition-colors group cursor-pointer focus-visible:ring-2 focus-visible:ring-white/30 ${isHighlighted ? "bg-[#1c1c1c]" : ""
                   }`}
                 onClick={() =>
                   setActiveSourceId((prev) =>
@@ -566,6 +585,7 @@ export function SourcePanel({
                 }
                 role="button"
                 tabIndex={0}
+                aria-label={`${source.source_id} source details`}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
@@ -617,9 +637,10 @@ export function SourcePanel({
                   {/* Delete (hover) */}
                   {!isPending && (
                     <button
-                      onClick={(e) => handleDelete(source.source_id, e)}
+                      onClick={(e) => handleRequestDelete(source.source_id, e)}
                       className="shrink-0 p-1 text-muted-foreground/40 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all"
                       title="Delete source"
+                      aria-label={`Delete source ${source.source_id}`}
                     >
                       <svg
                         className="w-3.5 h-3.5"
@@ -696,6 +717,44 @@ export function SourcePanel({
           existingSourceIds={displaySources.map((s) => s.source_id)}
         />
       )}
+
+      <Dialog
+        open={pendingDeleteSourceId !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingDeleteSourceId(null);
+        }}
+      >
+        <DialogContent className="max-w-md border border-white/18 bg-[#111317] text-white sm:rounded-xl [&>button]:border [&>button]:border-white/20 [&>button]:bg-black/45 [&>button]:text-white/80 [&>button]:opacity-100 [&>button]:hover:text-white">
+          <DialogHeader>
+            <DialogTitle className="text-base text-white">Delete Source?</DialogTitle>
+            <DialogDescription className="text-xs text-white/65">
+              This removes the source and all related data from this workspace.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="rounded-md border border-red-400/25 bg-red-500/10 px-3 py-2 text-xs text-red-100">
+            <span className="text-red-200/75">Source:</span>{" "}
+            <span className="font-semibold">{pendingDeleteSourceId ?? "Unknown"}</span>
+          </div>
+
+          <DialogFooter className="flex items-center justify-between gap-2 sm:justify-between">
+            <button
+              type="button"
+              onClick={() => setPendingDeleteSourceId(null)}
+              className="rounded-md border border-white/18 bg-white/[0.04] px-3 py-1.5 text-xs text-white/82 transition-colors hover:bg-white/10"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleConfirmDelete()}
+              className="rounded-md border border-red-400/35 bg-red-500/[0.14] px-3 py-1.5 text-xs font-medium text-red-100 transition-colors hover:bg-red-500/[0.22]"
+            >
+              Delete Source
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

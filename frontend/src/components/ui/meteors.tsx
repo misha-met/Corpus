@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { cn } from "@/lib/utils"
 
 export interface MeteorsProps {
@@ -34,6 +34,17 @@ export function Meteors({
   color = "#ffffff",
   tailColor = "#ffffff",
 }: MeteorsProps) {
+  const [reducedMotion, setReducedMotion] = useState(false)
+
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)")
+    const update = () => setReducedMotion(media.matches)
+    update()
+    media.addEventListener("change", update)
+    return () => media.removeEventListener("change", update)
+  }, [])
+
   const meteors = useMemo<MeteorData[]>(
     () =>
       Array.from({ length: count }, (_, i) => ({
@@ -67,7 +78,7 @@ export function Meteors({
       <div className="pointer-events-none absolute" style={{ inset: "-2px", background: "#0a0a0a" }} />
 
       {/* Meteors */}
-      {meteors.map(meteor => (
+      {!reducedMotion && meteors.map(meteor => (
         <span
           key={meteor.id}
           className="absolute rounded-full"

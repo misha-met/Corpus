@@ -16,6 +16,14 @@ import {
   type GeoMentionsResponse,
 } from "@/lib/api-client";
 import { useAppDispatch } from "@/context/app-context";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 type GeoFeatureProperties = {
   place_name: string;
@@ -136,6 +144,7 @@ export function CorpusMap({
   const [hoverPopup, setHoverPopup] = useState<HoverPopup | null>(null);
   const [selectedGroup, setSelectedGroup] = useState<GeoMentionGroup | null>(null);
   const [deletingMentionId, setDeletingMentionId] = useState<string | null>(null);
+  const [pendingDeleteMention, setPendingDeleteMention] = useState<GeoMentionDetail | null>(null);
 
   const normalizedSourceIds = useMemo(() => {
     const seen = new Set<string>();
@@ -401,6 +410,12 @@ export function CorpusMap({
     }
   }, [fetchMentions, normalizedSourceIds, queryClient, queryKey, selectedGroup]);
 
+  const handleConfirmDeleteMention = useCallback(async () => {
+    if (!pendingDeleteMention) return;
+    await handleDeleteMention(pendingDeleteMention.id);
+    setPendingDeleteMention(null);
+  }, [handleDeleteMention, pendingDeleteMention]);
+
   if (isLoading) {
     return (
       <div className="flex h-full items-center justify-center text-sm text-gray-400">
@@ -495,6 +510,7 @@ export function CorpusMap({
           <button
             className="rounded-md border border-white/14 bg-white/5 px-2.5 py-1 text-xs text-white/74 transition-colors hover:bg-white/12 hover:text-white"
             onClick={() => setSelectedGroup(null)}
+            aria-label="Close place details"
           >
             Close
           </button>
@@ -524,10 +540,11 @@ export function CorpusMap({
                 </button>
                 <button
                   type="button"
-                  onClick={() => handleDeleteMention(mention.id)}
+                  onClick={() => setPendingDeleteMention(mention)}
                   disabled={deletingMentionId === mention.id}
                   className="rounded-md border border-red-400/35 bg-red-500/[0.08] p-1 text-red-300 transition-colors hover:bg-red-500/[0.16] disabled:opacity-50"
                   title="Delete mention"
+                  aria-label={`Delete mention ${mention.matched_input} from ${mention.source_id}`}
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                 </button>
@@ -536,6 +553,45 @@ export function CorpusMap({
           ))}
         </div>
       </aside>
+
+      <Dialog
+        open={pendingDeleteMention !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingDeleteMention(null);
+        }}
+      >
+        <DialogContent className="max-w-md border border-white/18 bg-[#111317] text-white sm:rounded-xl [&>button]:border [&>button]:border-white/20 [&>button]:bg-black/45 [&>button]:text-white/80 [&>button]:opacity-100 [&>button]:hover:text-white">
+          <DialogHeader>
+            <DialogTitle className="text-base text-white">Delete Geo Mention?</DialogTitle>
+            <DialogDescription className="text-xs text-white/65">
+              This will permanently remove this map mention from the indexed geo annotations.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="rounded-md border border-red-400/25 bg-red-500/10 px-3 py-2 text-xs text-red-100">
+            <span className="font-semibold">{pendingDeleteMention?.matched_input ?? "Mention"}</span>
+            <span className="text-red-200/75"> in {pendingDeleteMention?.source_id ?? "source"}</span>
+          </div>
+
+          <DialogFooter className="flex items-center justify-between gap-2 sm:justify-between">
+            <button
+              type="button"
+              onClick={() => setPendingDeleteMention(null)}
+              className="rounded-md border border-white/18 bg-white/[0.04] px-3 py-1.5 text-xs text-white/82 transition-colors hover:bg-white/10"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleConfirmDeleteMention()}
+              disabled={deletingMentionId !== null}
+              className="rounded-md border border-red-400/35 bg-red-500/[0.14] px-3 py-1.5 text-xs font-medium text-red-100 transition-colors hover:bg-red-500/[0.22] disabled:opacity-60"
+            >
+              Delete Mention
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

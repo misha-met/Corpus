@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import { cn } from "@/lib/utils"
 
 export interface RainBackgroundProps {
@@ -46,8 +46,22 @@ export function RainBackground({
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const flashRef = useRef<HTMLDivElement>(null)
+  const [reducedMotion, setReducedMotion] = useState(false)
 
   useEffect(() => {
+    if (typeof window === "undefined") return
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)")
+    const update = () => setReducedMotion(media.matches)
+    update()
+    media.addEventListener("change", update)
+    return () => media.removeEventListener("change", update)
+  }, [])
+
+  useEffect(() => {
+    if (reducedMotion) {
+      return
+    }
+
     const canvas = canvasRef.current
     const container = containerRef.current
     const flash = flashRef.current
@@ -155,7 +169,7 @@ export function RainBackground({
       cancelAnimationFrame(animationId)
       ro.disconnect()
     }
-  }, [count, intensity, angle, color, lightning])
+  }, [count, intensity, angle, color, lightning, reducedMotion])
 
   return (
     <div
