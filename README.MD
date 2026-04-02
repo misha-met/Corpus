@@ -43,7 +43,6 @@ Corpus runs entirely on your machine. Documents are ingested into a local vector
 | **Citation export** | Responses exportable as formatted footnotes or Harvard bibliography entries |
 | **Geospatial mapping** | Optional ingest-time place NER + offline geocoding, with clustered map markers filtered by source selection |
 | **People dictionary** | Optional ingest-time person NER + canonical name matching, with searchable mentions, merge tools, and document jump-to-context |
-| **Ingest NER diagnostics** | Ingest responses report whether GLiNER ran or a fallback path was used (`gliner`, `regex_fallback`, `empty`) so degraded indexing is visible |
 | **Phoenix tracing** | Optional OpenTelemetry tracing with trace/span ID propagation and in-UI feedback annotations |
 
 ---
